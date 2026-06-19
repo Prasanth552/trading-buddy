@@ -1,0 +1,27 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Data & logs
+data/*.db
+data/*.db-journal
+data/*.json
+data/.kite_session.json
+logs/*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Keep empty dirs tracked
+!data/.gitkeep
+!logs/.gitkeep

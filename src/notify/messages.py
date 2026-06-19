@@ -1,0 +1,101 @@
+"""User-facing Telegram alert text — language-aware (config.ALERT_LANGUAGE).
+
+Tamil-first for a non-technical reader; instrument names (NIFTY/SENSEX) and all
+numbers stay as-is. Console/logs are NOT routed through here — they stay English.
+"""
+from __future__ import annotations
+
+from typing import Any
+
+import config
+
+
+def _ta() -> bool:
+    return config.ALERT_LANGUAGE.lower() in ("tamil", "ta")
+
+
+def started(mode: str) -> str:
+    if _ta():
+        return (f"🤖 *டிரேடிங் பட்டி தொடங்கியது* ({mode} முறை)\n"
+                "இது பயிற்சி மட்டுமே — உண்மையான பணம் இல்லை. சந்தை திறந்திருக்கும் "
+                "நேரத்தில் தானாகவே கவனித்து, முக்கியத் தகவல்களை இங்கே அனுப்பும்.")
+    return f"🤖 Trading Buddy started (MODE={mode})."
+
+
+def signal_alert(sig: dict[str, Any]) -> str:
+    long = sig.get("direction") == "long"
+    if _ta():
+        head = ("🟢 வாங்கும் வாய்ப்பு (விலை மேலே போகலாம்)" if long
+                else "🔴 விற்கும் வாய்ப்பு (விலை கீழே போகலாம்)")
+        return (f"*வர்த்தக சமிக்ஞை* — {head}\n"
+                f"*{sig.get('symbol')}*\n"
+                f"நுழைவு விலை: `{sig.get('entry')}`\n"
+                f"ஸ்டாப் (நஷ்டம் தடுக்க): `{sig.get('stop')}`\n"
+                f"இலக்கு (லாப எதிர்பார்ப்பு): `{sig.get('target')}`\n"
+                f"அளவு: {sig.get('qty')} யூனிட் · அதிகபட்ச இடர்: ₹{sig.get('max_risk')}")
+    arrow = "🟢 LONG" if long else "🔴 SHORT"
+    return (f"*TRADE ALERT* {arrow}\n*{sig.get('symbol')}*\n"
+            f"Entry: `{sig.get('entry')}`\nStop:  `{sig.get('stop')}`\n"
+            f"Target: `{sig.get('target')}`\n"
+            f"Qty: {sig.get('qty')} lot(s) | Max risk: ₹{sig.get('max_risk')}")
+
+
+def order_placed(symbol: str, direction: str, qty: int, entry: float,
+                 stop: float, risk: float, mode: str) -> str:
+    emoji = "🟢" if direction == "long" else "🔴"
+    if _ta():
+        return (f"{emoji} *{mode} ஆர்டர்* {symbol}\n"
+                f"{qty} யூனிட் ~{entry} விலையில் வாங்கப்பட்டது.\n"
+                f"ஸ்டாப் (நஷ்டம் தடுக்க): {stop} · இடர்: ₹{risk:,.0f}\n"
+                "(பயிற்சி வர்த்தகம் — உண்மையான பணம் இல்லை)")
+    return (f"{emoji} *{mode} ORDER* {symbol}\n"
+            f"BUY {qty} @ ~{entry}, stop {stop} (risk ₹{risk:,.0f})")
+
+
+def exit_msg(symbol: str, reason: str, exit_price: float, pnl: float) -> str:
+    profit = reason == "target"
+    if _ta():
+        if profit:
+            return (f"🎯 *லாபத்தில் வெளியேறியது* {symbol}\n"
+                    f"விலை {exit_price} ஐ அடைந்தது. லாபம்: ₹{pnl:,.2f} 🎉")
+        return (f"🛑 *ஸ்டாப்பில் வெளியேறியது* {symbol}\n"
+                f"விலை {exit_price} ஐ அடைந்தது. நஷ்டம்: ₹{pnl:,.2f}\n"
+                "(திட்டமிட்ட சிறிய நஷ்டம் — பெரிய நஷ்டத்தைத் தடுக்க)")
+    emoji = "🎯" if profit else "🛑"
+    return f"{emoji} *EXIT ({reason})* {symbol} @ {exit_price} | P&L ₹{pnl:,.2f}"
+
+
+def eod_summary(date: str, mode: str, sig_count: int, trades_count: int,
+                max_trades: int, pnl: float, tripped: bool,
+                orders: list[str] | None = None) -> str:
+    if _ta():
+        ks = "செயல்பட்டது" if tripped else "இயல்பு நிலையில்"
+        lines = [
+            f"🔔 *இன்றைய சுருக்கம் — {date}*",
+            f"முறை: `{mode}`",
+            f"கண்டறிந்த வாய்ப்புகள்: {sig_count}",
+            f"வர்த்தகங்கள்: {trades_count}/{max_trades}",
+            f"இன்றைய லாபம்/நஷ்டம்: ₹{pnl:.2f}",
+            f"பாதுகாப்பு சுவிட்ச்: {ks}",
+        ]
+        if orders:
+            lines.append("ஆர்டர்கள்:")
+            lines += orders
+        return "\n".join(lines)
+    ks = "TRIPPED" if tripped else "armed"
+    lines = [
+        f"🔔 *EOD Summary — {date}*", f"Mode: `{mode}`",
+        f"Signals fired: {sig_count}", f"Trades: {trades_count}/{max_trades}",
+        f"Realised P&L: ₹{pnl:.2f}", f"Kill switch: {ks}",
+    ]
+    if orders:
+        lines.append("Orders:")
+        lines += orders
+    return "\n".join(lines)
+
+
+def kill_switch() -> str:
+    if _ta():
+        return ("🛑 *பாதுகாப்பு சுவிட்ச் செயல்பட்டது* — இன்றைய நஷ்ட வரம்பை எட்டியது. "
+                "பணத்தைப் பாதுகாக்க இன்றைக்கு வர்த்தகம் நிறுத்தப்பட்டது.")
+    return "🛑 *KILL SWITCH TRIPPED* — daily loss limit reached. Trading halted for today."

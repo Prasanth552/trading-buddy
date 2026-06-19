@@ -1,0 +1,16 @@
+[Unit]
+Description=Trading Buddy - trading scheduler (sandbox)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/Trading-Buddy
+ExecStart=/home/ubuntu/Trading-Buddy/.venv/bin/python main.py
+Restart=always
+RestartSec=15
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
