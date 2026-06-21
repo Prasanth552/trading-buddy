@@ -16,13 +16,12 @@ MODE: str = "PAPER"  # "PAPER" | "LIVE"  — keep PAPER until proven.
 # Instruments to ANALYSE (the underlying index charts).
 # Trades are executed as WEEKLY OPTIONS / defined-risk spreads on these.
 WATCHLIST: list[str] = [
-    "NSE:NIFTY 50",   # primary  — weekly expiry, lot 65
-    "BSE:SENSEX",     # secondary — weekly expiry (different day), lot 20
+    "NSE:NIFTY 50",    # weekly expiry, lot 65
+    "BSE:SENSEX",      # weekly expiry (different day), lot 20
+    "NSE:NIFTY BANK",  # monthly expiry, lot 30 — now traded too (more setups)
 ]
 
-WATCH_ONLY: list[str] = [
-    "NSE:NIFTY BANK",  # sentiment read only — monthly expiry, too volatile for this capital
-]
+WATCH_ONLY: list[str] = []   # all analysed symbols are now traded
 
 # --------------------------------------------------------------------------
 # Capital & risk
@@ -68,8 +67,8 @@ RSI_OVERSOLD: float = 30.0
 # Signal engine (Phase 3) — low-risk rule parameters
 # --------------------------------------------------------------------------
 # How close (as a fraction of price) the LTP must be to a pivot to count as
-# "near" it — adapts to each instrument's price scale.
-PIVOT_PROXIMITY_PCT: float = 0.004      # 0.4%
+# "near" it — adapts to each instrument's price scale. Wider = more setups.
+PIVOT_PROXIMITY_PCT: float = 0.006      # 0.6%
 # Protective-stop buffer placed just beyond the pivot, as a fraction of price.
 STOP_BUFFER_PCT: float = 0.0015         # 0.15%
 # Target distance as a multiple of the (entry - stop) risk.

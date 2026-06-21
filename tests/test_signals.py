@@ -83,6 +83,16 @@ def test_news_conflict_blocks_long() -> None:
     check("long blocked by bearish news", s is None)
 
 
+def test_mild_news_does_not_block() -> None:
+    print("mild net sentiment no longer blocks a clean setup:")
+    mild_bear = {"net": "bearish", "has_high_bull": False, "has_high_bear": False}
+    s = engine.evaluate(snap(98.1, 35.0, ["hammer"]), mild_bear)
+    check("mild bearish net still allows the long", s is not None and s.direction == "long")
+    strong_bear = {"net": "bearish", "has_high_bull": False, "has_high_bear": True}
+    s2 = engine.evaluate(snap(98.1, 35.0, ["hammer"]), strong_bear)
+    check("high-confidence bearish still blocks the long", s2 is None)
+
+
 def test_news_confidence_boost() -> None:
     print("aligned news + pattern -> high confidence in rationale:")
     bullish = {"net": "bullish", "has_high_bull": True, "has_high_bear": False}
@@ -113,6 +123,7 @@ def main() -> int:
     test_short_blocked_oversold()
     test_no_setup_midrange()
     test_news_conflict_blocks_long()
+    test_mild_news_does_not_block()
     test_news_confidence_boost()
     test_aggregate_news()
     failed = check.failed  # type: ignore[attr-defined]
