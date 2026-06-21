@@ -105,6 +105,15 @@ def api_performance(_: None = Depends(require_auth)) -> JSONResponse:
     return JSONResponse(compute_stats(db.closed_trades_with_context()))
 
 
+@app.get("/api/attention")
+def api_attention(_: None = Depends(require_auth)) -> JSONResponse:
+    from src.utils.attention import attention_items
+    try:
+        return JSONResponse(attention_items())
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse([{"level": "error", "msg": f"attention check failed: {exc}"}])
+
+
 @app.post("/api/pause")
 def api_pause(_: None = Depends(require_auth)) -> JSONResponse:
     state.set_paused(True)
@@ -148,6 +157,10 @@ _PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
  button{flex:1;padding:11px;border:0;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer}
  .pause{background:#3a2a13;color:#ffb454} .resume{background:#13321f;color:var(--grn)}
  .scroll{overflow-x:auto} .empty{color:var(--mut);font-size:13px;padding:8px 0}
+ .att{padding:9px 12px;border-radius:9px;margin-bottom:7px;font-size:13px;border-left:4px solid}
+ .att.ok{background:rgba(39,194,129,.08);border-color:var(--grn)}
+ .att.warn{background:rgba(255,180,84,.10);border-color:#ffb454}
+ .att.error{background:rgba(255,93,93,.10);border-color:var(--red)}
 </style></head><body>
 <h1>📈 Trading Buddy</h1><div class=sub id=sub>loading…</div>
 <div class=grid id=cards></div>
@@ -158,6 +171,7 @@ _PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
 <h2>Recent trades</h2><div class=scroll id=trades></div>
 <h2>Recent signals</h2><div class=scroll id=signals></div>
 <h2>Latest news</h2><div class=scroll id=news></div>
+<h2>⚙️ Needs attention</h2><div id=attention></div>
 <script>
 const $=id=>document.getElementById(id);
 function tbl(rows,cols,wrap){if(!rows||!rows.length)return '<div class=empty>none</div>';
@@ -196,6 +210,8 @@ async function load(){
     ['Entry',r=>r.entry],['Stop',r=>r.stop],['Target',r=>r.target]]);
   const N=await (await fetch('/api/news')).json();
   $('news').innerHTML=tbl(N,[['Sent',r=>r.sentiment||'-'],['Sym',r=>r.symbol||'-'],['Headline',r=>(r.headline||'').slice(0,70)]],true);
+  const A=await (await fetch('/api/attention')).json();
+  $('attention').innerHTML=A.map(a=>'<div class="att '+a.level+'">'+(a.level==='error'?'⛔ ':a.level==='warn'?'⚠️ ':'✅ ')+a.msg+'</div>').join('');
  }catch(e){$('sub').textContent='error loading: '+e}
 }
 load();setInterval(load,20000);
