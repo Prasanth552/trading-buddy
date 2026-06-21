@@ -99,6 +99,12 @@ def api_news(_: None = Depends(require_auth)) -> JSONResponse:
         "FROM news_items ORDER BY id DESC LIMIT 20"))
 
 
+@app.get("/api/performance")
+def api_performance(_: None = Depends(require_auth)) -> JSONResponse:
+    from src.review.performance import compute_stats
+    return JSONResponse(compute_stats(db.closed_trades_with_context()))
+
+
 @app.post("/api/pause")
 def api_pause(_: None = Depends(require_auth)) -> JSONResponse:
     state.set_paused(True)
@@ -147,6 +153,7 @@ _PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
 <div class=grid id=cards></div>
 <div class=btns><button class=pause onclick="ctl('pause')">⏸ Pause</button>
  <button class=resume onclick="ctl('resume')">▶ Resume</button></div>
+<h2>Performance (all closed trades)</h2><div class=grid id=perf></div>
 <h2>Open positions</h2><div class=scroll id=positions></div>
 <h2>Recent trades</h2><div class=scroll id=trades></div>
 <h2>Recent signals</h2><div class=scroll id=signals></div>
@@ -170,6 +177,13 @@ async function load(){
    ['Trades today',s.trades_count+' / '+s.max_trades],
    ["Today's P&L",pnl(s.realised_pnl)],
    ['Kill switch',ks],['Loss limit','₹'+s.max_daily_loss]
+  ].map(c=>'<div class=card><div class=k>'+c[0]+'</div><div class=v>'+c[1]+'</div></div>').join('');
+  const pf=await (await fetch('/api/performance')).json();
+  $('perf').innerHTML=[
+   ['Win rate', pf.n? (pf.win_rate*100).toFixed(0)+'%':'—'],
+   ['Trades', pf.wins+'W / '+pf.losses+'L'],
+   ['Total P&L', pnl(pf.total_pnl)],
+   ['Per trade', pnl(pf.expectancy)]
   ].map(c=>'<div class=card><div class=k>'+c[0]+'</div><div class=v>'+c[1]+'</div></div>').join('');
   const P=await (await fetch('/api/positions')).json();
   $('positions').innerHTML=tbl(P,[['Symbol',r=>r.symbol],['Side',r=>r.side],['Qty',r=>r.qty],

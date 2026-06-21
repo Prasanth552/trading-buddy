@@ -588,6 +588,22 @@ def cmd_eod() -> int:
     return 0
 
 
+def cmd_review() -> int:
+    """Generate the AI performance review now (and send to Telegram)."""
+    from src import runner
+    from src.storage import db
+    db.init_db()
+    notifier = None
+    try:
+        from src.notify.telegram_bot import TelegramNotifier
+        notifier = TelegramNotifier()
+    except Exception:  # noqa: BLE001
+        notifier = None
+    text = runner.weekly_review(notifier)
+    print("\n" + text)
+    return 0
+
+
 def cmd_dashboard() -> int:
     """Serve the interactive web dashboard (status, trades, P&L, pause/resume)."""
     import os
@@ -679,6 +695,10 @@ def main(argv: list[str] | None = None) -> int:
         help="Serve the interactive web dashboard (status, trades, P&L, controls).",
     )
     parser.add_argument(
+        "--review", action="store_true",
+        help="Generate the AI performance review now (learn-from-mistakes).",
+    )
+    parser.add_argument(
         "--confirm-live", action="store_true",
         help="Required (with MODE=LIVE) to enable real order placement.",
     )
@@ -716,6 +736,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_monitor()
     if args.dashboard:
         return cmd_dashboard()
+    if args.review:
+        return cmd_review()
     return run_live_loop(confirm_live=args.confirm_live)
 
 

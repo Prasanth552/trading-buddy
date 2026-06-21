@@ -108,6 +108,10 @@ def init_db() -> None:
                 conn.execute(f"ALTER TABLE trades ADD COLUMN {col} REAL")
         if "broker_key" not in cols:
             conn.execute("ALTER TABLE trades ADD COLUMN broker_key TEXT")
+        # Trade-journal context (JSON) on the signal: the conditions at decision time.
+        sig_cols = {r[1] for r in conn.execute("PRAGMA table_info(signals)")}
+        if "context" not in sig_cols:
+            conn.execute("ALTER TABLE signals ADD COLUMN context TEXT")
 
 
 def table_names() -> list[str]:
@@ -160,14 +164,30 @@ def insert_signal(signal: dict[str, Any]) -> int:
     with get_conn() as conn:
         cur = conn.execute(
             """INSERT INTO signals
-               (ts, symbol, direction, entry, stop, target, qty, max_risk, rationale, status)
+               (ts, symbol, direction, entry, stop, target, qty, max_risk, rationale,
+                status, context)
                VALUES (:ts, :symbol, :direction, :entry, :stop, :target,
-                       :qty, :max_risk, :rationale, :status)""",
-            {k: signal.get(k) for k in
-             ("ts", "symbol", "direction", "entry", "stop", "target",
-              "qty", "max_risk", "rationale", "status")},
+                       :qty, :max_risk, :rationale, :status, :context)""",
+            {**{k: signal.get(k) for k in
+                ("ts", "symbol", "direction", "entry", "stop", "target",
+                 "qty", "max_risk", "rationale", "status")},
+             "context": signal.get("context")},
         )
         return cur.lastrowid
+
+
+def closed_trades_with_context(limit: int = 200) -> list[sqlite3.Row]:
+    """Closed trades joined with the signal context (the trade journal)."""
+    with get_conn() as conn:
+        return conn.execute(
+            """SELECT t.ts, t.symbol, t.qty, t.price AS entry_premium,
+                      t.exit_price, t.pnl, t.status,
+                      s.direction, s.entry, s.stop, s.target, s.context
+               FROM trades t LEFT JOIN signals s ON t.signal_id = s.id
+               WHERE t.status LIKE 'CLOSED%' AND t.pnl IS NOT NULL
+               ORDER BY t.id DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
 
 
 def recent_news_for_keyword(keyword: str, since_iso: str) -> list[sqlite3.Row]:

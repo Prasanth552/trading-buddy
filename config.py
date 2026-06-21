@@ -27,10 +27,12 @@ WATCH_ONLY: list[str] = [
 # --------------------------------------------------------------------------
 # Capital & risk
 # --------------------------------------------------------------------------
-CAPITAL: int = 50_000             # Rs total trading capital (real); paper-trading first
-MAX_RISK_PER_TRADE: int = 500     # Rs ~1% of capital
-MAX_TRADES_PER_DAY: int = 3
-MAX_DAILY_LOSS: int = 1_500       # Rs ~3% of capital — kill-switch threshold
+# Sandbox capital raised to gather trade data (dummy money). For a REAL ₹50k
+# account, drop these back to 50_000 / 500 / 3 / 1_500 before going live.
+CAPITAL: int = 200_000            # Rs sandbox capital (dummy)
+MAX_RISK_PER_TRADE: int = 2_000   # Rs ~1% of capital
+MAX_TRADES_PER_DAY: int = 5
+MAX_DAILY_LOSS: int = 6_000       # Rs ~3% of capital — kill-switch threshold
 MIN_LOT_SIZE: int = 1             # start at 1 lot; scale only after proven
 
 # Lot sizes (Jan 2026 SEBI/NSE revision) — VERIFY against broker before live use.

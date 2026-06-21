@@ -95,7 +95,8 @@ def test_kill_switch_threshold() -> None:
     check("at threshold -> trip",
           guardrails.should_trip_kill_switch(-config.MAX_DAILY_LOSS))
     check("realised+unrealised combine",
-          guardrails.should_trip_kill_switch(-1000, -600))  # -1600 <= -1500
+          guardrails.should_trip_kill_switch(-config.MAX_DAILY_LOSS * 0.7,
+                                             -config.MAX_DAILY_LOSS * 0.5))
     check("profit -> no trip", not guardrails.should_trip_kill_switch(5000))
 
 
@@ -193,12 +194,14 @@ def test_monitor_kill_switch() -> None:
     print("monitor_paper_positions — stop loss trips kill switch:")
     def body(db):
         from src.utils import market_calendar as mc
-        # Loss = (80-100)*100 = -2000 <= -MAX_DAILY_LOSS(1500) -> trip.
-        _open_pos(db, qty=100, price=100, stop=80, target=130)
-        executor.monitor_paper_positions(price_fn=lambda s, e: 70)
+        # Size the loss to exceed MAX_DAILY_LOSS at any config value.
+        pts = config.MAX_DAILY_LOSS / 100 + 10
+        stop = 100 - pts
+        _open_pos(db, qty=100, price=100, stop=stop, target=130)
+        executor.monitor_paper_positions(price_fn=lambda s, e: stop - 1)
         today = mc.now_ist().date().isoformat()
         ds = dict(db.get_or_create_daily_state(today))
-        check("realised pnl negative", ds["realised_pnl"] <= -1500)
+        check("realised loss exceeds limit", ds["realised_pnl"] <= -config.MAX_DAILY_LOSS)
         check("kill switch tripped", ds["kill_switch_tripped"] == 1)
     _with_temp_db(body)
 

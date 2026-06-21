@@ -89,7 +89,17 @@ def run_cycle(client: Any, notifier: Any | None, executor: Any) -> dict[str, Any
         if sig is None:
             continue
         signals_fired += 1
-        sig_row = {**sig.__dict__, "ts": mc.now_ist().isoformat(timespec="seconds")}
+        import json
+        context = json.dumps({
+            "ltp": snap.get("ltp"), "trend": snap.get("trend"),
+            "rsi_fast": snap.get("rsi_fast"), "rsi_slow": snap.get("rsi_slow"),
+            "rsi_fast_state": snap.get("rsi_fast_state"),
+            "rsi_slow_state": snap.get("rsi_slow_state"),
+            "patterns": snap.get("patterns"), "nearest_pivot": snap.get("nearest_pivot"),
+            "news_net": news.get("net"),
+        })
+        sig_row = {**sig.__dict__, "ts": mc.now_ist().isoformat(timespec="seconds"),
+                   "context": context}
         sid = db.insert_signal(sig_row)
         signal_dict = {**sig.__dict__, "id": sid}
 
@@ -141,6 +151,20 @@ def eod_summary(client: Any, notifier: Any | None) -> str:
         bool(ds["kill_switch_tripped"]), orders=orders or None)
     _safe_notify(notifier, text)
     log.info("EOD summary sent.")
+    return text
+
+
+def weekly_review(notifier: Any | None) -> str:
+    """Generate the AI 'learn from mistakes' review and send it to Telegram."""
+    from src.storage import db
+    from src.review.performance import generate_review
+    rows = db.closed_trades_with_context(limit=200)
+    text = generate_review(rows)
+    header = ("🧠 *வாராந்திர செயல்திறன் மதிப்பாய்வு*\n\n"
+              if config.ALERT_LANGUAGE.lower() in ("tamil", "ta")
+              else "🧠 *Weekly performance review*\n\n")
+    _safe_notify(notifier, header + text)
+    log.info("Weekly review sent.")
     return text
 
 
@@ -219,6 +243,13 @@ def start_scheduler(confirm_live: bool = False) -> None:
     # Pre-open token check/refresh.
     sched.add_job(preopen_job, CronTrigger(
         day_of_week="mon-fri", hour=9, minute=5, timezone=config.TIMEZONE))
+
+    # Weekly AI performance review — Friday after close.
+    def review_job() -> None:
+        if mc.is_trading_day():
+            weekly_review(notifier)
+    sched.add_job(review_job, CronTrigger(
+        day_of_week="fri", hour=15, minute=45, timezone=config.TIMEZONE))
 
     # Establish a session at startup so clicking the launcher works at any time
     # (uses cached token, or auto-login if KITE_USER_ID/PASSWORD/TOTP_SECRET are set).
