@@ -12,6 +12,8 @@ env/
 # Data & logs
 data/*.db
 data/*.db-journal
+data/*.db-wal
+data/*.db-shm
 data/*.json
 data/.kite_session.json
 logs/*

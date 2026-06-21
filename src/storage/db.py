@@ -77,9 +77,12 @@ CREATE TABLE IF NOT EXISTS app_log (
 
 def _connect() -> sqlite3.Connection:
     os.makedirs(config.DATA_DIR, exist_ok=True)
-    conn = sqlite3.connect(config.DB_PATH)
+    conn = sqlite3.connect(config.DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON;")
+    # WAL: lets readers (dashboard) and writers (scheduler/news job) work
+    # concurrently without "database is locked" errors.
+    conn.execute("PRAGMA journal_mode = WAL;")
     return conn
 
 

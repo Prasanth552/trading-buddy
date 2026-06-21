@@ -251,6 +251,27 @@ def start_scheduler(confirm_live: bool = False) -> None:
     sched.add_job(review_job, CronTrigger(
         day_of_week="fri", hour=15, minute=45, timezone=config.TIMEZONE))
 
+    # News refresh — every 30 min, ALL hours/days, so the dashboard always shows
+    # fresh news. Skipped during market hours (the trading cycle handles it then).
+    def news_job() -> None:
+        if mc.is_market_open():
+            return
+        try:
+            from src.news import feeds, analyzer
+            stored = analyzer.analyze_and_store(feeds.poll(relevant_only=True))
+            if stored:
+                log.info("News refresh tagged %d new item(s).", len(stored))
+        except Exception as exc:  # noqa: BLE001
+            log.error("News refresh failed: %s", exc)
+    sched.add_job(news_job, CronTrigger(minute="*/30", timezone=config.TIMEZONE))
+
+    # Initial news fill at startup so the dashboard isn't stale right away.
+    try:
+        from src.news import feeds, analyzer
+        analyzer.analyze_and_store(feeds.poll(relevant_only=True))
+    except Exception as exc:  # noqa: BLE001
+        log.error("Initial news fill failed: %s", exc)
+
     # Establish a session at startup so clicking the launcher works at any time
     # (uses cached token, or auto-login if KITE_USER_ID/PASSWORD/TOTP_SECRET are set).
     if mc.is_trading_day():
