@@ -92,6 +92,13 @@ def evaluate(
     near_support = support is not None and (ltp - support) <= threshold
     near_resistance = resistance is not None and (resistance - ltp) <= threshold
 
+    # When LTP is close to both a support and resistance, pick the nearer pivot.
+    if near_support and near_resistance:
+        if (ltp - support) <= (resistance - ltp):
+            near_resistance = False
+        else:
+            near_support = False
+
     # RSI gates: don't buy into overbought, don't sell into oversold.
     long_ok = near_support and rsi_fast < config.RSI_OVERBOUGHT
     short_ok = near_resistance and rsi_fast > config.RSI_OVERSOLD

@@ -30,7 +30,7 @@ WATCH_ONLY: list[str] = []   # all analysed symbols are now traded
 # account, drop these back to 50_000 / 500 / 3 / 1_500 before going live.
 CAPITAL: int = 200_000            # Rs sandbox capital (dummy)
 MAX_RISK_PER_TRADE: int = 2_000   # Rs ~1% of capital
-MAX_TRADES_PER_DAY: int = 5
+MAX_TRADES_PER_DAY: int = 6
 MAX_DAILY_LOSS: int = 6_000       # Rs ~3% of capital — kill-switch threshold
 MIN_LOT_SIZE: int = 1             # start at 1 lot; scale only after proven
 
@@ -68,7 +68,7 @@ RSI_OVERSOLD: float = 30.0
 # --------------------------------------------------------------------------
 # How close (as a fraction of price) the LTP must be to a pivot to count as
 # "near" it — adapts to each instrument's price scale. Wider = more setups.
-PIVOT_PROXIMITY_PCT: float = 0.006      # 0.6%
+PIVOT_PROXIMITY_PCT: float = 0.015      # 1.5%
 # Protective-stop buffer placed just beyond the pivot, as a fraction of price.
 STOP_BUFFER_PCT: float = 0.0015         # 0.15%
 # Target distance as a multiple of the (entry - stop) risk.
