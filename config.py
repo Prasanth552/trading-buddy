@@ -29,7 +29,7 @@ WATCH_ONLY: list[str] = []   # all analysed symbols are now traded
 # Sandbox capital raised to gather trade data (dummy money). For a REAL ₹50k
 # account, drop these back to 50_000 / 500 / 3 / 1_500 before going live.
 CAPITAL: int = 200_000            # Rs sandbox capital (dummy)
-MAX_RISK_PER_TRADE: int = 2_000   # Rs ~1% of capital
+MAX_RISK_PER_TRADE: int = 10_000  # Rs sandbox — sized for NIFTY lot 65
 MAX_TRADES_PER_DAY: int = 6
 MAX_DAILY_LOSS: int = 6_000       # Rs ~3% of capital — kill-switch threshold
 MIN_LOT_SIZE: int = 1             # start at 1 lot; scale only after proven
