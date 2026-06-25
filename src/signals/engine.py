@@ -103,11 +103,12 @@ def evaluate(
     long_ok = near_support and rsi_fast < config.RSI_OVERBOUGHT
     short_ok = near_resistance and rsi_fast > config.RSI_OVERSOLD
 
-    # News conflict gate — only a HIGH-confidence opposing item vetoes the trade.
-    # (Mild net sentiment no longer blocks a clean technical setup → more trades.)
-    if news.get("has_high_bear"):
+    # News conflict gate — only veto when net sentiment strongly opposes the trade.
+    # Using net (not any single item) avoids mixed-news days killing all signals.
+    net_news = news.get("net", "neutral")
+    if net_news == "bearish" and news.get("has_high_bear"):
         long_ok = False
-    if news.get("has_high_bull"):
+    if net_news == "bullish" and news.get("has_high_bull"):
         short_ok = False
 
     # Ambiguous (both or neither) -> do nothing.
