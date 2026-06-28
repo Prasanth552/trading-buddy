@@ -72,11 +72,15 @@ class TelegramNotifier:
 
     def __init__(self, token: str | None = None, chat_id: str | None = None) -> None:
         self.token = token or os.getenv("TELEGRAM_BOT_TOKEN")
-        self.chat_id = chat_id or os.getenv("TELEGRAM_CHAT_ID")
+        raw_ids = chat_id or os.getenv("TELEGRAM_CHAT_ID")
         if not self.token:
             raise TelegramError("TELEGRAM_BOT_TOKEN missing — set it in .env")
-        if not self.chat_id:
+        if not raw_ids:
             raise TelegramError("TELEGRAM_CHAT_ID missing — set it in .env")
+        # Support multiple recipients: comma-separated chat IDs (e.g. two devices).
+        self.chat_ids = [c.strip() for c in str(raw_ids).split(",") if c.strip()]
+        # Kept for backward compatibility (first recipient).
+        self.chat_id = self.chat_ids[0]
 
     def _post(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
         url = TELEGRAM_API.format(token=self.token, method=method)
@@ -87,14 +91,16 @@ class TelegramNotifier:
         return data
 
     def send_message(self, text: str, markdown: bool = True) -> None:
-        """Send text to the configured chat, chunking if needed."""
-        for chunk in chunk_message(text):
-            payload: dict[str, Any] = {"chat_id": self.chat_id, "text": chunk,
-                                       "disable_web_page_preview": True}
-            if markdown:
-                payload["parse_mode"] = "Markdown"
-            self._post("sendMessage", payload)
-        log.info("Sent Telegram message (%d chars).", len(text))
+        """Send text to every configured chat, chunking if needed."""
+        for cid in self.chat_ids:
+            for chunk in chunk_message(text):
+                payload: dict[str, Any] = {"chat_id": cid, "text": chunk,
+                                           "disable_web_page_preview": True}
+                if markdown:
+                    payload["parse_mode"] = "Markdown"
+                self._post("sendMessage", payload)
+        log.info("Sent Telegram message (%d chars) to %d chat(s).",
+                 len(text), len(self.chat_ids))
 
     def send_signal_alert(self, signal: dict[str, Any]) -> None:
         self.send_message(format_signal_alert(signal))
