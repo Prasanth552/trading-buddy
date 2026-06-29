@@ -90,15 +90,32 @@ class TelegramNotifier:
             raise TelegramError(f"Telegram API error: {data}")
         return data
 
+    def _send_chunk(self, cid: str, chunk: str, markdown: bool) -> None:
+        """Send one chunk; if Markdown parsing fails, retry as plain text.
+
+        LLM-generated analysis can contain unbalanced Markdown (*, _, [), which
+        Telegram rejects ("can't parse entities"). Rather than lose the alert, we
+        resend the same text with no parse_mode so it always gets delivered.
+        """
+        payload: dict[str, Any] = {"chat_id": cid, "text": chunk,
+                                   "disable_web_page_preview": True}
+        if markdown:
+            payload["parse_mode"] = "Markdown"
+        try:
+            self._post("sendMessage", payload)
+        except TelegramError as exc:
+            if markdown and "parse entities" in str(exc):
+                log.warning("Markdown parse failed — resending as plain text.")
+                payload.pop("parse_mode", None)
+                self._post("sendMessage", payload)
+            else:
+                raise
+
     def send_message(self, text: str, markdown: bool = True) -> None:
         """Send text to every configured chat, chunking if needed."""
         for cid in self.chat_ids:
             for chunk in chunk_message(text):
-                payload: dict[str, Any] = {"chat_id": cid, "text": chunk,
-                                           "disable_web_page_preview": True}
-                if markdown:
-                    payload["parse_mode"] = "Markdown"
-                self._post("sendMessage", payload)
+                self._send_chunk(cid, chunk, markdown)
         log.info("Sent Telegram message (%d chars) to %d chat(s).",
                  len(text), len(self.chat_ids))
 
