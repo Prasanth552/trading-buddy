@@ -118,7 +118,8 @@ def api_positions(_: None = Depends(require_auth)) -> JSONResponse:
                 live = executor.position_pnl(r, kite)
                 r["current_premium"] = live["current_premium"]
                 r["unrealised_pnl"] = live["unrealised_pnl"]
-                total_unreal += live["unrealised_pnl"]
+                if live["unrealised_pnl"] is not None:
+                    total_unreal += live["unrealised_pnl"]
             except Exception as exc:  # noqa: BLE001 - one bad symbol shouldn't break the list
                 r["error"] = str(exc)
     return JSONResponse({

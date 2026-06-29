@@ -320,6 +320,56 @@ def _option_exchange(tradingsymbol: str) -> str:
     return "BFO" if tradingsymbol.upper().startswith("SENSEX") else "NFO"
 
 
+def _safe_ltp(
+    client: Any, sym: str, exch: str, price_fn: Any | None = None,
+) -> float | None:
+    """Fetch the option's last price, returning None if it can't be priced.
+
+    Kite returns an empty dict for an expired/unknown contract; we treat that
+    (and any error) as "un-priceable" rather than raising — so the monitor never
+    crashes or spams ERROR for a dead option.
+    """
+    try:
+        if price_fn is not None:
+            return price_fn(sym, exch)
+        full = f"{exch}:{sym}"
+        data = client.ltp([full])
+        info = data.get(full) if isinstance(data, dict) else None
+        if not info or not info.get("last_price"):
+            return None
+        return float(info["last_price"])
+    except Exception as exc:  # noqa: BLE001
+        log.warning("LTP fetch failed for %s: %s", sym, exc)
+        return None
+
+
+def _force_close_if_stale(
+    p: dict[str, Any], date_iso: str, notifier: Any | None = None,
+) -> bool:
+    """Force-close an un-priceable position if it's from a previous day (expired).
+
+    Closes at the entry premium (neutral P&L 0) so a dead/expired contract doesn't
+    sit OPEN forever. Same-day un-priceable rows are left to retry (transient).
+    Returns True if it force-closed.
+    """
+    from src.storage import db
+    pos_date = (p.get("ts") or "")[:10]
+    today = mc.now_ist().date().isoformat()
+    if not pos_date or pos_date >= today:
+        return False  # same-day -> likely transient, retry next cycle
+    db.close_position(p["id"], p["price"], 0.0, status="CLOSED_EXPIRED")
+    log.warning("Force-closed stale/expired position %s (id=%s) at entry, P&L 0.",
+                p["symbol"], p["id"])
+    if notifier is not None:
+        try:
+            notifier.send_message(
+                f"ℹ️ Closed expired/un-priceable position *{p['symbol']}* "
+                f"(opened {pos_date}). Marked P&L ₹0 — verify on the broker if needed.")
+        except Exception:  # noqa: BLE001
+            pass
+    return True
+
+
 def monitor_paper_positions(
     client: Any | None = None,
     price_fn: Any | None = None,
@@ -336,16 +386,12 @@ def monitor_paper_positions(
     closed: list[dict[str, Any]] = []
 
     for p in db.get_open_paper_positions():
+        p = dict(p)
         sym = p["symbol"]
         exch = _option_exchange(sym)
-        try:
-            if price_fn is not None:
-                current = price_fn(sym, exch)
-            else:
-                full = f"{exch}:{sym}"
-                current = client.ltp([full])[full]["last_price"]
-        except Exception as exc:  # noqa: BLE001 - skip this position, keep the rest
-            log.error("Monitor: price fetch failed for %s: %s", sym, exc)
+        current = _safe_ltp(client, sym, exch, price_fn)
+        if current is None:
+            _force_close_if_stale(p, date_iso, notifier)
             continue
 
         reason, exit_price = decide_exit(
@@ -390,16 +436,12 @@ def monitor_upstox_positions(
     closed: list[dict[str, Any]] = []
 
     for p in db.get_open_positions("UPSTOX_SANDBOX"):
+        p = dict(p)
         sym = p["symbol"]
         exch = _option_exchange(sym)
-        try:
-            if price_fn is not None:
-                current = price_fn(sym, exch)
-            else:
-                full = f"{exch}:{sym}"
-                current = kite_client.ltp([full])[full]["last_price"]
-        except Exception as exc:  # noqa: BLE001
-            log.error("Upstox monitor: price fetch failed for %s: %s", sym, exc)
+        current = _safe_ltp(kite_client, sym, exch, price_fn)
+        if current is None:
+            _force_close_if_stale(p, date_iso, notifier)
             continue
 
         reason, exit_price = decide_exit(
@@ -442,16 +484,14 @@ def position_pnl(
     current premium, unrealised P&L (₹) and the rupee profit target."""
     sym = p["symbol"]
     exch = _option_exchange(sym)
-    if price_fn is not None:
-        current = price_fn(sym, exch)
-    else:
-        full = f"{exch}:{sym}"
-        current = kite_client.ltp([full])[full]["last_price"]
+    current = _safe_ltp(kite_client, sym, exch, price_fn)
     return {
         "id": p["id"], "symbol": sym, "qty": p["qty"],
-        "entry_premium": p["price"], "current_premium": round(float(current), 2),
+        "entry_premium": p["price"],
+        "current_premium": round(float(current), 2) if current is not None else None,
         "stop_premium": p["stop_price"], "target_premium": p["target_price"],
-        "unrealised_pnl": unrealised_pnl(p["price"], current, p["qty"]),
+        "unrealised_pnl": (unrealised_pnl(p["price"], current, p["qty"])
+                           if current is not None else None),
         "profit_target": getattr(config, "PROFIT_TARGET_RUPEES", 0.0),
     }
 
@@ -483,14 +523,15 @@ def manual_close(
     sym = p["symbol"]
     exch = _option_exchange(sym)
 
-    try:
-        if price_fn is not None:
-            current = price_fn(sym, exch)
-        else:
-            full = f"{exch}:{sym}"
-            current = kite_client.ltp([full])[full]["last_price"]
-    except Exception as exc:  # noqa: BLE001
-        return {"closed": False, "reason": f"price fetch failed: {exc}"}
+    current = _safe_ltp(kite_client, sym, exch, price_fn)
+    if current is None:
+        # Un-priceable (e.g. expired contract): close at entry premium (P&L 0)
+        # rather than leaving it stuck OPEN.
+        db.close_position(p["id"], p["price"], 0.0, status="CLOSED_EXPIRED")
+        db.add_realised_pnl(date_iso, 0.0)
+        log.warning("Manual close: %s un-priceable; closed at entry, P&L 0.", sym)
+        return {"closed": True, "symbol": sym, "exit_price": p["price"], "pnl": 0.0,
+                "note": "no live price (expired?) — closed at entry, P&L 0"}
 
     # Place the closing SELL on Upstox for sandbox positions.
     if p.get("mode") == "UPSTOX_SANDBOX":
