@@ -89,6 +89,12 @@ def build_analysis_prompt(
         f"[{snapshot.get('rsi_fast_state')}]",
         f"RSI slow({config.RSI_SLOW_PERIOD}): {snapshot.get('rsi_slow')} "
         f"[{snapshot.get('rsi_slow_state')}]",
+        f"EMA{config.EMA_FAST_PERIOD}/{config.EMA_SLOW_PERIOD}: "
+        f"{snapshot.get('ema_fast')}/{snapshot.get('ema_slow')}",
+        f"VWAP: {snapshot.get('vwap')}",
+        f"Supertrend: {'up' if (snapshot.get('supertrend_dir') or 0) > 0 else 'down'}",
+        f"ADX (trend strength): {snapshot.get('adx')}",
+        f"ATR: {snapshot.get('atr')}",
         f"Candlestick patterns: {patterns}",
         f"News sentiment (recent): {news_view.get('net')} "
         f"(bull={news_view.get('bull', 0)}, bear={news_view.get('bear', 0)})",

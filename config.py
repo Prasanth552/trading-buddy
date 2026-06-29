@@ -72,7 +72,36 @@ PIVOT_PROXIMITY_PCT: float = 0.015      # 1.5%
 # Protective-stop buffer placed just beyond the pivot, as a fraction of price.
 STOP_BUFFER_PCT: float = 0.0015         # 0.15%
 # Target distance as a multiple of the (entry - stop) risk.
-SIGNAL_RR_RATIO: float = 1.5
+SIGNAL_RR_RATIO: float = 2.0
+
+# --------------------------------------------------------------------------
+# Trend-following strategy (EMA / VWAP / Supertrend / ADX / ATR)
+# --------------------------------------------------------------------------
+# The engine now trades WITH the trend (not mean-reversion against it). A signal
+# fires only when trend, momentum and trend-strength all agree, and only when
+# the market is actually trending (ADX above threshold) — never in chop.
+STRATEGY_MODE: str = "trend"        # "trend" (new) | "meanrev" (legacy pivots)
+
+EMA_FAST_PERIOD: int = 9            # short EMA (trend direction)
+EMA_SLOW_PERIOD: int = 21          # long EMA (trend direction)
+
+SUPERTREND_ATR_PERIOD: int = 10    # Supertrend ATR lookback
+SUPERTREND_MULTIPLIER: float = 3.0 # Supertrend ATR multiplier (India default)
+
+ADX_PERIOD: int = 14               # ADX lookback
+ADX_MIN_TREND: float = 20.0        # below this = sideways/chop → no trade
+
+ATR_PERIOD: int = 14               # ATR for stops/targets
+ATR_STOP_MULT: float = 1.0         # stop = entry ∓ 1 × ATR
+ATR_TARGET_MULT: float = 2.0       # target = entry ± 2 × ATR (1:2 RR)
+
+# RSI momentum window allowed for entries. Wide on purpose: in trend-following
+# a strong trend can ride RSI high/low for a long time, so we only exclude truly
+# blown-off extremes rather than normal trend momentum.
+RSI_LONG_MIN: float = 45.0         # longs: momentum must be up
+RSI_LONG_MAX: float = 88.0         # longs: block only an extreme blow-off top
+RSI_SHORT_MIN: float = 12.0        # shorts: block only an extreme capitulation
+RSI_SHORT_MAX: float = 55.0        # shorts: momentum must be down
 # Look-back window for news sentiment that informs a signal.
 NEWS_LOOKBACK_HOURS: int = 12
 # Map an analysed watchlist symbol to the keyword used to match news_items.symbol.

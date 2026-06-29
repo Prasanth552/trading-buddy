@@ -12,6 +12,12 @@ import sys
 import config
 from src.signals import engine
 
+# These tests validate the legacy pivot mean-reversion path; pin the mode so
+# they don't dispatch to the new trend strategy. MODE=LIVE so the news-conflict
+# gate is active (it is intentionally skipped in PAPER/sandbox).
+config.STRATEGY_MODE = "meanrev"
+config.MODE = "LIVE"
+
 
 def check(name: str, cond: bool) -> None:
     print(f"  [{'OK ' if cond else 'BAD'}] {name}")
@@ -43,7 +49,8 @@ def test_long_at_support() -> None:
     check("direction long", s and s.direction == "long")
     check("stop below support", s and s.stop < 98.0)
     check("target above entry", s and s.target > s.entry)
-    check("RR ~1.5", s and abs((s.target - s.entry) - 1.5 * (s.entry - s.stop)) < 0.01)
+    check("RR matches config", s and abs(
+        (s.target - s.entry) - config.SIGNAL_RR_RATIO * (s.entry - s.stop)) < 0.01)
     check("qty = MIN_LOT_SIZE", s and s.qty == config.MIN_LOT_SIZE)
     check("max_risk = budget", s and s.max_risk == float(config.MAX_RISK_PER_TRADE))
 
@@ -72,7 +79,11 @@ def test_short_blocked_oversold() -> None:
 
 def test_no_setup_midrange() -> None:
     print("no signal mid-range (not near any pivot):")
-    s = engine.evaluate(snap(100.9, 50.0), NEUTRAL)  # ~0.9% from PP and R1
+    # Build a snapshot whose LTP sits far (>1.5%) from every pivot.
+    far = {"symbol": "NSE:NIFTY 50", "ltp": 150.0,
+           "pivots": {"PP": 100.0, "R1": 102.0, "S1": 98.0},
+           "rsi_fast": 50.0, "rsi_slow": 50.0, "patterns": []}
+    s = engine.evaluate(far, NEUTRAL)
     check("no signal mid-range", s is None)
 
 

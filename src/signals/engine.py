@@ -73,7 +73,107 @@ def evaluate(
     snapshot: dict[str, Any],
     news: dict[str, Any] | None = None,
 ) -> Signal | None:
-    """Evaluate one symbol's snapshot (+ optional news view) into a Signal or None."""
+    """Evaluate one symbol's snapshot into a Signal or None.
+
+    Dispatches on ``config.STRATEGY_MODE``: "trend" (EMA/VWAP/Supertrend/ADX,
+    trades WITH the trend) or "meanrev" (legacy pivot mean-reversion).
+    """
+    news = news or {"net": "neutral", "has_high_bull": False, "has_high_bear": False}
+    if getattr(config, "STRATEGY_MODE", "trend") == "trend":
+        return _evaluate_trend(snapshot, news)
+    return _evaluate_meanrev(snapshot, news)
+
+
+def _nan(x: Any) -> bool:
+    return x is None or (isinstance(x, float) and x != x)
+
+
+def _evaluate_trend(
+    snapshot: dict[str, Any],
+    news: dict[str, Any],
+) -> Signal | None:
+    """Trend-following: trade only WITH a confirmed, strong trend.
+
+    LONG  : price > VWAP and > EMA_slow, EMA_fast > EMA_slow, Supertrend up,
+            ADX > threshold, RSI in [RSI_LONG_MIN, RSI_LONG_MAX].
+    SHORT : mirror image.
+    Stops/targets are ATR-based (1×ATR stop, 2×ATR target). When unsure -> None.
+    """
+    ltp = snapshot.get("ltp")
+    ema_fast = snapshot.get("ema_fast")
+    ema_slow = snapshot.get("ema_slow")
+    vwap = snapshot.get("vwap")
+    atr = snapshot.get("atr")
+    st_dir = snapshot.get("supertrend_dir")
+    adx = snapshot.get("adx")
+    rsi_fast = snapshot.get("rsi_fast")
+    patterns = set(snapshot.get("patterns") or [])
+
+    # Need every trend input; bail (do nothing) if any is missing/NaN.
+    if any(_nan(v) for v in (ltp, ema_fast, ema_slow, vwap, atr, st_dir, adx, rsi_fast)):
+        return None
+    if atr <= 0:
+        return None
+
+    # Trend-strength gate: only trade when the market is actually trending.
+    if adx < config.ADX_MIN_TREND:
+        return None
+
+    bull = (ltp > vwap and ltp > ema_slow and ema_fast > ema_slow and st_dir > 0
+            and config.RSI_LONG_MIN <= rsi_fast <= config.RSI_LONG_MAX)
+    bear = (ltp < vwap and ltp < ema_slow and ema_fast < ema_slow and st_dir < 0
+            and config.RSI_SHORT_MIN <= rsi_fast <= config.RSI_SHORT_MAX)
+
+    # News conflict gate — veto only when net sentiment strongly opposes.
+    net_news = news.get("net", "neutral")
+    if net_news == "bearish" and news.get("has_high_bear"):
+        bull = False
+    if net_news == "bullish" and news.get("has_high_bull"):
+        bear = False
+
+    if bull == bear:  # both or neither -> ambiguous -> do nothing
+        return None
+
+    entry = float(ltp)
+    if bull:
+        direction = "long"
+        stop = entry - config.ATR_STOP_MULT * atr
+        target = entry + config.ATR_TARGET_MULT * atr
+        pattern_ok = bool(patterns & _BULLISH_PATTERNS)
+    else:
+        direction = "short"
+        stop = entry + config.ATR_STOP_MULT * atr
+        target = entry - config.ATR_TARGET_MULT * atr
+        pattern_ok = bool(patterns & _BEARISH_PATTERNS)
+
+    confidence = "high" if (pattern_ok and adx >= 30) else ("medium" if adx >= 25 else "low")
+    rationale = (
+        f"{direction.upper()} (trend) LTP {entry:,.2f} | "
+        f"EMA{config.EMA_FAST_PERIOD}>{config.EMA_SLOW_PERIOD}: "
+        f"{ema_fast:,.2f}/{ema_slow:,.2f}, VWAP {vwap:,.2f}, "
+        f"Supertrend {'up' if st_dir > 0 else 'down'}, ADX {adx:.1f}, RSI {rsi_fast:.1f}. "
+        f"News {net_news}. ATR {atr:,.2f} -> stop {stop:,.2f}, target {target:,.2f} "
+        f"(RR {config.ATR_TARGET_MULT/config.ATR_STOP_MULT:.1f}). Confidence {confidence}."
+    )
+
+    return Signal(
+        symbol=snapshot["symbol"],
+        direction=direction,
+        entry=round(entry, 2),
+        stop=round(stop, 2),
+        target=round(target, 2),
+        qty=config.MIN_LOT_SIZE,
+        max_risk=float(config.MAX_RISK_PER_TRADE),
+        rationale=rationale,
+        status="new",
+    )
+
+
+def _evaluate_meanrev(
+    snapshot: dict[str, Any],
+    news: dict[str, Any] | None = None,
+) -> Signal | None:
+    """Legacy pivot mean-reversion strategy (kept for fallback / comparison)."""
     news = news or {"net": "neutral", "has_high_bull": False, "has_high_bear": False}
     pivots = snapshot.get("pivots") or {}
     ltp = snapshot.get("ltp")

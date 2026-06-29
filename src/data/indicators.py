@@ -100,6 +100,91 @@ def rsi_state(value: float) -> str:
 
 
 # --------------------------------------------------------------------------
+# Trend / volatility indicators (EMA, VWAP, ATR, Supertrend, ADX)
+# --------------------------------------------------------------------------
+def ema(close: pd.Series, period: int) -> pd.Series:
+    """Exponential moving average."""
+    return close.astype("float64").ewm(span=period, adjust=False).mean()
+
+
+def vwap(df: pd.DataFrame) -> pd.Series:
+    """Volume-weighted average price (cumulative over the supplied bars).
+
+    Needs open/high/low/close + volume. Falls back to a cumulative mean of the
+    typical price when volume is missing or all-zero.
+    """
+    tp = (df["high"].astype("float64") + df["low"].astype("float64")
+          + df["close"].astype("float64")) / 3.0
+    vol = df["volume"].astype("float64") if "volume" in df.columns else pd.Series(
+        0.0, index=df.index)
+    cum_vol = vol.cumsum()
+    if cum_vol.iloc[-1] <= 0:  # no volume (some indices) -> typical-price mean
+        return tp.expanding().mean()
+    return (tp * vol).cumsum() / cum_vol.replace(0, np.nan)
+
+
+def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """Average True Range (Wilder smoothing)."""
+    high = df["high"].astype("float64")
+    low = df["low"].astype("float64")
+    close = df["close"].astype("float64")
+    prev_close = close.shift(1)
+    tr = pd.concat([(high - low), (high - prev_close).abs(),
+                    (low - prev_close).abs()], axis=1).max(axis=1)
+    return tr.ewm(alpha=1.0 / period, adjust=False).mean()
+
+
+def supertrend(df: pd.DataFrame, period: int = 10, multiplier: float = 3.0) -> pd.Series:
+    """Supertrend direction as a Series of +1 (uptrend) / -1 (downtrend)."""
+    high = df["high"].astype("float64")
+    low = df["low"].astype("float64")
+    close = df["close"].astype("float64")
+    atr_s = atr(df, period)
+    hl2 = (high + low) / 2.0
+    upper = hl2 + multiplier * atr_s
+    lower = hl2 - multiplier * atr_s
+
+    n = len(df)
+    direction = np.ones(n)  # +1 up, -1 down
+    final_upper = upper.to_numpy().copy()
+    final_lower = lower.to_numpy().copy()
+    c = close.to_numpy()
+    for i in range(1, n):
+        final_upper[i] = (min(upper.iloc[i], final_upper[i - 1])
+                          if c[i - 1] <= final_upper[i - 1] else upper.iloc[i])
+        final_lower[i] = (max(lower.iloc[i], final_lower[i - 1])
+                          if c[i - 1] >= final_lower[i - 1] else lower.iloc[i])
+        if c[i] > final_upper[i - 1]:
+            direction[i] = 1
+        elif c[i] < final_lower[i - 1]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i - 1]
+    return pd.Series(direction, index=df.index)
+
+
+def adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """Average Directional Index (trend strength, 0-100). Wilder smoothing."""
+    high = df["high"].astype("float64")
+    low = df["low"].astype("float64")
+    close = df["close"].astype("float64")
+    up = high.diff()
+    down = -low.diff()
+    plus_dm = np.where((up > down) & (up > 0), up, 0.0)
+    minus_dm = np.where((down > up) & (down > 0), down, 0.0)
+    prev_close = close.shift(1)
+    tr = pd.concat([(high - low), (high - prev_close).abs(),
+                    (low - prev_close).abs()], axis=1).max(axis=1)
+    atr_s = tr.ewm(alpha=1.0 / period, adjust=False).mean()
+    plus_di = 100 * pd.Series(plus_dm, index=df.index).ewm(
+        alpha=1.0 / period, adjust=False).mean() / atr_s.replace(0, np.nan)
+    minus_di = 100 * pd.Series(minus_dm, index=df.index).ewm(
+        alpha=1.0 / period, adjust=False).mean() / atr_s.replace(0, np.nan)
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
+    return dx.ewm(alpha=1.0 / period, adjust=False).mean()
+
+
+# --------------------------------------------------------------------------
 # Candlestick patterns
 # --------------------------------------------------------------------------
 def _body(o: float, c: float) -> float:
@@ -182,6 +267,8 @@ def build_snapshot(
         prev_day: previous day's {high, low, close} for pivots (or None).
         ltp: last traded price; falls back to last intraday close.
     """
+    # Keep the full frame (incl. volume) for VWAP; slice OHLC for the rest.
+    full = intraday if len(intraday) else intraday
     df = intraday[list(OHLC_COLS)].astype("float64") if len(intraday) else intraday
     last_close = float(df["close"].iloc[-1]) if len(df) else float("nan")
     price = float(ltp) if ltp is not None else last_close
@@ -190,6 +277,19 @@ def build_snapshot(
     slow = rsi(df["close"], config.RSI_SLOW_PERIOD) if len(df) else pd.Series(dtype=float)
     rsi_fast = float(fast.iloc[-1]) if len(fast.dropna()) else float("nan")
     rsi_slow = float(slow.iloc[-1]) if len(slow.dropna()) else float("nan")
+
+    # --- Trend-following indicators (EMA / VWAP / Supertrend / ADX / ATR) ---
+    def _last(s: pd.Series) -> float:
+        s = s.dropna()
+        return float(s.iloc[-1]) if len(s) else float("nan")
+
+    ema_fast = _last(ema(df["close"], config.EMA_FAST_PERIOD)) if len(df) else float("nan")
+    ema_slow = _last(ema(df["close"], config.EMA_SLOW_PERIOD)) if len(df) else float("nan")
+    vwap_val = _last(vwap(full)) if len(df) else float("nan")
+    atr_val = _last(atr(df, config.ATR_PERIOD)) if len(df) else float("nan")
+    st_dir = _last(supertrend(df, config.SUPERTREND_ATR_PERIOD,
+                              config.SUPERTREND_MULTIPLIER)) if len(df) else float("nan")
+    adx_val = _last(adx(df, config.ADX_PERIOD)) if len(df) else float("nan")
 
     pivots = (
         classic_pivots(prev_day["high"], prev_day["low"], prev_day["close"])
@@ -220,6 +320,13 @@ def build_snapshot(
         "rsi_slow": rsi_slow,
         "rsi_slow_state": rsi_state(rsi_slow) if not np.isnan(rsi_slow) else "n/a",
         "patterns": detect_patterns(df),
+        # Trend-following indicators.
+        "ema_fast": ema_fast,
+        "ema_slow": ema_slow,
+        "vwap": vwap_val,
+        "atr": atr_val,
+        "supertrend_dir": st_dir,   # +1 up, -1 down
+        "adx": adx_val,
     }
 
 
