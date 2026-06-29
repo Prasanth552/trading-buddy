@@ -30,7 +30,7 @@ WATCH_ONLY: list[str] = []   # all analysed symbols are now traded
 # account, drop these back to 50_000 / 500 / 3 / 1_500 before going live.
 CAPITAL: int = 200_000            # Rs sandbox capital (dummy)
 MAX_RISK_PER_TRADE: int = 10_000  # Rs sandbox — sized for NIFTY lot 65
-MAX_TRADES_PER_DAY: int = 6
+MAX_TRADES_PER_DAY: int = 10
 MAX_DAILY_LOSS: int = 20_000      # Rs sandbox — raised for data gathering
 MIN_LOT_SIZE: int = 1             # start at 1 lot; scale only after proven
 
@@ -94,6 +94,11 @@ ADX_MIN_TREND: float = 20.0        # below this = sideways/chop → no trade
 ATR_PERIOD: int = 14               # ATR for stops/targets
 ATR_STOP_MULT: float = 1.0         # stop = entry ∓ 1 × ATR
 ATR_TARGET_MULT: float = 2.0       # target = entry ± 2 × ATR (1:2 RR)
+
+# Rupee-based take-profit: auto-close an open position once its unrealised
+# profit reaches this amount (₹). Set to 0 to disable and use only the ATR
+# premium target. The user wants ~₹1000-2000 per trade.
+PROFIT_TARGET_RUPEES: float = 1500.0
 
 # RSI momentum window allowed for entries. Wide on purpose: in trend-following
 # a strong trend can ride RSI high/low for a long time, so we only exclude truly

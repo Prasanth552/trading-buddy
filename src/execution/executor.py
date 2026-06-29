@@ -88,6 +88,32 @@ def evaluate_exit(
     return None, None
 
 
+def decide_exit(
+    entry_premium: float,
+    stop_premium: float,
+    target_premium: float,
+    current_premium: float,
+    qty: int,
+) -> tuple[str | None, float | None]:
+    """Exit decision including the rupee take-profit (₹PROFIT_TARGET_RUPEES).
+
+    The rupee target closes the position at the *current* market premium as soon
+    as unrealised profit reaches the configured amount — banking small, consistent
+    wins. Falls back to the ATR stop/target otherwise.
+    """
+    target_rs = getattr(config, "PROFIT_TARGET_RUPEES", 0.0)
+    if target_rs and qty > 0:
+        pnl_now = (current_premium - entry_premium) * qty
+        if pnl_now >= target_rs:
+            return "profit", current_premium
+    return evaluate_exit(entry_premium, stop_premium, target_premium, current_premium)
+
+
+def unrealised_pnl(entry_premium: float, current_premium: float, qty: int) -> float:
+    """Live (mark-to-market) P&L for an open long-option position, in rupees."""
+    return round((current_premium - entry_premium) * qty, 2)
+
+
 def build_order_pair(
     tradingsymbol: str,
     exchange: str,
@@ -322,8 +348,8 @@ def monitor_paper_positions(
             log.error("Monitor: price fetch failed for %s: %s", sym, exc)
             continue
 
-        reason, exit_price = evaluate_exit(
-            p["price"], p["stop_price"], p["target_price"], current)
+        reason, exit_price = decide_exit(
+            p["price"], p["stop_price"], p["target_price"], current, p["qty"])
         if reason is None:
             continue
         pnl = round((exit_price - p["price"]) * p["qty"], 2)
@@ -376,8 +402,8 @@ def monitor_upstox_positions(
             log.error("Upstox monitor: price fetch failed for %s: %s", sym, exc)
             continue
 
-        reason, exit_price = evaluate_exit(
-            p["price"], p["stop_price"], p["target_price"], current)
+        reason, exit_price = decide_exit(
+            p["price"], p["stop_price"], p["target_price"], current, p["qty"])
         if reason is None:
             continue
 
@@ -407,3 +433,83 @@ def monitor_upstox_positions(
     if not ds["kill_switch_tripped"] and guardrails.should_trip_kill_switch(ds["realised_pnl"]):
         guardrails.trip_kill_switch(date_iso, client=kite_client, notifier=notifier)
     return closed
+
+
+def position_pnl(
+    p: dict[str, Any], kite_client: Any, price_fn: Any | None = None,
+) -> dict[str, Any]:
+    """Live mark-to-market for one open position row. Returns symbol/qty/entry,
+    current premium, unrealised P&L (₹) and the rupee profit target."""
+    sym = p["symbol"]
+    exch = _option_exchange(sym)
+    if price_fn is not None:
+        current = price_fn(sym, exch)
+    else:
+        full = f"{exch}:{sym}"
+        current = kite_client.ltp([full])[full]["last_price"]
+    return {
+        "id": p["id"], "symbol": sym, "qty": p["qty"],
+        "entry_premium": p["price"], "current_premium": round(float(current), 2),
+        "stop_premium": p["stop_price"], "target_premium": p["target_price"],
+        "unrealised_pnl": unrealised_pnl(p["price"], current, p["qty"]),
+        "profit_target": getattr(config, "PROFIT_TARGET_RUPEES", 0.0),
+    }
+
+
+def manual_close(
+    trade_id: int,
+    kite_client: Any,
+    upstox: Any | None = None,
+    notifier: Any | None = None,
+    price_fn: Any | None = None,
+) -> dict[str, Any]:
+    """Close ONE open position now at the current market premium (user-initiated).
+
+    Fetches the live option premium (Kite), places the closing SELL (Upstox for
+    sandbox; simulated for PAPER), records the close + realised P&L, and alerts.
+    """
+    from src.storage import db
+    from src.notify import messages
+    date_iso = mc.now_ist().date().isoformat()
+
+    with db.get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM trades WHERE id=? AND side='BUY' AND status='OPEN'",
+            (trade_id,),
+        ).fetchone()
+    if row is None:
+        return {"closed": False, "reason": "position not found or already closed"}
+    p = dict(row)
+    sym = p["symbol"]
+    exch = _option_exchange(sym)
+
+    try:
+        if price_fn is not None:
+            current = price_fn(sym, exch)
+        else:
+            full = f"{exch}:{sym}"
+            current = kite_client.ltp([full])[full]["last_price"]
+    except Exception as exc:  # noqa: BLE001
+        return {"closed": False, "reason": f"price fetch failed: {exc}"}
+
+    # Place the closing SELL on Upstox for sandbox positions.
+    if p.get("mode") == "UPSTOX_SANDBOX":
+        try:
+            if upstox is None:
+                from src.broker.upstox_client import UpstoxClient
+                upstox = UpstoxClient()
+            upstox.place_order(p["broker_key"], p["qty"], "SELL", order_type="MARKET")
+        except Exception as exc:  # noqa: BLE001
+            return {"closed": False, "reason": f"Upstox exit order failed: {exc}"}
+
+    exit_price = round(float(current), 2)
+    pnl = round((exit_price - p["price"]) * p["qty"], 2)
+    db.close_position(p["id"], exit_price, pnl, status="CLOSED_MANUAL")
+    db.add_realised_pnl(date_iso, pnl)
+    log.info("MANUAL EXIT %s @ %s P&L ₹%.2f", sym, exit_price, pnl)
+    if notifier is not None:
+        try:
+            notifier.send_message(messages.exit_msg(sym, "manual", exit_price, pnl))
+        except Exception:  # noqa: BLE001
+            pass
+    return {"closed": True, "symbol": sym, "exit_price": exit_price, "pnl": pnl}

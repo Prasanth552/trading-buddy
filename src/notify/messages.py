@@ -53,16 +53,23 @@ def order_placed(symbol: str, direction: str, qty: int, entry: float,
 
 
 def exit_msg(symbol: str, reason: str, exit_price: float, pnl: float) -> str:
-    profit = reason == "target"
+    # A win is the ATR target, the rupee profit-target, or a manual close in profit.
+    profit = reason in ("target", "profit") or (reason == "manual" and pnl >= 0)
     if _ta():
         if profit:
-            return (f"🎯 *லாபத்தில் வெளியேறியது* {symbol}\n"
+            head = ("🎯 *லாபத்தில் வெளியேறியது*" if reason != "manual"
+                    else "✅ *நீங்கள் கைமுறையாக வெளியேறினீர்கள் (லாபம்)*")
+            return (f"{head} {symbol}\n"
                     f"விலை {exit_price} ஐ அடைந்தது. லாபம்: ₹{pnl:,.2f} 🎉")
-        return (f"🛑 *ஸ்டாப்பில் வெளியேறியது* {symbol}\n"
+        head = ("🛑 *ஸ்டாப்பில் வெளியேறியது*" if reason != "manual"
+                else "↩️ *நீங்கள் கைமுறையாக வெளியேறினீர்கள்*")
+        return (f"{head} {symbol}\n"
                 f"விலை {exit_price} ஐ அடைந்தது. நஷ்டம்: ₹{pnl:,.2f}\n"
                 "(திட்டமிட்ட சிறிய நஷ்டம் — பெரிய நஷ்டத்தைத் தடுக்க)")
     emoji = "🎯" if profit else "🛑"
-    return f"{emoji} *EXIT ({reason})* {symbol} @ {exit_price} | P&L ₹{pnl:,.2f}"
+    label = {"target": "TARGET", "profit": "PROFIT ₹", "stop": "STOP",
+             "manual": "MANUAL"}.get(reason, reason.upper())
+    return f"{emoji} *EXIT ({label})* {symbol} @ {exit_price} | P&L ₹{pnl:,.2f}"
 
 
 def eod_summary(date: str, mode: str, sig_count: int, trades_count: int,

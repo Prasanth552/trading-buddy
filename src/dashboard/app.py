@@ -49,6 +49,32 @@ def _rows(query: str, params: tuple = ()) -> list[dict[str, Any]]:
         return [dict(r) for r in conn.execute(query, params).fetchall()]
 
 
+# Cached broker handles for live P&L + manual close (lazily created, reused).
+_clients: dict[str, Any] = {}
+
+
+def _kite() -> Any | None:
+    """Return a cached Kite client (reuses today's token), or None if unavailable."""
+    if "kite" not in _clients:
+        try:
+            from src.broker.session import ensure_session
+            _clients["kite"] = ensure_session()
+        except Exception as exc:  # noqa: BLE001 - dashboard must not crash
+            _clients["kite"] = None
+            _clients["kite_err"] = str(exc)
+    return _clients.get("kite")
+
+
+def _notifier() -> Any | None:
+    if "notifier" not in _clients:
+        try:
+            from src.notify.telegram_bot import TelegramNotifier
+            _clients["notifier"] = TelegramNotifier()
+        except Exception:  # noqa: BLE001
+            _clients["notifier"] = None
+    return _clients.get("notifier")
+
+
 # --------------------------------------------------------------------------
 # JSON API
 # --------------------------------------------------------------------------
@@ -73,9 +99,50 @@ def api_status(_: None = Depends(require_auth)) -> JSONResponse:
 
 @app.get("/api/positions")
 def api_positions(_: None = Depends(require_auth)) -> JSONResponse:
-    return JSONResponse(_rows(
-        "SELECT symbol, side, qty, price, stop_price, target_price, mode, status, ts "
-        "FROM trades WHERE status='OPEN' ORDER BY id DESC"))
+    """Open positions enriched with live current premium + unrealised P&L (₹).
+
+    Falls back to entry-only data if no Kite session is available.
+    """
+    rows = _rows(
+        "SELECT id, symbol, side, qty, price, stop_price, target_price, mode, status, ts "
+        "FROM trades WHERE status='OPEN' AND side='BUY' ORDER BY id DESC")
+    kite = _kite()
+    from src.execution import executor
+    total_unreal = 0.0
+    for r in rows:
+        r["current_premium"] = None
+        r["unrealised_pnl"] = None
+        r["profit_target"] = config.PROFIT_TARGET_RUPEES
+        if kite is not None:
+            try:
+                live = executor.position_pnl(r, kite)
+                r["current_premium"] = live["current_premium"]
+                r["unrealised_pnl"] = live["unrealised_pnl"]
+                total_unreal += live["unrealised_pnl"]
+            except Exception as exc:  # noqa: BLE001 - one bad symbol shouldn't break the list
+                r["error"] = str(exc)
+    return JSONResponse({
+        "positions": rows,
+        "total_unrealised": round(total_unreal, 2),
+        "live": kite is not None,
+        "profit_target": config.PROFIT_TARGET_RUPEES,
+    })
+
+
+@app.post("/api/close/{trade_id}")
+def api_close(trade_id: int, _: None = Depends(require_auth)) -> JSONResponse:
+    """Manually close one open position now at the current market premium."""
+    kite = _kite()
+    if kite is None:
+        return JSONResponse(
+            {"closed": False, "reason": "no Kite session — cannot fetch price/close"},
+            status_code=503)
+    from src.execution import executor
+    try:
+        result = executor.manual_close(trade_id, kite_client=kite, notifier=_notifier())
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse({"closed": False, "reason": str(exc)}, status_code=500)
+    return JSONResponse(result, status_code=200 if result.get("closed") else 400)
 
 
 @app.get("/api/trades")
@@ -161,13 +228,16 @@ _PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
  .att.ok{background:rgba(39,194,129,.08);border-color:var(--grn)}
  .att.warn{background:rgba(255,180,84,.10);border-color:#ffb454}
  .att.error{background:rgba(255,93,93,.10);border-color:var(--red)}
+ .note{font-size:12px;color:var(--mut);text-transform:none;letter-spacing:0;margin-left:6px}
+ .close-btn{padding:6px 12px;border:0;border-radius:8px;background:#3a2a13;color:#ffb454;
+   font-size:13px;font-weight:600;cursor:pointer;flex:none;width:auto}
 </style></head><body>
 <h1>📈 Trading Buddy</h1><div class=sub id=sub>loading…</div>
 <div class=grid id=cards></div>
 <div class=btns><button class=pause onclick="ctl('pause')">⏸ Pause</button>
  <button class=resume onclick="ctl('resume')">▶ Resume</button></div>
 <h2>Performance (all closed trades)</h2><div class=grid id=perf></div>
-<h2>Open positions</h2><div class=scroll id=positions></div>
+<h2>Open positions <span id=posnote class=note></span></h2><div class=scroll id=positions></div>
 <h2>Recent trades</h2><div class=scroll id=trades></div>
 <h2>Recent signals</h2><div class=scroll id=signals></div>
 <h2>Latest news</h2><div class=scroll id=news></div>
@@ -179,6 +249,14 @@ function tbl(rows,cols,wrap){if(!rows||!rows.length)return '<div class=empty>non
  for(const r of rows){h+='<tr>'+cols.map(c=>'<td>'+c[1](r)+'</td>').join('')+'</tr>'}return h+'</table>'}
 function pnl(v){if(v==null)return '-';const c=v>=0?'pos':'neg';return '<span class='+c+'>₹'+v+'</span>'}
 async function ctl(a){await fetch('/api/'+a,{method:'POST'});load()}
+async function closePos(id,sym){
+ if(!confirm('Close '+sym+' now at the current market price?'))return;
+ const r=await fetch('/api/close/'+id,{method:'POST'});
+ const d=await r.json();
+ alert(d.closed?('✅ Closed '+d.symbol+' @ '+d.exit_price+'  P&L ₹'+d.pnl)
+   :('⚠️ Could not close: '+(d.reason||'unknown')));
+ load();
+}
 async function load(){
  try{
   const s=await (await fetch('/api/status')).json();
@@ -200,8 +278,15 @@ async function load(){
    ['Per trade', pnl(pf.expectancy)]
   ].map(c=>'<div class=card><div class=k>'+c[0]+'</div><div class=v>'+c[1]+'</div></div>').join('');
   const P=await (await fetch('/api/positions')).json();
-  $('positions').innerHTML=tbl(P,[['Symbol',r=>r.symbol],['Side',r=>r.side],['Qty',r=>r.qty],
-    ['Entry',r=>r.price],['Stop',r=>r.stop_price],['Target',r=>r.target_price]]);
+  const pos=P.positions||[];
+  const liveTxt=P.live?('Live P&L: '+pnl(P.total_unrealised)+' · target ₹'+P.profit_target+'/trade')
+    :'⚠️ no live price (Kite session needed) — showing entry only';
+  $('posnote').innerHTML=liveTxt;
+  $('positions').innerHTML=tbl(pos,[['Symbol',r=>r.symbol],['Qty',r=>r.qty],
+    ['Entry',r=>r.price],['Now',r=>r.current_premium??'-'],
+    ['Live P&L',r=>pnl(r.unrealised_pnl)],
+    ['Stop',r=>r.stop_price],['Target',r=>r.target_price],
+    ['Action',r=>'<button class=close-btn onclick="closePos('+r.id+',\\''+r.symbol+'\\')">✖ Close</button>']]);
   const T=await (await fetch('/api/trades')).json();
   $('trades').innerHTML=tbl(T,[['Time',r=>(r.ts||'').slice(5,16)],['Symbol',r=>r.symbol],['Side',r=>r.side],
     ['Qty',r=>r.qty],['Entry',r=>r.price],['Exit',r=>r.exit_price??'-'],['P&L',r=>pnl(r.pnl)],['Status',r=>r.status]]);
