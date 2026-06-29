@@ -31,7 +31,7 @@ WATCH_ONLY: list[str] = []   # all analysed symbols are now traded
 CAPITAL: int = 200_000            # Rs sandbox capital (dummy)
 MAX_RISK_PER_TRADE: int = 10_000  # Rs sandbox — sized for NIFTY lot 65
 MAX_TRADES_PER_DAY: int = 6
-MAX_DAILY_LOSS: int = 6_000       # Rs ~3% of capital — kill-switch threshold
+MAX_DAILY_LOSS: int = 20_000      # Rs sandbox — raised for data gathering
 MIN_LOT_SIZE: int = 1             # start at 1 lot; scale only after proven
 
 # Lot sizes (Jan 2026 SEBI/NSE revision) — VERIFY against broker before live use.
