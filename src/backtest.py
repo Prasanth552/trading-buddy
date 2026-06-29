@@ -41,12 +41,12 @@ _HIST_CACHE: dict[tuple, Any] = {}
 _SIG_CACHE: dict[tuple, Any] = {}   # (symbol,days,interval) -> (df, {bar_i: signal})
 
 
-def _fetch_history(client: Any, token: int, days: int, interval: str):
-    """Fetch ``days`` of candles in <=60-day chunks (Kite per-request limit)."""
+def _fetch_history(client: Any, token: int, days: int, interval: str, offset: int = 0):
+    """Fetch ``days`` of candles ending ``offset`` days ago, in <=60-day chunks."""
     import pandas as pd
     from src.data import market_data
 
-    to_dt = mc.now_ist()
+    to_dt = mc.now_ist() - timedelta(days=offset)
     frames = []
     remaining = days
     cursor_to = to_dt
@@ -65,55 +65,85 @@ def _fetch_history(client: Any, token: int, days: int, interval: str):
     return df
 
 
-def _simulate_trade(df, i: int, sig, n: int) -> tuple[str, float, int]:
-    """Walk forward from bar ``i`` to resolve one trade.
+def _simulate_trade(df, i: int, sig, n: int,
+                    st_arr=None, atr_arr=None) -> tuple[str, float, int]:
+    """Walk forward from bar ``i`` to resolve one trade under ``config.EXIT_MODE``.
 
-    Returns (outcome, pnl₹, exit_bar_index). outcome ∈ {'profit','stop','eod'}.
-    Intraday only: squared off at the last bar of the entry day if neither level
-    is hit.
+    Returns (outcome, pnl₹, exit_bar_index). P&L scales with the favourable move
+    relative to the initial risk R (a full initial-stop loss = -MAX_RISK).
+    Intraday only: squared off at the entry day's last bar.
     """
     entry = float(sig.entry)
-    stop = float(sig.stop)
+    stop0 = float(sig.stop)
     is_long = sig.direction == "long"
-    R = abs(entry - stop)
+    R = abs(entry - stop0)
     if R <= 0:
         return "skip", 0.0, i
 
     risk_rs = float(config.MAX_RISK_PER_TRADE)
-    # Take-profit level + payoff. With a rupee target set, TP sits at TARGET/RISK
-    # of R favourable and banks ₹TARGET; with it disabled (0) we let the winner
-    # run to the ATR target (sig.target) and bank its R-multiple in rupees.
-    if config.PROFIT_TARGET_RUPEES > 0:
-        prof_move = R * (config.PROFIT_TARGET_RUPEES / risk_rs)
-        tp_level = entry + prof_move if is_long else entry - prof_move
-        tp_payoff = float(config.PROFIT_TARGET_RUPEES)
-    else:
-        tp_level = float(sig.target)
-        tp_payoff = (abs(sig.target - entry) / R) * risk_rs
+    hi_arr = df["high"].to_numpy(); lo_arr = df["low"].to_numpy(); cl_arr = df["close"].to_numpy()
+    dates = df.index
+    entry_day = dates[i].date()
+    mode = getattr(config, "EXIT_MODE", "target")
 
-    entry_day = df.index[i].date()
-    j = i + 1
-    while j < n and df.index[j].date() == entry_day:
-        hi = float(df["high"].iloc[j]); lo = float(df["low"].iloc[j])
-        if is_long:
-            stop_hit, prof_hit = lo <= stop, hi >= tp_level
+    def _pnl(px: float) -> float:
+        move = (px - entry) if is_long else (entry - px)
+        return round((move / R) * risk_rs, 2)
+
+    # --- Fixed target + initial stop (current live behaviour) --------------
+    if mode == "target":
+        if config.PROFIT_TARGET_RUPEES > 0:
+            prof_move = R * (config.PROFIT_TARGET_RUPEES / risk_rs)
+            tp_level = entry + prof_move if is_long else entry - prof_move
+            tp_payoff = float(config.PROFIT_TARGET_RUPEES)
         else:
-            stop_hit, prof_hit = hi >= stop, lo <= tp_level
-        if stop_hit:                   # worst-case when a bar spans both
-            return "stop", -risk_rs, j
-        if prof_hit:
-            return "profit", round(tp_payoff, 2), j
+            tp_level = float(sig.target)
+            tp_payoff = (abs(sig.target - entry) / R) * risk_rs
+        j = i + 1
+        while j < n and dates[j].date() == entry_day:
+            hi = hi_arr[j]; lo = lo_arr[j]
+            if is_long:
+                stop_hit, prof_hit = lo <= stop0, hi >= tp_level
+            else:
+                stop_hit, prof_hit = hi >= stop0, lo <= tp_level
+            if stop_hit:
+                return "stop", -risk_rs, j
+            if prof_hit:
+                return "profit", round(tp_payoff, 2), j
+            j += 1
+        last = max(i, j - 1)
+        return "eod", _pnl(cl_arr[last]), last
+
+    # --- Trailing exits (let winners run) ---------------------------------
+    cur_stop = stop0
+    peak = entry
+    j = i + 1
+    while j < n and dates[j].date() == entry_day:
+        hi = hi_arr[j]; lo = lo_arr[j]
+        # 1) stop (initial or trailed) — conservative, checked first.
+        if is_long and lo <= cur_stop:
+            return "stop", _pnl(cur_stop), j
+        if (not is_long) and hi >= cur_stop:
+            return "stop", _pnl(cur_stop), j
+        # 2) Supertrend flip exit.
+        if mode == "trail_st" and st_arr is not None:
+            d = st_arr[j]
+            if (is_long and d < 0) or ((not is_long) and d > 0):
+                return "flip", _pnl(cl_arr[j]), j
+        # 3) Chandelier ATR trail update.
+        if mode == "trail_atr" and atr_arr is not None:
+            a = float(atr_arr[j])
+            if is_long:
+                peak = max(peak, hi); cur_stop = max(cur_stop, peak - config.ATR_TRAIL_MULT * a)
+            else:
+                peak = min(peak, lo); cur_stop = min(cur_stop, peak + config.ATR_TRAIL_MULT * a)
         j += 1
-
-    # Square off intraday at the last bar of the entry day.
-    last = j - 1 if j - 1 >= i + 1 else i
-    exit_px = float(df["close"].iloc[last])
-    move = (exit_px - entry) if is_long else (entry - exit_px)
-    pnl = (move / R) * float(config.MAX_RISK_PER_TRADE)
-    return "eod", round(pnl, 2), last
+    last = max(i, j - 1)
+    return "eod", _pnl(cl_arr[last]), last
 
 
-def backtest_symbol(client: Any, symbol: str, days: int, interval: str) -> dict[str, Any]:
+def backtest_symbol(client: Any, symbol: str, days: int, interval: str,
+                    offset: int = 0) -> dict[str, Any]:
     """Run the strategy over one symbol's history; return a stats dict."""
     from src.data import market_data, indicators
     from src.signals import engine
@@ -123,19 +153,20 @@ def backtest_symbol(client: Any, symbol: str, days: int, interval: str) -> dict[
     if token is None:
         return {"symbol": symbol, "error": "no instrument token"}
 
-    ck = (symbol, days, interval)
+    ck = (symbol, days, interval, offset)
     df = _HIST_CACHE.get(ck)
     if df is None:
-        df = _fetch_history(client, token, days, interval)
+        df = _fetch_history(client, token, days, interval, offset)
         _HIST_CACHE[ck] = df
     n = len(df)
     if n < WINDOW_BARS + 5:
         return {"symbol": symbol, "error": f"not enough data ({n} bars)"}
 
     # Expensive step (snapshot + evaluate per bar) is config-independent for the
-    # swept params, so compute the signals once and cache them.
-    sigs = _SIG_CACHE.get(ck)
-    if sigs is None:
+    # swept params, so compute the signals once and cache them. Also precompute
+    # Supertrend direction + ATR over the whole frame for the trailing exits.
+    cached = _SIG_CACHE.get(ck)
+    if cached is None:
         neutral = {"net": "neutral", "has_high_bull": False, "has_high_bear": False}
         sigs = {}
         for k in range(WINDOW_BARS, n - 1):
@@ -145,7 +176,12 @@ def backtest_symbol(client: Any, symbol: str, days: int, interval: str) -> dict[
             s = engine.evaluate(snap, news=neutral)
             if s is not None:
                 sigs[k] = s
-        _SIG_CACHE[ck] = sigs
+        st_arr = indicators.supertrend(
+            df, config.SUPERTREND_ATR_PERIOD, config.SUPERTREND_MULTIPLIER).to_numpy()
+        atr_arr = indicators.atr(df, config.ATR_PERIOD).to_numpy()
+        cached = (sigs, st_arr, atr_arr)
+        _SIG_CACHE[ck] = cached
+    sigs, st_arr, atr_arr = cached
 
     trades: list[dict[str, Any]] = []
     i = WINDOW_BARS
@@ -167,7 +203,7 @@ def backtest_symbol(client: Any, symbol: str, days: int, interval: str) -> dict[
         if day_count.get(day, 0) >= per_sym_cap:
             i += 1
             continue
-        outcome, pnl, exit_i = _simulate_trade(df, i, sig, n)
+        outcome, pnl, exit_i = _simulate_trade(df, i, sig, n, st_arr, atr_arr)
         if outcome == "skip":
             i += 1
             continue
@@ -208,14 +244,15 @@ def _summarise(symbol: str, trades: list[dict[str, Any]], bars: int) -> dict[str
         "max_drawdown": round(mdd, 2),
         "by_outcome": {
             o: sum(1 for t in trades if t["outcome"] == o)
-            for o in ("profit", "stop", "eod")
+            for o in ("profit", "flip", "stop", "eod")
         },
     }
 
 
-def _print_report(results: list[dict[str, Any]], days: int) -> None:
+def _print_report(results: list[dict[str, Any]], days: int, offset: int = 0) -> None:
+    win = f"last {days}d" if not offset else f"days {offset}–{offset + days} ago (out-of-sample)"
     print("\n" + "=" * 64)
-    print(f" BACKTEST — last {days} days · mode={config.STRATEGY_MODE} · "
+    print(f" BACKTEST — {win} · exit={getattr(config, 'EXIT_MODE', 'target')} · "
           f"target ₹{config.PROFIT_TARGET_RUPEES:.0f} / risk ₹{config.MAX_RISK_PER_TRADE}")
     print("=" * 64)
     agg_total = 0.0; agg_trades = 0; agg_wins = 0; agg_losses = 0
@@ -224,31 +261,29 @@ def _print_report(results: list[dict[str, Any]], days: int) -> None:
         if r.get("error"):
             print(f"    (skipped: {r['error']})")
             continue
+        bo = r["by_outcome"]
         print(f"    trades {r['trades']}  ·  win-rate {r['win_rate']}%  "
               f"({r['wins']}W / {r['losses']}L)")
-        print(f"    outcomes: ₹target {r['by_outcome']['profit']} · "
-              f"stop {r['by_outcome']['stop']} · square-off {r['by_outcome']['eod']}")
+        print(f"    outcomes: target {bo['profit']} · flip {bo['flip']} · "
+              f"stop {bo['stop']} · square-off {bo['eod']}")
         print(f"    total P&L ₹{r['total_pnl']:,.0f}  ·  avg/trade ₹{r['avg_pnl']:,.0f}")
         print(f"    profit factor {r['profit_factor']}  ·  max drawdown ₹{r['max_drawdown']:,.0f}")
         agg_total += r["total_pnl"]; agg_trades += r["trades"]
         agg_wins += r["wins"]; agg_losses += r["losses"]
     print("\n" + "-" * 64)
     wr = round(100 * agg_wins / (agg_wins + agg_losses), 1) if (agg_wins + agg_losses) else 0.0
-    print(f" TOTAL: {agg_trades} trades · win-rate {wr}% · net P&L ₹{agg_total:,.0f}")
-    # Break-even win rate for the configured reward:risk.
-    rr = config.PROFIT_TARGET_RUPEES / float(config.MAX_RISK_PER_TRADE)
-    be = round(100 * 1 / (1 + rr), 1)
-    print(f" Break-even win-rate for ₹{config.PROFIT_TARGET_RUPEES:.0f}:₹{config.MAX_RISK_PER_TRADE} "
-          f"= {be}%  →  strategy is {'PROFITABLE ✅' if wr >= be else 'LOSING ❌'} vs break-even")
+    verdict = "PROFITABLE ✅" if agg_total > 0 else "LOSING ❌"
+    print(f" TOTAL: {agg_trades} trades · win-rate {wr}% · net P&L ₹{agg_total:,.0f}  →  {verdict}")
     print("-" * 64)
     print(" Caveat: news veto not modelled; index-level P&L (no slippage/theta).\n")
 
 
-def _run_all(client: Any, symbols: list[str], days: int, interval: str) -> list[dict[str, Any]]:
+def _run_all(client: Any, symbols: list[str], days: int, interval: str,
+             offset: int = 0) -> list[dict[str, Any]]:
     out = []
     for sym in symbols:
         try:
-            out.append(backtest_symbol(client, sym, days, interval))
+            out.append(backtest_symbol(client, sym, days, interval, offset))
         except Exception as exc:  # noqa: BLE001
             out.append({"symbol": sym, "error": str(exc)})
     return out
@@ -301,7 +336,15 @@ def main() -> int:
                     help="Kite interval (default 15minute).")
     ap.add_argument("--sweep", action="store_true",
                     help="Try several profit-target/risk combos and rank by net P&L.")
+    ap.add_argument("--exit", dest="exit_mode",
+                    choices=["target", "trail_st", "trail_atr"],
+                    help="Override EXIT_MODE: fixed target | Supertrend-flip trail | ATR trail.")
+    ap.add_argument("--offset", type=int, default=0,
+                    help="End the window N days ago (for out-of-sample testing).")
     args = ap.parse_args()
+
+    if args.exit_mode:
+        config.EXIT_MODE = args.exit_mode
 
     from src.broker.session import ensure_session
     from src.broker.kite_client import KiteClientError
@@ -316,14 +359,10 @@ def main() -> int:
         print(f"… fetching {args.days}d history and sweeping settings …")
         _sweep(client, symbols, args.days, args.interval)
         return 0
-    results = []
-    for sym in symbols:
-        print(f"… backtesting {sym} ({args.days}d) …")
-        try:
-            results.append(backtest_symbol(client, sym, args.days, args.interval))
-        except Exception as exc:  # noqa: BLE001
-            results.append({"symbol": sym, "error": str(exc)})
-    _print_report(results, args.days)
+    print(f"… backtesting {len(symbols)} symbol(s) · {args.days}d "
+          f"· exit={config.EXIT_MODE} · offset={args.offset}d …")
+    results = _run_all(client, symbols, args.days, args.interval, args.offset)
+    _print_report(results, args.days, args.offset)
     return 0
 
 

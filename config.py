@@ -105,6 +105,13 @@ ATR_PERIOD: int = 14               # ATR for stops/targets
 ATR_STOP_MULT: float = 1.0         # stop = entry ∓ 1 × ATR
 ATR_TARGET_MULT: float = 2.0       # target = entry ± 2 × ATR (1:2 RR)
 
+# Exit style (backtest experimentation; live currently uses "target").
+#   "target"    — fixed ₹/ATR profit target + initial ATR stop (current live)
+#   "trail_st"  — ride the trend, exit when Supertrend flips against the trade
+#   "trail_atr" — chandelier trailing stop (peak ∓ ATR_TRAIL_MULT × ATR)
+EXIT_MODE: str = "target"
+ATR_TRAIL_MULT: float = 2.0        # chandelier trailing-stop distance in ATRs
+
 # Rupee-based take-profit: auto-close an open position once its unrealised
 # profit reaches this amount (₹). Set to 0 to disable and use only the ATR
 # premium target. The user wants ~₹1000-2000 per trade.
