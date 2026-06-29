@@ -36,8 +36,9 @@ log = get_logger("backtest")
 # fetch so EMA/VWAP/ADX/ATR are computed over the same window).
 WINDOW_BARS = 130
 
-# Per-run cache of fetched history so --sweep doesn't re-download each combo.
+# Per-run caches so --sweep doesn't re-download or re-compute each combo.
 _HIST_CACHE: dict[tuple, Any] = {}
+_SIG_CACHE: dict[tuple, Any] = {}   # (symbol,days,interval) -> (df, {bar_i: signal})
 
 
 def _fetch_history(client: Any, token: int, days: int, interval: str):
@@ -130,15 +131,26 @@ def backtest_symbol(client: Any, symbol: str, days: int, interval: str) -> dict[
     if n < WINDOW_BARS + 5:
         return {"symbol": symbol, "error": f"not enough data ({n} bars)"}
 
-    neutral = {"net": "neutral", "has_high_bull": False, "has_high_bear": False}
+    # Expensive step (snapshot + evaluate per bar) is config-independent for the
+    # swept params, so compute the signals once and cache them.
+    sigs = _SIG_CACHE.get(ck)
+    if sigs is None:
+        neutral = {"net": "neutral", "has_high_bull": False, "has_high_bear": False}
+        sigs = {}
+        for k in range(WINDOW_BARS, n - 1):
+            window = df.iloc[k - WINDOW_BARS:k + 1]
+            snap = indicators.build_snapshot(
+                symbol, window, prev_day=None, ltp=float(df["close"].iloc[k]))
+            s = engine.evaluate(snap, news=neutral)
+            if s is not None:
+                sigs[k] = s
+        _SIG_CACHE[ck] = sigs
+
     trades: list[dict[str, Any]] = []
     i = WINDOW_BARS
     day_count: dict[Any, int] = {}
     while i < n - 1:
-        window = df.iloc[i - WINDOW_BARS:i + 1]
-        snap = indicators.build_snapshot(
-            symbol, window, prev_day=None, ltp=float(df["close"].iloc[i]))
-        sig = engine.evaluate(snap, news=neutral)
+        sig = sigs.get(i)
         if sig is None:
             i += 1
             continue
