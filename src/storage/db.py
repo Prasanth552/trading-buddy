@@ -111,6 +111,9 @@ def init_db() -> None:
                 conn.execute(f"ALTER TABLE trades ADD COLUMN {col} REAL")
         if "broker_key" not in cols:
             conn.execute("ALTER TABLE trades ADD COLUMN broker_key TEXT")
+        # Chandelier trailing stop: highest option premium seen since entry.
+        if "peak_price" not in cols:
+            conn.execute("ALTER TABLE trades ADD COLUMN peak_price REAL")
         # Trade-journal context (JSON) on the signal: the conditions at decision time.
         sig_cols = {r[1] for r in conn.execute("PRAGMA table_info(signals)")}
         if "context" not in sig_cols:
@@ -251,6 +254,12 @@ def close_position(trade_id: int, exit_price: float, pnl: float, status: str) ->
             conn.execute(
                 "UPDATE trades SET status='CANCELLED' WHERE signal_id=? AND side='SELL' "
                 "AND status='TRIGGER_PENDING'", (row["signal_id"],))
+
+
+def update_peak_price(trade_id: int, peak: float) -> None:
+    """Record the highest option premium seen since entry (for the trailing stop)."""
+    with get_conn() as conn:
+        conn.execute("UPDATE trades SET peak_price=? WHERE id=?", (peak, trade_id))
 
 
 def bump_trades_count(date_iso: str, by: int = 1) -> None:

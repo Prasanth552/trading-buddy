@@ -114,6 +114,46 @@ def unrealised_pnl(entry_premium: float, current_premium: float, qty: int) -> fl
     return round((current_premium - entry_premium) * qty, 2)
 
 
+# Square off intraday positions near the close (broker auto-squares MIS anyway).
+from datetime import time as _dtime
+_EOD_SQUAREOFF = _dtime(15, 15)
+
+
+def trailing_exit(
+    entry_premium: float, stop_premium: float, current: float, peak: float | None,
+) -> tuple[bool, float, float]:
+    """Chandelier ATR trailing stop on the option premium.
+
+    The trail distance is ATR_TRAIL_MULT × the initial premium risk
+    (entry − initial stop), which equals the ATR-based distance the signal used.
+    Returns (exit_now, exit_price, new_peak).
+    """
+    new_peak = max(peak if peak else entry_premium, current)
+    init_risk = max(entry_premium - stop_premium, 0.05)
+    trail_stop = new_peak - config.ATR_TRAIL_MULT * init_risk
+    eff_stop = max(stop_premium, trail_stop)
+    return (current <= eff_stop, current, new_peak)
+
+
+def resolve_exit(p: dict[str, Any], current: float) -> tuple[str | None, float | None, float | None]:
+    """Decide a position's exit under ``config.EXIT_MODE``.
+
+    Returns (reason, exit_price, new_peak). ``new_peak`` is non-None only for the
+    trailing mode (so the caller can persist it). Square-off near the close wins.
+    """
+    if mc.is_market_open() and mc.now_ist().time() >= _EOD_SQUAREOFF:
+        peak = max(p.get("peak_price") or p["price"], current)
+        return "squareoff", round(float(current), 2), peak
+    mode = getattr(config, "EXIT_MODE", "target")
+    if mode in ("trail_atr", "trail_st"):   # live trail uses the ATR chandelier
+        exit_now, px, new_peak = trailing_exit(
+            p["price"], p["stop_price"], current, p.get("peak_price"))
+        return ("trail" if exit_now else None, round(px, 2) if exit_now else None, new_peak)
+    reason, exit_price = decide_exit(
+        p["price"], p["stop_price"], p["target_price"], current, p["qty"])
+    return reason, exit_price, None
+
+
 def build_order_pair(
     tradingsymbol: str,
     exchange: str,
@@ -394,8 +434,9 @@ def monitor_paper_positions(
             _force_close_if_stale(p, date_iso, notifier)
             continue
 
-        reason, exit_price = decide_exit(
-            p["price"], p["stop_price"], p["target_price"], current, p["qty"])
+        reason, exit_price, new_peak = resolve_exit(p, current)
+        if new_peak is not None and new_peak != (p.get("peak_price") or 0):
+            db.update_peak_price(p["id"], new_peak)
         if reason is None:
             continue
         pnl = round((exit_price - p["price"]) * p["qty"], 2)
@@ -444,8 +485,9 @@ def monitor_upstox_positions(
             _force_close_if_stale(p, date_iso, notifier)
             continue
 
-        reason, exit_price = decide_exit(
-            p["price"], p["stop_price"], p["target_price"], current, p["qty"])
+        reason, exit_price, new_peak = resolve_exit(p, current)
+        if new_peak is not None and new_peak != (p.get("peak_price") or 0):
+            db.update_peak_price(p["id"], new_peak)
         if reason is None:
             continue
 

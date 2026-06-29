@@ -109,13 +109,16 @@ ATR_TARGET_MULT: float = 2.0       # target = entry ± 2 × ATR (1:2 RR)
 #   "target"    — fixed ₹/ATR profit target + initial ATR stop (current live)
 #   "trail_st"  — ride the trend, exit when Supertrend flips against the trade
 #   "trail_atr" — chandelier trailing stop (peak ∓ ATR_TRAIL_MULT × ATR)
-EXIT_MODE: str = "target"
+# Backtest (in- & out-of-sample) showed trail_atr is the best exit; the old
+# fixed ₹ target was the worst. Live now rides the trend with a trailing stop.
+EXIT_MODE: str = "trail_atr"
 ATR_TRAIL_MULT: float = 2.0        # chandelier trailing-stop distance in ATRs
 
-# Rupee-based take-profit: auto-close an open position once its unrealised
-# profit reaches this amount (₹). Set to 0 to disable and use only the ATR
-# premium target. The user wants ~₹1000-2000 per trade.
-PROFIT_TARGET_RUPEES: float = 1500.0
+# Rupee-based take-profit (only used when EXIT_MODE="target"). Disabled now that
+# the proven-best exit is the ATR trailing stop (capping winners at a small ₹
+# target was the worst-performing setup in the backtest). Bank profit early any
+# time via the dashboard's manual Close button.
+PROFIT_TARGET_RUPEES: float = 0.0
 
 # RSI momentum window allowed for entries. Wide on purpose: in trend-following
 # a strong trend can ride RSI high/low for a long time, so we only exclude truly

@@ -13,6 +13,10 @@ import config
 from src.broker import instruments
 from src.execution import executor, guardrails
 
+# These monitor tests validate the fixed-target exit path; pin the mode so they
+# don't dispatch to the live trailing-stop exit.
+config.EXIT_MODE = "target"
+
 
 def check(name: str, cond: bool) -> None:
     print(f"  [{'OK ' if cond else 'BAD'}] {name}")
@@ -140,6 +144,19 @@ def test_evaluate_exit() -> None:
     check("in between -> hold", executor.evaluate_exit(100, 90, 130, 105) == (None, None))
 
 
+def test_trailing_exit() -> None:
+    print("executor.trailing_exit (chandelier ATR trail):")
+    # entry 100, init stop 80 (risk 20), trail dist = ATR_TRAIL_MULT(2)*20 = 40.
+    check("rises, no exit", executor.trailing_exit(100, 80, 130, None) == (False, 130, 130))
+    # peak 130 -> trail stop 90; 95 holds
+    check("holds above trail", executor.trailing_exit(100, 80, 95, 130) == (False, 95, 130))
+    # peak 130 -> trail stop 90; 88 exits
+    ex = executor.trailing_exit(100, 80, 88, 130)
+    check("breaks trail -> exit", ex[0] is True and ex[1] == 88)
+    # never rose -> initial stop protects
+    check("initial stop holds", executor.trailing_exit(100, 80, 79, 100)[0] is True)
+
+
 def _with_temp_db(fn) -> None:
     """Run fn() against an isolated temp DB, restoring config afterwards."""
     from src.storage import db
@@ -235,6 +252,7 @@ def main() -> int:
     test_kill_switch_threshold()
     test_option_selection()
     test_evaluate_exit()
+    test_trailing_exit()
     test_monitor_target_hit()
     test_monitor_kill_switch()
     test_monitor_upstox()

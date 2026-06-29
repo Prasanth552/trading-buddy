@@ -53,8 +53,9 @@ def order_placed(symbol: str, direction: str, qty: int, entry: float,
 
 
 def exit_msg(symbol: str, reason: str, exit_price: float, pnl: float) -> str:
-    # A win is the ATR target, the rupee profit-target, or a manual close in profit.
-    profit = reason in ("target", "profit") or (reason == "manual" and pnl >= 0)
+    # A win is a target hit, or any other exit (trail/square-off/manual) in profit.
+    profit = reason in ("target", "profit") or (
+        reason in ("manual", "trail", "squareoff", "flip") and pnl >= 0)
     if _ta():
         if profit:
             head = ("🎯 *லாபத்தில் வெளியேறியது*" if reason != "manual"
@@ -68,7 +69,8 @@ def exit_msg(symbol: str, reason: str, exit_price: float, pnl: float) -> str:
                 "(திட்டமிட்ட சிறிய நஷ்டம் — பெரிய நஷ்டத்தைத் தடுக்க)")
     emoji = "🎯" if profit else "🛑"
     label = {"target": "TARGET", "profit": "PROFIT ₹", "stop": "STOP",
-             "manual": "MANUAL"}.get(reason, reason.upper())
+             "manual": "MANUAL", "trail": "TRAIL", "squareoff": "EOD",
+             "flip": "FLIP"}.get(reason, reason.upper())
     return f"{emoji} *EXIT ({label})* {symbol} @ {exit_price} | P&L ₹{pnl:,.2f}"
 
 

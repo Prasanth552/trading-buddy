@@ -127,6 +127,7 @@ def api_positions(_: None = Depends(require_auth)) -> JSONResponse:
         "total_unrealised": round(total_unreal, 2),
         "live": kite is not None,
         "profit_target": config.PROFIT_TARGET_RUPEES,
+        "exit_mode": getattr(config, "EXIT_MODE", "target"),
     })
 
 
@@ -280,7 +281,8 @@ async function load(){
   ].map(c=>'<div class=card><div class=k>'+c[0]+'</div><div class=v>'+c[1]+'</div></div>').join('');
   const P=await (await fetch('/api/positions')).json();
   const pos=P.positions||[];
-  const liveTxt=P.live?('Live P&L: '+pnl(P.total_unrealised)+' · target ₹'+P.profit_target+'/trade')
+  const exitTxt=P.exit_mode&&P.exit_mode.startsWith('trail')?'trailing stop (rides the trend)':('target ₹'+P.profit_target+'/trade');
+  const liveTxt=P.live?('Live P&L: '+pnl(P.total_unrealised)+' · exit: '+exitTxt)
     :'⚠️ no live price (Kite session needed) — showing entry only';
   $('posnote').innerHTML=liveTxt;
   $('positions').innerHTML=tbl(pos,[['Symbol',r=>r.symbol],['Qty',r=>r.qty],
