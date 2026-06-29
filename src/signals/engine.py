@@ -119,9 +119,12 @@ def _evaluate_trend(
     if adx < config.ADX_MIN_TREND:
         return None
 
-    bull = (ltp > vwap and ltp > ema_slow and ema_fast > ema_slow and st_dir > 0
+    # Require price to be a minimum distance beyond EMA_slow (real trend, not
+    # hugging the average) — filters low-conviction whipsaw entries.
+    dist = getattr(config, "EMA_TREND_MIN_PCT", 0.0) * ema_slow
+    bull = (ltp > vwap and ltp > ema_slow + dist and ema_fast > ema_slow and st_dir > 0
             and config.RSI_LONG_MIN <= rsi_fast <= config.RSI_LONG_MAX)
-    bear = (ltp < vwap and ltp < ema_slow and ema_fast < ema_slow and st_dir < 0
+    bear = (ltp < vwap and ltp < ema_slow - dist and ema_fast < ema_slow and st_dir < 0
             and config.RSI_SHORT_MIN <= rsi_fast <= config.RSI_SHORT_MAX)
 
     # News conflict gate — veto only when net sentiment strongly opposes.

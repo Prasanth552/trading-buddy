@@ -89,7 +89,17 @@ SUPERTREND_ATR_PERIOD: int = 10    # Supertrend ATR lookback
 SUPERTREND_MULTIPLIER: float = 3.0 # Supertrend ATR multiplier (India default)
 
 ADX_PERIOD: int = 14               # ADX lookback
-ADX_MIN_TREND: float = 20.0        # below this = sideways/chop → no trade
+ADX_MIN_TREND: float = 25.0        # below this = sideways/chop → no trade (raised: be selective)
+
+# Entry-quality filters (reduce over-trading / low-conviction entries).
+# Price must be at least this fraction beyond EMA_slow to confirm a real trend
+# (not just hugging the average) — cuts whipsaw entries.
+EMA_TREND_MIN_PCT: float = 0.0010  # 0.10%
+# Trade only within this intraday window (skip the noisy open/close auctions).
+ENTRY_START: str = "09:45"
+ENTRY_END: str = "15:00"
+# Cap re-entries per symbol per day, and hold one position per symbol at a time.
+MAX_TRADES_PER_SYMBOL_PER_DAY: int = 3
 
 ATR_PERIOD: int = 14               # ATR for stops/targets
 ATR_STOP_MULT: float = 1.0         # stop = entry ∓ 1 × ATR

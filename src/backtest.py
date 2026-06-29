@@ -65,18 +65,19 @@ def _fetch_history(client: Any, token: int, days: int, interval: str):
     return df
 
 
-def _simulate_trade(df, i: int, sig, n: int) -> tuple[str, float]:
-    """Walk forward from bar ``i`` to resolve one trade. Returns (outcome, pnl₹).
+def _simulate_trade(df, i: int, sig, n: int) -> tuple[str, float, int]:
+    """Walk forward from bar ``i`` to resolve one trade.
 
-    outcome ∈ {'profit', 'stop', 'eod'}. Intraday only: squared off at the last
-    bar of the entry day if neither level is hit.
+    Returns (outcome, pnl₹, exit_bar_index). outcome ∈ {'profit','stop','eod'}.
+    Intraday only: squared off at the last bar of the entry day if neither level
+    is hit.
     """
     entry = float(sig.entry)
     stop = float(sig.stop)
     is_long = sig.direction == "long"
     R = abs(entry - stop)
     if R <= 0:
-        return "skip", 0.0
+        return "skip", 0.0, i
 
     risk_rs = float(config.MAX_RISK_PER_TRADE)
     # Take-profit level + payoff. With a rupee target set, TP sits at TARGET/RISK
@@ -99,9 +100,9 @@ def _simulate_trade(df, i: int, sig, n: int) -> tuple[str, float]:
         else:
             stop_hit, prof_hit = hi >= stop, lo <= tp_level
         if stop_hit:                   # worst-case when a bar spans both
-            return "stop", -risk_rs
+            return "stop", -risk_rs, j
         if prof_hit:
-            return "profit", round(tp_payoff, 2)
+            return "profit", round(tp_payoff, 2), j
         j += 1
 
     # Square off intraday at the last bar of the entry day.
@@ -109,7 +110,7 @@ def _simulate_trade(df, i: int, sig, n: int) -> tuple[str, float]:
     exit_px = float(df["close"].iloc[last])
     move = (exit_px - entry) if is_long else (entry - exit_px)
     pnl = (move / R) * float(config.MAX_RISK_PER_TRADE)
-    return "eod", round(pnl, 2)
+    return "eod", round(pnl, 2), last
 
 
 def backtest_symbol(client: Any, symbol: str, days: int, interval: str) -> dict[str, Any]:
@@ -149,29 +150,39 @@ def backtest_symbol(client: Any, symbol: str, days: int, interval: str) -> dict[
     trades: list[dict[str, Any]] = []
     i = WINDOW_BARS
     day_count: dict[Any, int] = {}
+    start_t = _parse_hhmm(getattr(config, "ENTRY_START", "09:15"))
+    end_t = _parse_hhmm(getattr(config, "ENTRY_END", "15:30"))
+    per_sym_cap = getattr(config, "MAX_TRADES_PER_SYMBOL_PER_DAY", config.MAX_TRADES_PER_DAY)
     while i < n - 1:
         sig = sigs.get(i)
         if sig is None:
             i += 1
             continue
-        day = df.index[i].date()
-        if day_count.get(day, 0) >= config.MAX_TRADES_PER_DAY:
+        ts = df.index[i]
+        day = ts.date()
+        # Session-time filter: skip the noisy open/close auctions.
+        if not (start_t <= ts.time() <= end_t):
             i += 1
             continue
-        outcome, pnl = _simulate_trade(df, i, sig, n)
+        if day_count.get(day, 0) >= per_sym_cap:
+            i += 1
+            continue
+        outcome, pnl, exit_i = _simulate_trade(df, i, sig, n)
         if outcome == "skip":
             i += 1
             continue
         day_count[day] = day_count.get(day, 0) + 1
-        trades.append({"ts": df.index[i], "dir": sig.direction,
-                       "outcome": outcome, "pnl": pnl})
-        # Resume after this trade's day to avoid overlapping the same setup.
-        nxt = i + 1
-        while nxt < n and df.index[nxt].date() == day and day_count[day] >= config.MAX_TRADES_PER_DAY:
-            nxt += 1
-        i = max(i + 1, nxt)
+        trades.append({"ts": ts, "dir": sig.direction, "outcome": outcome, "pnl": pnl})
+        # One position per symbol at a time: resume only AFTER this trade exits.
+        i = max(i + 1, exit_i + 1)
 
     return _summarise(symbol, trades, n)
+
+
+def _parse_hhmm(s: str):
+    from datetime import time as _t
+    h, m = s.split(":")
+    return _t(int(h), int(m))
 
 
 def _summarise(symbol: str, trades: list[dict[str, Any]], bars: int) -> dict[str, Any]:
