@@ -36,6 +36,9 @@ log = get_logger("backtest")
 # fetch so EMA/VWAP/ADX/ATR are computed over the same window).
 WINDOW_BARS = 130
 
+# Per-run cache of fetched history so --sweep doesn't re-download each combo.
+_HIST_CACHE: dict[tuple, Any] = {}
+
 
 def _fetch_history(client: Any, token: int, days: int, interval: str):
     """Fetch ``days`` of candles in <=60-day chunks (Kite per-request limit)."""
@@ -74,26 +77,30 @@ def _simulate_trade(df, i: int, sig, n: int) -> tuple[str, float]:
     if R <= 0:
         return "skip", 0.0
 
-    # Rupee profit-target expressed as a favourable index move (premium ≈ idx×δ;
-    # a full stop = MAX_RISK, so ₹TARGET is reached at TARGET/MAX_RISK of R).
-    frac = config.PROFIT_TARGET_RUPEES / float(config.MAX_RISK_PER_TRADE)
-    prof_move = R * frac
-    prof_level = entry + prof_move if is_long else entry - prof_move
+    risk_rs = float(config.MAX_RISK_PER_TRADE)
+    # Take-profit level + payoff. With a rupee target set, TP sits at TARGET/RISK
+    # of R favourable and banks ₹TARGET; with it disabled (0) we let the winner
+    # run to the ATR target (sig.target) and bank its R-multiple in rupees.
+    if config.PROFIT_TARGET_RUPEES > 0:
+        prof_move = R * (config.PROFIT_TARGET_RUPEES / risk_rs)
+        tp_level = entry + prof_move if is_long else entry - prof_move
+        tp_payoff = float(config.PROFIT_TARGET_RUPEES)
+    else:
+        tp_level = float(sig.target)
+        tp_payoff = (abs(sig.target - entry) / R) * risk_rs
 
     entry_day = df.index[i].date()
     j = i + 1
     while j < n and df.index[j].date() == entry_day:
         hi = float(df["high"].iloc[j]); lo = float(df["low"].iloc[j])
         if is_long:
-            stop_hit, prof_hit = lo <= stop, hi >= prof_level
+            stop_hit, prof_hit = lo <= stop, hi >= tp_level
         else:
-            stop_hit, prof_hit = hi >= stop, lo <= prof_level
-        if stop_hit and prof_hit:      # ambiguous bar -> assume the worst (stop)
-            return "stop", -float(config.MAX_RISK_PER_TRADE)
-        if stop_hit:
-            return "stop", -float(config.MAX_RISK_PER_TRADE)
+            stop_hit, prof_hit = hi >= stop, lo <= tp_level
+        if stop_hit:                   # worst-case when a bar spans both
+            return "stop", -risk_rs
         if prof_hit:
-            return "profit", float(config.PROFIT_TARGET_RUPEES)
+            return "profit", round(tp_payoff, 2)
         j += 1
 
     # Square off intraday at the last bar of the entry day.
@@ -114,7 +121,11 @@ def backtest_symbol(client: Any, symbol: str, days: int, interval: str) -> dict[
     if token is None:
         return {"symbol": symbol, "error": "no instrument token"}
 
-    df = _fetch_history(client, token, days, interval)
+    ck = (symbol, days, interval)
+    df = _HIST_CACHE.get(ck)
+    if df is None:
+        df = _fetch_history(client, token, days, interval)
+        _HIST_CACHE[ck] = df
     n = len(df)
     if n < WINDOW_BARS + 5:
         return {"symbol": symbol, "error": f"not enough data ({n} bars)"}
@@ -210,6 +221,54 @@ def _print_report(results: list[dict[str, Any]], days: int) -> None:
     print(" Caveat: news veto not modelled; index-level P&L (no slippage/theta).\n")
 
 
+def _run_all(client: Any, symbols: list[str], days: int, interval: str) -> list[dict[str, Any]]:
+    out = []
+    for sym in symbols:
+        try:
+            out.append(backtest_symbol(client, sym, days, interval))
+        except Exception as exc:  # noqa: BLE001
+            out.append({"symbol": sym, "error": str(exc)})
+    return out
+
+
+def _sweep(client: Any, symbols: list[str], days: int, interval: str) -> None:
+    """Try several (profit-target, risk) combinations and rank them by net P&L.
+
+    profit_target = 0 means "let winners run to the ATR target" (no rupee cap).
+    Mutates config per combo (restored after).
+    """
+    combos = [
+        # (PROFIT_TARGET_RUPEES, MAX_RISK_PER_TRADE)
+        (1500, 10000), (1500, 5000), (1500, 3000), (2000, 3000),
+        (2000, 4000), (3000, 3000), (0, 3000), (0, 5000),
+    ]
+    orig = (config.PROFIT_TARGET_RUPEES, config.MAX_RISK_PER_TRADE)
+    # Cache per-symbol trade *signals* are re-simulated each combo (cheap vs fetch).
+    print(f"\n{'target':>8} {'risk':>7} {'trades':>7} {'win%':>6} {'net P&L':>14} {'PF':>6}")
+    print("-" * 52)
+    best = None
+    for tgt, risk in combos:
+        config.PROFIT_TARGET_RUPEES = float(tgt)
+        config.MAX_RISK_PER_TRADE = int(risk)
+        results = _run_all(client, symbols, days, interval)
+        tot = sum(r.get("total_pnl", 0) for r in results)
+        tr = sum(r.get("trades", 0) for r in results)
+        w = sum(r.get("wins", 0) for r in results)
+        l = sum(r.get("losses", 0) for r in results)
+        wr = round(100 * w / (w + l), 1) if (w + l) else 0.0
+        tlabel = "ATR" if tgt == 0 else f"₹{tgt}"
+        print(f"{tlabel:>8} {risk:>7} {tr:>7} {wr:>6} {tot:>14,.0f}")
+        if best is None or tot > best[0]:
+            best = (tot, tgt, risk, wr, tr)
+    config.PROFIT_TARGET_RUPEES, config.MAX_RISK_PER_TRADE = orig
+    print("-" * 52)
+    if best:
+        tl = "ATR target (let winners run)" if best[1] == 0 else f"₹{best[1]} target"
+        print(f" BEST: {tl} · ₹{best[2]} risk → net ₹{best[0]:,.0f} "
+              f"({best[3]}% win, {best[4]} trades)")
+    print(" (Index-level model; news/slippage/theta not included.)\n")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Backtest the trading strategy on Kite history.")
     ap.add_argument("--symbol", action="append",
@@ -217,6 +276,8 @@ def main() -> int:
     ap.add_argument("--days", type=int, default=90, help="Lookback in days (default 90).")
     ap.add_argument("--interval", default=config.KITE_INTERVALS["15min"],
                     help="Kite interval (default 15minute).")
+    ap.add_argument("--sweep", action="store_true",
+                    help="Try several profit-target/risk combos and rank by net P&L.")
     args = ap.parse_args()
 
     from src.broker.session import ensure_session
@@ -228,6 +289,10 @@ def main() -> int:
         return 1
 
     symbols = args.symbol or list(config.WATCHLIST)
+    if args.sweep:
+        print(f"… fetching {args.days}d history and sweeping settings …")
+        _sweep(client, symbols, args.days, args.interval)
+        return 0
     results = []
     for sym in symbols:
         print(f"… backtesting {sym} ({args.days}d) …")
