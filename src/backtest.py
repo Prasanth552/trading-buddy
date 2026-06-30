@@ -168,6 +168,8 @@ def backtest_symbol(client: Any, symbol: str, days: int, interval: str,
     # each call. This makes --filter-sweep fast.
     cached = _SNAP_CACHE.get(ck)
     if cached is None:
+        print(f"   · building indicators for {symbol} "
+              f"({'recent' if not offset else f'{offset}d-ago'}, {n} bars) …", flush=True)
         snaps = {}
         for k in range(WINDOW_BARS, n - 1):
             window = df.iloc[k - WINDOW_BARS:k + 1]
