@@ -38,7 +38,7 @@ WINDOW_BARS = 130
 
 # Per-run caches so --sweep doesn't re-download or re-compute each combo.
 _HIST_CACHE: dict[tuple, Any] = {}
-_SIG_CACHE: dict[tuple, Any] = {}   # (symbol,days,interval) -> (df, {bar_i: signal})
+_SNAP_CACHE: dict[tuple, Any] = {}  # ck -> ({bar_i: snapshot}, st_arr, atr_arr)
 
 
 def _fetch_history(client: Any, token: int, days: int, interval: str, offset: int = 0):
@@ -162,26 +162,31 @@ def backtest_symbol(client: Any, symbol: str, days: int, interval: str,
     if n < WINDOW_BARS + 5:
         return {"symbol": symbol, "error": f"not enough data ({n} bars)"}
 
-    # Expensive step (snapshot + evaluate per bar) is config-independent for the
-    # swept params, so compute the signals once and cache them. Also precompute
-    # Supertrend direction + ATR over the whole frame for the trailing exits.
-    cached = _SIG_CACHE.get(ck)
+    # The EXPENSIVE step is build_snapshot per bar — and it does NOT depend on the
+    # swept entry filters (ADX/EMA) or exit params. So cache the per-bar snapshots
+    # (+ Supertrend/ATR arrays) once, and only re-run the cheap engine.evaluate
+    # each call. This makes --filter-sweep fast.
+    cached = _SNAP_CACHE.get(ck)
     if cached is None:
-        neutral = {"net": "neutral", "has_high_bull": False, "has_high_bear": False}
-        sigs = {}
+        snaps = {}
         for k in range(WINDOW_BARS, n - 1):
             window = df.iloc[k - WINDOW_BARS:k + 1]
-            snap = indicators.build_snapshot(
+            snaps[k] = indicators.build_snapshot(
                 symbol, window, prev_day=None, ltp=float(df["close"].iloc[k]))
-            s = engine.evaluate(snap, news=neutral)
-            if s is not None:
-                sigs[k] = s
         st_arr = indicators.supertrend(
             df, config.SUPERTREND_ATR_PERIOD, config.SUPERTREND_MULTIPLIER).to_numpy()
         atr_arr = indicators.atr(df, config.ATR_PERIOD).to_numpy()
-        cached = (sigs, st_arr, atr_arr)
-        _SIG_CACHE[ck] = cached
-    sigs, st_arr, atr_arr = cached
+        cached = (snaps, st_arr, atr_arr)
+        _SNAP_CACHE[ck] = cached
+    snaps, st_arr, atr_arr = cached
+
+    # Cheap: evaluate the cached snapshots under the current filter config.
+    neutral = {"net": "neutral", "has_high_bull": False, "has_high_bear": False}
+    sigs = {}
+    for k, snap in snaps.items():
+        s = engine.evaluate(snap, news=neutral)
+        if s is not None:
+            sigs[k] = s
 
     trades: list[dict[str, Any]] = []
     i = WINDOW_BARS
@@ -347,9 +352,7 @@ def _filter_sweep(client: Any, symbols: list[str], days: int, interval: str) -> 
     for adx, ema in combos:
         config.ADX_MIN_TREND = float(adx)
         config.EMA_TREND_MIN_PCT = float(ema)
-        _SIG_CACHE.clear()
         ins = _run_all(client, symbols, days, interval, offset=0)
-        _SIG_CACHE.clear()
         oos = _run_all(client, symbols, days, interval, offset=days)
         ins_tot = sum(r.get("total_pnl", 0) for r in ins)
         oos_tot = sum(r.get("total_pnl", 0) for r in oos)
@@ -361,7 +364,6 @@ def _filter_sweep(client: Any, symbols: list[str], days: int, interval: str) -> 
         if best is None or score > best[0]:
             best = (score, adx, ema, ins_tot, oos_tot)
     config.ADX_MIN_TREND, config.EMA_TREND_MIN_PCT = orig
-    _SIG_CACHE.clear()
     print("-" * 56)
     if best:
         print(f" MOST ROBUST: ADX≥{best[1]} · EMA-dist {best[2]*100:.2f}% "
