@@ -327,6 +327,48 @@ def _sweep(client: Any, symbols: list[str], days: int, interval: str) -> None:
     print(" (Index-level model; news/slippage/theta not included.)\n")
 
 
+def _filter_sweep(client: Any, symbols: list[str], days: int, interval: str) -> None:
+    """Vary the entry filters (ADX floor, EMA-distance) and show net P&L both
+    in-sample (recent) and out-of-sample (prior window), using the live exit mode.
+
+    Re-generates signals each combo (filters change engine.evaluate), so the
+    signal cache is cleared per combo; history stays cached.
+    """
+    combos = [
+        # (ADX_MIN_TREND, EMA_TREND_MIN_PCT)
+        (20, 0.0), (20, 0.0005), (25, 0.0), (25, 0.0005),
+        (25, 0.0010), (30, 0.0005), (30, 0.0010),
+    ]
+    orig = (config.ADX_MIN_TREND, config.EMA_TREND_MIN_PCT)
+    print(f"\n exit={getattr(config,'EXIT_MODE','target')} · risk ₹{config.MAX_RISK_PER_TRADE}")
+    print(f"\n{'ADX':>5} {'EMA%':>7} {'in-sample ₹':>14} {'out-of-sample ₹':>16} {'in#':>5} {'oos#':>5}")
+    print("-" * 56)
+    best = None
+    for adx, ema in combos:
+        config.ADX_MIN_TREND = float(adx)
+        config.EMA_TREND_MIN_PCT = float(ema)
+        _SIG_CACHE.clear()
+        ins = _run_all(client, symbols, days, interval, offset=0)
+        _SIG_CACHE.clear()
+        oos = _run_all(client, symbols, days, interval, offset=days)
+        ins_tot = sum(r.get("total_pnl", 0) for r in ins)
+        oos_tot = sum(r.get("total_pnl", 0) for r in oos)
+        ins_n = sum(r.get("trades", 0) for r in ins)
+        oos_n = sum(r.get("trades", 0) for r in oos)
+        print(f"{adx:>5} {ema*100:>6.2f}% {ins_tot:>14,.0f} {oos_tot:>16,.0f} {ins_n:>5} {oos_n:>5}")
+        # Rank by the worst of the two periods (robustness), then by sum.
+        score = min(ins_tot, oos_tot)
+        if best is None or score > best[0]:
+            best = (score, adx, ema, ins_tot, oos_tot)
+    config.ADX_MIN_TREND, config.EMA_TREND_MIN_PCT = orig
+    _SIG_CACHE.clear()
+    print("-" * 56)
+    if best:
+        print(f" MOST ROBUST: ADX≥{best[1]} · EMA-dist {best[2]*100:.2f}% "
+              f"→ in-sample ₹{best[3]:,.0f}, out-of-sample ₹{best[4]:,.0f}")
+    print(" (Ranked by the worse of the two periods. News/slippage not modelled.)\n")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Backtest the trading strategy on Kite history.")
     ap.add_argument("--symbol", action="append",
@@ -336,6 +378,8 @@ def main() -> int:
                     help="Kite interval (default 15minute).")
     ap.add_argument("--sweep", action="store_true",
                     help="Try several profit-target/risk combos and rank by net P&L.")
+    ap.add_argument("--filter-sweep", action="store_true",
+                    help="Vary ADX/EMA-distance entry filters; show in- & out-of-sample P&L.")
     ap.add_argument("--exit", dest="exit_mode",
                     choices=["target", "trail_st", "trail_atr"],
                     help="Override EXIT_MODE: fixed target | Supertrend-flip trail | ATR trail.")
@@ -358,6 +402,10 @@ def main() -> int:
     if args.sweep:
         print(f"… fetching {args.days}d history and sweeping settings …")
         _sweep(client, symbols, args.days, args.interval)
+        return 0
+    if args.filter_sweep:
+        print(f"… fetching {args.days}d (×2 windows) and sweeping entry filters …")
+        _filter_sweep(client, symbols, args.days, args.interval)
         return 0
     print(f"… backtesting {len(symbols)} symbol(s) · {args.days}d "
           f"· exit={config.EXIT_MODE} · offset={args.offset}d …")
