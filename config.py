@@ -89,12 +89,15 @@ SUPERTREND_ATR_PERIOD: int = 10    # Supertrend ATR lookback
 SUPERTREND_MULTIPLIER: float = 3.0 # Supertrend ATR multiplier (India default)
 
 ADX_PERIOD: int = 14               # ADX lookback
-ADX_MIN_TREND: float = 25.0        # below this = sideways/chop → no trade (raised: be selective)
+# Filter-sweep (in- & out-of-sample) showed ADX>=25 entered trends late and lost
+# in choppy markets; ADX>=20 was the only setting profitable in BOTH periods.
+ADX_MIN_TREND: float = 20.0        # below this = sideways/chop → no trade
 
 # Entry-quality filters (reduce over-trading / low-conviction entries).
-# Price must be at least this fraction beyond EMA_slow to confirm a real trend
-# (not just hugging the average) — cuts whipsaw entries.
-EMA_TREND_MIN_PCT: float = 0.0010  # 0.10%
+# Price must be at least this fraction beyond EMA_slow to confirm a real trend.
+# Sweep found 0.00% most robust (the ADX floor already filters chop), so the EMA
+# only needs to be on the right side of the average.
+EMA_TREND_MIN_PCT: float = 0.0000
 # Trade only within this intraday window (skip the noisy open/close auctions).
 ENTRY_START: str = "09:45"
 ENTRY_END: str = "15:00"
