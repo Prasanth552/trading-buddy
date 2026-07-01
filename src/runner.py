@@ -30,6 +30,34 @@ def _safe_notify(notifier: Any | None, text: str) -> None:
         log.error("Telegram send failed: %s", exc)
 
 
+def _entry_block_reason(index_symbol: str, date_iso: str) -> str | None:
+    """Return why a new entry should be skipped, or None if it's allowed.
+
+    Enforces the same trade-management rules the backtest was validated under:
+      - only trade inside the ENTRY_START..ENTRY_END session window
+      - one open position per symbol at a time
+      - at most MAX_TRADES_PER_SYMBOL_PER_DAY entries per symbol per day
+    """
+    from datetime import time as _t
+    from src.storage import db
+
+    def _hhmm(s: str) -> _t:
+        h, m = s.split(":")
+        return _t(int(h), int(m))
+
+    now_t = mc.now_ist().time()
+    start = _hhmm(getattr(config, "ENTRY_START", "09:15"))
+    end = _hhmm(getattr(config, "ENTRY_END", "15:30"))
+    if not (start <= now_t <= end):
+        return f"outside entry window {config.ENTRY_START}-{config.ENTRY_END}"
+    if db.has_open_position_for(index_symbol):
+        return "a position is already open for this symbol"
+    cap = getattr(config, "MAX_TRADES_PER_SYMBOL_PER_DAY", config.MAX_TRADES_PER_DAY)
+    if db.symbol_trades_today(index_symbol, date_iso) >= cap:
+        return f"per-symbol daily cap reached ({cap})"
+    return None
+
+
 def run_cycle(client: Any, notifier: Any | None, executor: Any) -> dict[str, Any]:
     """Run one full analysis/execution pass. Returns a small result summary."""
     from src.data import market_data
@@ -89,6 +117,15 @@ def run_cycle(client: Any, notifier: Any | None, executor: Any) -> dict[str, Any
         if sig is None:
             continue
         signals_fired += 1
+
+        # Trade-management gates (match the backtest the strategy was validated
+        # with): skip the noisy open/close auctions, hold one position per symbol
+        # at a time, and cap re-entries per symbol per day.
+        sym = snap["symbol"]
+        block = _entry_block_reason(sym, date_iso)
+        if block:
+            log.info("Signal for %s not traded: %s", sym, block)
+            continue
         import json
         context = json.dumps({
             "ltp": snap.get("ltp"), "trend": snap.get("trend"),

@@ -262,6 +262,34 @@ def update_peak_price(trade_id: int, peak: float) -> None:
         conn.execute("UPDATE trades SET peak_price=? WHERE id=?", (peak, trade_id))
 
 
+def has_open_position_for(index_symbol: str) -> bool:
+    """True if any OPEN option position exists for this underlying index.
+
+    The trade row stores the OPTION tradingsymbol (e.g. NIFTY2670723900PE); match
+    on the F&O underlying name (NIFTY/SENSEX/BANKNIFTY) from OPTION_SPECS.
+    """
+    name = (config.OPTION_SPECS.get(index_symbol, {}) or {}).get("name", "")
+    if not name:
+        name = index_symbol.split(":")[-1].replace(" ", "")
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT 1 FROM trades WHERE side='BUY' AND status='OPEN' "
+            "AND symbol LIKE ? LIMIT 1", (f"{name}%",),
+        ).fetchone() is not None
+
+
+def symbol_trades_today(index_symbol: str, date_iso: str) -> int:
+    """Count today's entry trades for this underlying (for the per-symbol cap)."""
+    name = (config.OPTION_SPECS.get(index_symbol, {}) or {}).get("name", "")
+    if not name:
+        name = index_symbol.split(":")[-1].replace(" ", "")
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT COUNT(*) FROM trades WHERE side='BUY' AND symbol LIKE ? "
+            "AND ts LIKE ?", (f"{name}%", f"{date_iso}%"),
+        ).fetchone()[0]
+
+
 def bump_trades_count(date_iso: str, by: int = 1) -> None:
     with get_conn() as conn:
         conn.execute("INSERT OR IGNORE INTO daily_state (date) VALUES (?)", (date_iso,))
