@@ -114,6 +114,19 @@ def _simulate_trade(df, i: int, sig, n: int,
         last = max(i, j - 1)
         return "eod", _pnl(cl_arr[last]), last
 
+    # --- No stop-loss: hold to EOD; option dies if it runs ~Nx ATR against ---
+    if mode == "no_stop":
+        pmult = getattr(config, "PREMIUM_RISK_MULT", 3.0)
+        dead = entry - pmult * R if is_long else entry + pmult * R  # premium→0 level
+        j = i + 1
+        while j < n and dates[j].date() == entry_day:
+            hi = hi_arr[j]; lo = lo_arr[j]
+            if (is_long and lo <= dead) or ((not is_long) and hi >= dead):
+                return "premium_lost", -pmult * risk_rs, j   # full premium gone
+            j += 1
+        last = max(i, j - 1)
+        return "eod", _pnl(cl_arr[last]), last
+
     # --- Trailing exits (let winners run) ---------------------------------
     cur_stop = stop0
     peak = entry
@@ -251,7 +264,7 @@ def _summarise(symbol: str, trades: list[dict[str, Any]], bars: int) -> dict[str
         "max_drawdown": round(mdd, 2),
         "by_outcome": {
             o: sum(1 for t in trades if t["outcome"] == o)
-            for o in ("profit", "flip", "stop", "eod")
+            for o in ("profit", "flip", "stop", "premium_lost", "eod")
         },
     }
 
@@ -272,7 +285,7 @@ def _print_report(results: list[dict[str, Any]], days: int, offset: int = 0) -> 
         print(f"    trades {r['trades']}  ·  win-rate {r['win_rate']}%  "
               f"({r['wins']}W / {r['losses']}L)")
         print(f"    outcomes: target {bo['profit']} · flip {bo['flip']} · "
-              f"stop {bo['stop']} · square-off {bo['eod']}")
+              f"stop {bo['stop']} · premium-lost {bo['premium_lost']} · square-off {bo['eod']}")
         print(f"    total P&L ₹{r['total_pnl']:,.0f}  ·  avg/trade ₹{r['avg_pnl']:,.0f}")
         print(f"    profit factor {r['profit_factor']}  ·  max drawdown ₹{r['max_drawdown']:,.0f}")
         agg_total += r["total_pnl"]; agg_trades += r["trades"]
@@ -385,8 +398,8 @@ def main() -> int:
     ap.add_argument("--filter-sweep", action="store_true",
                     help="Vary ADX/EMA-distance entry filters; show in- & out-of-sample P&L.")
     ap.add_argument("--exit", dest="exit_mode",
-                    choices=["target", "trail_st", "trail_atr"],
-                    help="Override EXIT_MODE: fixed target | Supertrend-flip trail | ATR trail.")
+                    choices=["target", "trail_st", "trail_atr", "no_stop"],
+                    help="Override EXIT_MODE: target | ST-flip trail | ATR trail | no stop-loss.")
     ap.add_argument("--offset", type=int, default=0,
                     help="End the window N days ago (for out-of-sample testing).")
     args = ap.parse_args()

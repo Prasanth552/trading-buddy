@@ -116,6 +116,10 @@ ATR_TARGET_MULT: float = 2.0       # target = entry ± 2 × ATR (1:2 RR)
 # fixed ₹ target was the worst. Live now rides the trend with a trailing stop.
 EXIT_MODE: str = "trail_atr"
 ATR_TRAIL_MULT: float = 2.0        # chandelier trailing-stop distance in ATRs
+# For the "no_stop" backtest experiment only: how many ATRs of adverse index
+# move wipes out the option premium (ATM option → ~0, theta included). Loss is
+# floored at PREMIUM_RISK_MULT × the 1-ATR risk = the full premium paid.
+PREMIUM_RISK_MULT: float = 3.0
 
 # Rupee-based take-profit (only used when EXIT_MODE="target"). Disabled now that
 # the proven-best exit is the ATR trailing stop (capping winners at a small ₹
