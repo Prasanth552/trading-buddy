@@ -53,6 +53,10 @@ STRATEGY_UNIVERSE: list[str] = [
 PRIMARY_TIMEFRAME: str = "15min"   # trend, pivots, RSI, patterns
 ENTRY_TIMEFRAME: str = "5min"      # entry-timing confirmation
 ANALYSIS_INTERVAL_MIN: int = 15    # how often to re-analyse the watchlist
+# How often to check OPEN positions for stop/trailing exits — much more frequent
+# than the analysis cycle so a fast move is cut near the stop, not up to 15 min
+# late (which let single trades lose 2x their intended risk).
+MONITOR_INTERVAL_MIN: int = 2
 
 # Kite historical-data interval strings keyed by our timeframe labels.
 KITE_INTERVALS: dict[str, str] = {"15min": "15minute", "5min": "5minute", "day": "day"}

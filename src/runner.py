@@ -257,6 +257,32 @@ def start_scheduler(confirm_live: bool = False) -> None:
             log.error("Cycle crashed: %s", exc)
             _safe_notify(notifier, f"⚠️ Cycle error: {exc}")
 
+    def monitor_job() -> None:
+        """Fast exit-only check (every MONITOR_INTERVAL_MIN min) so a stop is cut
+        near its level instead of up to a full analysis-cycle late."""
+        if not mc.is_market_open():
+            return
+        try:
+            client = ensure_session()
+        except KiteClientError:
+            return
+        try:
+            from src.storage import db
+            date_iso = mc.now_ist().date().isoformat()
+            ds = dict(db.get_or_create_daily_state(date_iso))
+            if ds.get("kill_switch_tripped"):
+                return
+            if config.EXECUTION_BROKER == "upstox":
+                from src.execution.executor import monitor_upstox_positions
+                exits = monitor_upstox_positions(kite_client=client, notifier=notifier)
+            else:
+                from src.execution.executor import monitor_paper_positions
+                exits = monitor_paper_positions(client=client, notifier=notifier)
+            if exits:
+                log.info("Fast monitor closed %d position(s).", len(exits))
+        except Exception as exc:  # noqa: BLE001 - never let the monitor crash the loop
+            log.error("Fast monitor failed: %s", exc)
+
     def eod_job() -> None:
         if not mc.is_trading_day():
             return
@@ -274,6 +300,10 @@ def start_scheduler(confirm_live: bool = False) -> None:
     sched.add_job(cycle_job, CronTrigger(
         day_of_week="mon-fri", hour="9-15",
         minute=f"*/{config.ANALYSIS_INTERVAL_MIN}", timezone=config.TIMEZONE))
+    # Fast exit monitor: every MONITOR_INTERVAL_MIN min so stops are cut on time.
+    sched.add_job(monitor_job, CronTrigger(
+        day_of_week="mon-fri", hour="9-15",
+        minute=f"*/{config.MONITOR_INTERVAL_MIN}", timezone=config.TIMEZONE))
     # EOD summary just after close.
     sched.add_job(eod_job, CronTrigger(
         day_of_week="mon-fri", hour=15, minute=31, timezone=config.TIMEZONE))
