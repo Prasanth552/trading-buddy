@@ -127,6 +127,12 @@ def _evaluate_trend(
     bear = (ltp < vwap and ltp < ema_slow - dist and ema_fast < ema_slow and st_dir < 0
             and config.RSI_SHORT_MIN <= rsi_fast <= config.RSI_SHORT_MAX)
 
+    # Optional entry-quality gate (weekly-review hypothesis; backtest-validate
+    # before enabling): require a confirming candlestick pattern.
+    if getattr(config, "REQUIRE_PATTERN", False):
+        bull = bull and bool(patterns & _BULLISH_PATTERNS)
+        bear = bear and bool(patterns & _BEARISH_PATTERNS)
+
     # News conflict gate — veto only when net sentiment strongly opposes.
     net_news = news.get("net", "neutral")
     if net_news == "bearish" and news.get("has_high_bear"):

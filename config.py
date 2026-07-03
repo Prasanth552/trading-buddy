@@ -64,6 +64,11 @@ MONITOR_INTERVAL_MIN: int = 2
 KITE_INTERVALS: dict[str, str] = {"15min": "15minute", "5min": "5minute", "day": "day"}
 
 # RSI lookback periods (Wilder's). "fast" reacts quicker; "slow" is the classic 14.
+# Weekly-review hypothesis (2026-07-03): "require a candlestick pattern for
+# entry". OFF until validated on the backtest — the review's sample mixed the
+# old mean-reversion era's wins with the trend era's losses (confounded).
+REQUIRE_PATTERN: bool = False
+
 RSI_FAST_PERIOD: int = 9
 RSI_SLOW_PERIOD: int = 14
 RSI_OVERBOUGHT: float = 70.0
