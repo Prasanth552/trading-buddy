@@ -139,6 +139,11 @@ PREMIUM_RISK_MULT: float = 3.0
 # even — validate via backtest and watch the forward data.
 PROFIT_TARGET_RUPEES: float = 3000.0
 
+# Manual-exit experiment (week of Jul 6): automatic stop-losses DISABLED — the
+# user cuts losers manually via the dashboard Close button. The ₹ take-profit
+# and the 15:15 EOD square-off remain active. Set True to restore auto stops.
+STOP_LOSS_ENABLED: bool = False
+
 # RSI momentum window allowed for entries. Wide on purpose: in trend-following
 # a strong trend can ride RSI high/low for a long time, so we only exclude truly
 # blown-off extremes rather than normal trend momentum.

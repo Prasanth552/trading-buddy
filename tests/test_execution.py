@@ -13,9 +13,11 @@ import config
 from src.broker import instruments
 from src.execution import executor, guardrails
 
-# These monitor tests validate the fixed-target exit path; pin the mode so they
-# don't dispatch to the live trailing-stop exit.
+# These monitor tests validate the fixed-target exit path with automatic stops;
+# pin both so live experiment flags don't change test behaviour.
 config.EXIT_MODE = "target"
+config.STOP_LOSS_ENABLED = True
+config.PROFIT_TARGET_RUPEES = 0.0
 
 
 def check(name: str, cond: bool) -> None:

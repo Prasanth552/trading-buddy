@@ -150,6 +150,10 @@ def resolve_exit(p: dict[str, Any], current: float) -> tuple[str | None, float |
     if target_rs and p["qty"] > 0 and (current - p["price"]) * p["qty"] >= target_rs:
         peak = max(p.get("peak_price") or p["price"], current)
         return "profit", round(float(current), 2), peak
+    # Manual-exit experiment: automatic stops disabled — only the take-profit
+    # above and the EOD square-off act; the user cuts losers from the dashboard.
+    if not getattr(config, "STOP_LOSS_ENABLED", True):
+        return None, None, max(p.get("peak_price") or p["price"], current)
     mode = getattr(config, "EXIT_MODE", "target")
     if mode in ("trail_atr", "trail_st"):   # live trail uses the ATR chandelier
         exit_now, px, new_peak = trailing_exit(
