@@ -132,11 +132,12 @@ ATR_TRAIL_MULT: float = 2.0        # chandelier trailing-stop distance in ATRs
 # floored at PREMIUM_RISK_MULT × the 1-ATR risk = the full premium paid.
 PREMIUM_RISK_MULT: float = 3.0
 
-# Rupee-based take-profit (only used when EXIT_MODE="target"). Disabled now that
-# the proven-best exit is the ATR trailing stop (capping winners at a small ₹
-# target was the worst-performing setup in the backtest). Bank profit early any
-# time via the dashboard's manual Close button.
-PROFIT_TARGET_RUPEES: float = 0.0
+# Rupee take-profit — applies in ALL exit modes: banks the win once unrealised
+# profit reaches this amount (user preference: ₹3,000/trade is enough). The
+# trailing stop still manages the downside. Set 0 to let winners run fully.
+# NOTE: with MAX_RISK_PER_TRADE=10k, a ₹3k cap needs a ~77% win rate to break
+# even — validate via backtest and watch the forward data.
+PROFIT_TARGET_RUPEES: float = 3000.0
 
 # RSI momentum window allowed for entries. Wide on purpose: in trend-following
 # a strong trend can ride RSI high/low for a long time, so we only exclude truly

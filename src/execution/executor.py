@@ -144,6 +144,12 @@ def resolve_exit(p: dict[str, Any], current: float) -> tuple[str | None, float |
     if mc.is_market_open() and mc.now_ist().time() >= _EOD_SQUAREOFF:
         peak = max(p.get("peak_price") or p["price"], current)
         return "squareoff", round(float(current), 2), peak
+    # Rupee take-profit — applies in ALL exit modes: bank the win once the
+    # position is up PROFIT_TARGET_RUPEES (user preference: ~₹3k is enough).
+    target_rs = getattr(config, "PROFIT_TARGET_RUPEES", 0.0)
+    if target_rs and p["qty"] > 0 and (current - p["price"]) * p["qty"] >= target_rs:
+        peak = max(p.get("peak_price") or p["price"], current)
+        return "profit", round(float(current), 2), peak
     mode = getattr(config, "EXIT_MODE", "target")
     if mode in ("trail_atr", "trail_st"):   # live trail uses the ATR chandelier
         exit_now, px, new_peak = trailing_exit(

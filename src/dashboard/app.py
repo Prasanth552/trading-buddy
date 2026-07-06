@@ -54,15 +54,23 @@ _clients: dict[str, Any] = {}
 
 
 def _kite() -> Any | None:
-    """Return a cached Kite client (reuses today's token), or None if unavailable."""
-    if "kite" not in _clients:
-        try:
-            from src.broker.session import ensure_session
-            _clients["kite"] = ensure_session()
-        except Exception as exc:  # noqa: BLE001 - dashboard must not crash
-            _clients["kite"] = None
-            _clients["kite_err"] = str(exc)
-    return _clients.get("kite")
+    """Return a Kite client, (re)connecting as needed.
+
+    Never caches a failure: if the session was unavailable (e.g. the dashboard
+    restarted with a stale daily token), every refresh retries, so live P&L
+    comes back as soon as a valid token exists instead of staying blank.
+    """
+    cli = _clients.get("kite")
+    if cli is not None:
+        return cli
+    try:
+        from src.broker.session import ensure_session
+        _clients["kite"] = ensure_session()
+        return _clients["kite"]
+    except Exception as exc:  # noqa: BLE001 - dashboard must not crash
+        _clients.pop("kite", None)
+        _clients["kite_err"] = str(exc)
+        return None
 
 
 def _notifier() -> Any | None:
@@ -122,6 +130,9 @@ def api_positions(_: None = Depends(require_auth)) -> JSONResponse:
                     total_unreal += live["unrealised_pnl"]
             except Exception as exc:  # noqa: BLE001 - one bad symbol shouldn't break the list
                 r["error"] = str(exc)
+                # Token likely went stale mid-day — drop the cached client so
+                # the next refresh reconnects instead of erroring forever.
+                _clients.pop("kite", None)
     return JSONResponse({
         "positions": rows,
         "total_unrealised": round(total_unreal, 2),
@@ -281,7 +292,9 @@ async function load(){
   ].map(c=>'<div class=card><div class=k>'+c[0]+'</div><div class=v>'+c[1]+'</div></div>').join('');
   const P=await (await fetch('/api/positions')).json();
   const pos=P.positions||[];
-  const exitTxt=P.exit_mode&&P.exit_mode.startsWith('trail')?'trailing stop (rides the trend)':('target ₹'+P.profit_target+'/trade');
+  const exitTxt=(P.exit_mode&&P.exit_mode.startsWith('trail'))
+    ?((P.profit_target>0?('₹'+P.profit_target+' take-profit + '):'')+'trailing stop')
+    :('target ₹'+P.profit_target+'/trade');
   const liveTxt=P.live?('Live P&L: '+pnl(P.total_unrealised)+' · exit: '+exitTxt)
     :'⚠️ no live price (Kite session needed) — showing entry only';
   $('posnote').innerHTML=liveTxt;

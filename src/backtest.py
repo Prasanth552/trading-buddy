@@ -128,6 +128,11 @@ def _simulate_trade(df, i: int, sig, n: int,
         return "eod", _pnl(cl_arr[last]), last
 
     # --- Trailing exits (let winners run) ---------------------------------
+    # Rupee take-profit also applies in trailing mode (mirrors live resolve_exit).
+    tp_level = None
+    if config.PROFIT_TARGET_RUPEES > 0:
+        tp_move = R * (config.PROFIT_TARGET_RUPEES / risk_rs)
+        tp_level = entry + tp_move if is_long else entry - tp_move
     cur_stop = stop0
     peak = entry
     j = i + 1
@@ -138,6 +143,10 @@ def _simulate_trade(df, i: int, sig, n: int,
             return "stop", _pnl(cur_stop), j
         if (not is_long) and hi >= cur_stop:
             return "stop", _pnl(cur_stop), j
+        # 2) rupee take-profit.
+        if tp_level is not None and (
+                (is_long and hi >= tp_level) or ((not is_long) and lo <= tp_level)):
+            return "profit", float(config.PROFIT_TARGET_RUPEES), j
         # 2) Supertrend flip exit.
         if mode == "trail_st" and st_arr is not None:
             d = st_arr[j]
