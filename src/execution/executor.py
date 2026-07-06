@@ -66,6 +66,10 @@ def size_position(
             0, 0, entry_premium, stop_premium, target_premium, risk_per_lot, 0.0, False,
             f"1 lot risk ₹{risk_per_lot:,.0f} exceeds budget ₹{budget:,.0f}",
         )
+    # Optional hard cap (user preference: fixed small size regardless of budget).
+    cap = getattr(config, "MAX_LOTS_PER_TRADE", 0)
+    if cap and cap > 0:
+        lots = min(lots, cap)
     qty = lots * lot_size
     return Sizing(lots, qty, entry_premium, stop_premium, target_premium,
                   risk_per_lot, risk_per_lot * lots, True, "ok")

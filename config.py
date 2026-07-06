@@ -35,6 +35,9 @@ MAX_DAILY_LOSS: int = 200_000     # Rs SANDBOX ONLY — effectively disables the
 # kill switch so every trade plays out and we gather a full performance sample.
 # ⚠️ MUST drop back to ~3% of real capital (e.g. 6_000 on ₹2L) BEFORE going LIVE.
 MIN_LOT_SIZE: int = 1             # start at 1 lot; scale only after proven
+# Hard cap on lots per trade (0 = no cap, size by risk budget). User preference
+# during the manual-exit week: exactly 1 lot per trade, minimum exposure.
+MAX_LOTS_PER_TRADE: int = 1
 
 # Lot sizes (Jan 2026 SEBI/NSE revision) — VERIFY against broker before live use.
 LOT_SIZES: dict[str, int] = {"NIFTY": 65, "SENSEX": 20, "BANKNIFTY": 30}

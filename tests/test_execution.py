@@ -18,6 +18,7 @@ from src.execution import executor, guardrails
 config.EXIT_MODE = "target"
 config.STOP_LOSS_ENABLED = True
 config.PROFIT_TARGET_RUPEES = 0.0
+config.MAX_LOTS_PER_TRADE = 0  # sizing tests validate budget-based lot counts
 
 
 def check(name: str, cond: bool) -> None:
