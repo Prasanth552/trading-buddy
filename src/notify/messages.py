@@ -43,13 +43,19 @@ def signal_alert(sig: dict[str, Any]) -> str:
 def order_placed(symbol: str, direction: str, qty: int, entry: float,
                  stop: float, risk: float, mode: str) -> str:
     emoji = "🟢" if direction == "long" else "🔴"
+    manual = not getattr(config, "STOP_LOSS_ENABLED", True)
     if _ta():
+        stop_line = ("⚠️ ஸ்டாப் இல்லை — நீங்களே வெளியேற வேண்டும் (dashboard Close)"
+                     if manual else
+                     f"ஸ்டாப் (நஷ்டம் தடுக்க): {stop} · இடர்: ₹{risk:,.0f}")
         return (f"{emoji} *{mode} ஆர்டர்* {symbol}\n"
                 f"{qty} யூனிட் ~{entry} விலையில் வாங்கப்பட்டது.\n"
-                f"ஸ்டாப் (நஷ்டம் தடுக்க): {stop} · இடர்: ₹{risk:,.0f}\n"
+                f"{stop_line}\n"
                 "(பயிற்சி வர்த்தகம் — உண்மையான பணம் இல்லை)")
+    stop_line = ("⚠️ NO auto stop — exit manually via dashboard Close"
+                 if manual else f"stop {stop} (risk ₹{risk:,.0f})")
     return (f"{emoji} *{mode} ORDER* {symbol}\n"
-            f"BUY {qty} @ ~{entry}, stop {stop} (risk ₹{risk:,.0f})")
+            f"BUY {qty} @ ~{entry}, {stop_line}")
 
 
 def exit_msg(symbol: str, reason: str, exit_price: float, pnl: float) -> str:

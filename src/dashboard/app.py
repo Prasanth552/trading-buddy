@@ -139,6 +139,7 @@ def api_positions(_: None = Depends(require_auth)) -> JSONResponse:
         "live": kite is not None,
         "profit_target": config.PROFIT_TARGET_RUPEES,
         "exit_mode": getattr(config, "EXIT_MODE", "target"),
+        "stops_enabled": getattr(config, "STOP_LOSS_ENABLED", True),
     })
 
 
@@ -292,17 +293,20 @@ async function load(){
   ].map(c=>'<div class=card><div class=k>'+c[0]+'</div><div class=v>'+c[1]+'</div></div>').join('');
   const P=await (await fetch('/api/positions')).json();
   const pos=P.positions||[];
-  const exitTxt=(P.exit_mode&&P.exit_mode.startsWith('trail'))
-    ?((P.profit_target>0?('₹'+P.profit_target+' take-profit + '):'')+'trailing stop')
-    :('target ₹'+P.profit_target+'/trade');
+  const exitTxt=P.stops_enabled===false
+    ?('₹'+P.profit_target+' take-profit · NO auto stop — cut manually ⚠️')
+    :((P.exit_mode&&P.exit_mode.startsWith('trail'))
+      ?((P.profit_target>0?('₹'+P.profit_target+' take-profit + '):'')+'trailing stop')
+      :('target ₹'+P.profit_target+'/trade'));
   const liveTxt=P.live?('Live P&L: '+pnl(P.total_unrealised)+' · exit: '+exitTxt)
     :'⚠️ no live price (Kite session needed) — showing entry only';
   $('posnote').innerHTML=liveTxt;
-  $('positions').innerHTML=tbl(pos,[['Symbol',r=>r.symbol],['Qty',r=>r.qty],
+  const posCols=[['Symbol',r=>r.symbol],['Qty',r=>r.qty],
     ['Entry',r=>r.price],['Now',r=>r.current_premium??'-'],
-    ['Live P&L',r=>pnl(r.unrealised_pnl)],
-    ['Stop',r=>r.stop_price],['Target',r=>r.target_price],
-    ['Action',r=>'<button class=close-btn onclick="closePos('+r.id+',\\''+r.symbol+'\\')">✖ Close</button>']]);
+    ['Live P&L',r=>pnl(r.unrealised_pnl)]];
+  if(P.stops_enabled!==false){posCols.push(['Stop',r=>r.stop_price],['Target',r=>r.target_price]);}
+  posCols.push(['Action',r=>'<button class=close-btn onclick="closePos('+r.id+',\\''+r.symbol+'\\')">✖ Close</button>']);
+  $('positions').innerHTML=tbl(pos,posCols);
   const T=await (await fetch('/api/trades')).json();
   $('trades').innerHTML=tbl(T,[['Time',r=>(r.ts||'').slice(5,16)],['Symbol',r=>r.symbol],['Side',r=>r.side],
     ['Qty',r=>r.qty],['Entry',r=>r.price],['Exit',r=>r.exit_price??'-'],['P&L',r=>pnl(r.pnl)],['Status',r=>r.status]]);
