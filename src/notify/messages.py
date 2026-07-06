@@ -88,7 +88,7 @@ def eod_summary(date: str, mode: str, sig_count: int, trades_count: int,
             f"பாதுகாப்பு சுவிட்ச்: {ks}",
         ]
         if orders:
-            lines.append("ஆர்டர்கள்:")
+            lines.append("வர்த்தக விவரங்கள் (நுழைவு → வெளியேற்றம் | லாபம்/நஷ்டம்):")
             lines += orders
         return "\n".join(lines)
     ks = "TRIPPED" if tripped else "armed"
@@ -98,7 +98,7 @@ def eod_summary(date: str, mode: str, sig_count: int, trades_count: int,
         f"Realised P&L: ₹{pnl:.2f}", f"Kill switch: {ks}",
     ]
     if orders:
-        lines.append("Orders:")
+        lines.append("Trades (entry → exit | P&L):")
         lines += orders
     return "\n".join(lines)
 

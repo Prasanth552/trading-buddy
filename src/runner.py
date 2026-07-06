@@ -172,7 +172,8 @@ def eod_summary(client: Any, notifier: Any | None) -> str:
     ds = dict(db.get_or_create_daily_state(date_iso))
     with db.get_conn() as conn:
         trades = conn.execute(
-            "SELECT symbol, side, qty, price, status FROM trades WHERE ts LIKE ? ORDER BY id",
+            "SELECT ts, symbol, qty, price, exit_price, pnl, status FROM trades "
+            "WHERE ts LIKE ? AND side='BUY' ORDER BY id",
             (f"{date_iso}%",),
         ).fetchall()
         sig_count = conn.execute(
@@ -180,8 +181,20 @@ def eod_summary(client: Any, notifier: Any | None) -> str:
         ).fetchone()[0]
 
     from src.notify import messages
-    orders = [f"• {t['symbol']} {t['side']} x{t['qty']} @ {t['price']} ({t['status']})"
-              for t in trades]
+    # One clear line per trade: entry -> exit and rupee P&L.
+    orders = []
+    for t in trades:
+        hhmm = (t["ts"] or "")[11:16]
+        if t["exit_price"] is not None:
+            pnl = t["pnl"] or 0.0
+            mark = "🟢" if pnl > 0 else "🔴"
+            reason = (t["status"] or "").replace("CLOSED_", "")
+            orders.append(
+                f"{mark} {hhmm} {t['symbol']} x{t['qty']} | "
+                f"{t['price']} → {t['exit_price']} | ₹{pnl:,.0f} ({reason})")
+        else:
+            orders.append(
+                f"⏳ {hhmm} {t['symbol']} x{t['qty']} | entry {t['price']} | still OPEN")
     text = messages.eod_summary(
         date_iso, config.MODE, sig_count, ds["trades_count"],
         config.MAX_TRADES_PER_DAY, ds["realised_pnl"],
