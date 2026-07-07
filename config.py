@@ -38,6 +38,9 @@ MIN_LOT_SIZE: int = 1             # start at 1 lot; scale only after proven
 # Hard cap on lots per trade (0 = no cap, size by risk budget). User preference
 # during the manual-exit week: 5 lots per trade (half of budget-based ~10).
 MAX_LOTS_PER_TRADE: int = 5
+# Never buy an option expiring today (expiry-day OTM premium melts to zero by
+# close — see the Jul-7 NIFTY 24500CE trade: 36.55 -> 0.10). Roll to next expiry.
+MIN_DAYS_TO_EXPIRY: int = 1
 
 # Lot sizes (Jan 2026 SEBI/NSE revision) — VERIFY against broker before live use.
 LOT_SIZES: dict[str, int] = {"NIFTY": 65, "SENSEX": 20, "BANKNIFTY": 30}

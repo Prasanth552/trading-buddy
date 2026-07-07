@@ -40,11 +40,13 @@ def pick_atm_option(
     direction: str,
     today: date,
     strike_step: int,
+    min_days_to_expiry: int = 0,
 ) -> dict[str, Any] | None:
     """Pick the nearest-expiry ATM CE (long) / PE (short) for ``name``.
 
-    ``instruments`` is a list of Kite instrument dicts (one exchange's dump).
-    Returns the chosen instrument dict, or None if nothing matches.
+    ``min_days_to_expiry=1`` skips contracts expiring TODAY — an expiry-day OTM
+    option is a melting ice cube (theta is maximal and it must finish ITM to be
+    worth anything by 15:30), so we roll to the next expiry instead.
     """
     opt_type = "CE" if direction == "long" else "PE"
     target = atm_strike(index_ltp, strike_step)
@@ -56,7 +58,7 @@ def pick_atm_option(
         if inst.get("instrument_type") != opt_type:
             continue
         exp = _to_date(inst.get("expiry"))
-        if exp is None or exp < today:
+        if exp is None or (exp - today).days < min_days_to_expiry or exp < today:
             continue
         candidates.append((exp, inst))
     if not candidates:
@@ -93,7 +95,8 @@ def resolve_weekly_atm_option(
     instruments = _INSTRUMENT_CACHE[exch]
 
     chosen = pick_atm_option(
-        instruments, spec["name"], index_ltp, direction, today, spec["strike_step"]
+        instruments, spec["name"], index_ltp, direction, today, spec["strike_step"],
+        min_days_to_expiry=getattr(config, "MIN_DAYS_TO_EXPIRY", 1),
     )
     if chosen is None:
         log.warning("No %s option found for %s", direction, index_symbol)
