@@ -114,6 +114,9 @@ def init_db() -> None:
         # Chandelier trailing stop: highest option premium seen since entry.
         if "peak_price" not in cols:
             conn.execute("ALTER TABLE trades ADD COLUMN peak_price REAL")
+        # Hedge-recovery flow: marks counter-trades so they are never re-hedged.
+        if "is_hedge" not in cols:
+            conn.execute("ALTER TABLE trades ADD COLUMN is_hedge INTEGER DEFAULT 0")
         # Trade-journal context (JSON) on the signal: the conditions at decision time.
         sig_cols = {r[1] for r in conn.execute("PRAGMA table_info(signals)")}
         if "context" not in sig_cols:
@@ -214,14 +217,15 @@ def insert_trade(trade: dict[str, Any]) -> int:
         cur = conn.execute(
             """INSERT INTO trades
                (signal_id, ts, symbol, side, qty, price, order_id, mode, status,
-                exit_price, pnl, stop_price, target_price, broker_key)
+                exit_price, pnl, stop_price, target_price, broker_key, is_hedge)
                VALUES (:signal_id, :ts, :symbol, :side, :qty, :price, :order_id,
                        :mode, :status, :exit_price, :pnl, :stop_price, :target_price,
-                       :broker_key)""",
-            {k: trade.get(k) for k in
-             ("signal_id", "ts", "symbol", "side", "qty", "price", "order_id",
-              "mode", "status", "exit_price", "pnl", "stop_price", "target_price",
-              "broker_key")},
+                       :broker_key, :is_hedge)""",
+            {**{k: trade.get(k) for k in
+                ("signal_id", "ts", "symbol", "side", "qty", "price", "order_id",
+                 "mode", "status", "exit_price", "pnl", "stop_price", "target_price",
+                 "broker_key")},
+             "is_hedge": trade.get("is_hedge", 0)},
         )
         return cur.lastrowid
 

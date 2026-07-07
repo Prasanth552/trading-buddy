@@ -19,6 +19,8 @@ config.EXIT_MODE = "target"
 config.STOP_LOSS_ENABLED = True
 config.PROFIT_TARGET_RUPEES = 0.0
 config.MAX_LOTS_PER_TRADE = 0  # sizing tests validate budget-based lot counts
+config.HEDGE_ON_LOSS = False
+config.ZERO_CLOSE_PCT = 0.0
 
 
 def check(name: str, cond: bool) -> None:

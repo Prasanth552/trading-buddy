@@ -155,6 +155,16 @@ PROFIT_TARGET_RUPEES: float = 3000.0
 # and the 15:15 EOD square-off remain active. Set True to restore auto stops.
 STOP_LOSS_ENABLED: bool = False
 
+# Hedge-recovery flow (sandbox experiment, week of Jul 8): when a position is
+# down HEDGE_TRIGGER_RUPEES, open an OPPOSITE-direction ATM option on the same
+# index. The hedge banks via the normal ₹ take-profit; if the original is still
+# bleeding afterwards, the monitor hedges again (repeat). The original is closed
+# automatically once its premium decays to ZERO_CLOSE_PCT of entry ("became
+# zero" — nothing left to recover).
+HEDGE_ON_LOSS: bool = True
+HEDGE_TRIGGER_RUPEES: float = 4000.0
+ZERO_CLOSE_PCT: float = 0.10
+
 # RSI momentum window allowed for entries. Wide on purpose: in trend-following
 # a strong trend can ride RSI high/low for a long time, so we only exclude truly
 # blown-off extremes rather than normal trend momentum.

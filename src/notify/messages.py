@@ -68,15 +68,16 @@ def exit_msg(symbol: str, reason: str, exit_price: float, pnl: float) -> str:
                     else "✅ *நீங்கள் கைமுறையாக வெளியேறினீர்கள் (லாபம்)*")
             return (f"{head} {symbol}\n"
                     f"விலை {exit_price} ஐ அடைந்தது. லாபம்: ₹{pnl:,.2f} 🎉")
-        head = ("🛑 *ஸ்டாப்பில் வெளியேறியது*" if reason != "manual"
-                else "↩️ *நீங்கள் கைமுறையாக வெளியேறினீர்கள்*")
+        head = {"manual": "↩️ *நீங்கள் கைமுறையாக வெளியேறினீர்கள்*",
+                "zero": "🫥 *பிரீமியம் பூஜ்ஜியமானது — மூடப்பட்டது*"}.get(
+                    reason, "🛑 *ஸ்டாப்பில் வெளியேறியது*")
         return (f"{head} {symbol}\n"
                 f"விலை {exit_price} ஐ அடைந்தது. நஷ்டம்: ₹{pnl:,.2f}\n"
                 "(திட்டமிட்ட சிறிய நஷ்டம் — பெரிய நஷ்டத்தைத் தடுக்க)")
     emoji = "🎯" if profit else "🛑"
     label = {"target": "TARGET", "profit": "PROFIT ₹", "stop": "STOP",
              "manual": "MANUAL", "trail": "TRAIL", "squareoff": "EOD",
-             "flip": "FLIP"}.get(reason, reason.upper())
+             "flip": "FLIP", "zero": "ZERO"}.get(reason, reason.upper())
     return f"{emoji} *EXIT ({label})* {symbol} @ {exit_price} | P&L ₹{pnl:,.2f}"
 
 

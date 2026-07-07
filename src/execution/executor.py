@@ -154,6 +154,12 @@ def resolve_exit(p: dict[str, Any], current: float) -> tuple[str | None, float |
     if target_rs and p["qty"] > 0 and (current - p["price"]) * p["qty"] >= target_rs:
         peak = max(p.get("peak_price") or p["price"], current)
         return "profit", round(float(current), 2), peak
+    # "Became zero": premium decayed to a fraction of entry — nothing left to
+    # recover; close and free the slot (hedge-recovery flow rule 3).
+    zc = getattr(config, "ZERO_CLOSE_PCT", 0.0)
+    if zc and current <= float(p["price"]) * zc:
+        peak = max(p.get("peak_price") or p["price"], current)
+        return "zero", round(float(current), 2), peak
     # Manual-exit experiment: automatic stops disabled — only the take-profit
     # above and the EOD square-off act; the user cuts losers from the dashboard.
     if not getattr(config, "STOP_LOSS_ENABLED", True):
@@ -424,6 +430,131 @@ def _force_close_if_stale(
     return True
 
 
+# --------------------------------------------------------------------------
+# Hedge-recovery flow (sandbox experiment)
+# --------------------------------------------------------------------------
+def _opt_type(tradingsymbol: str) -> str:
+    return "CE" if tradingsymbol.upper().endswith("CE") else "PE"
+
+
+def _underlying_of(tradingsymbol: str) -> tuple[str, dict[str, Any]] | tuple[None, None]:
+    """Map an option tradingsymbol back to its index symbol + spec.
+
+    Longest name first so BANKNIFTY doesn't match the NIFTY prefix.
+    """
+    specs = sorted(config.OPTION_SPECS.items(),
+                   key=lambda kv: -len(kv[1]["name"]))
+    for index_symbol, spec in specs:
+        if tradingsymbol.upper().startswith(spec["name"]):
+            return index_symbol, spec
+    return None, None
+
+
+def _in_entry_window() -> bool:
+    from datetime import time as _t
+
+    def _hhmm(s: str) -> _t:
+        h, m = s.split(":")
+        return _t(int(h), int(m))
+
+    now_t = mc.now_ist().time()
+    return (_hhmm(getattr(config, "ENTRY_START", "09:15")) <= now_t
+            <= _hhmm(getattr(config, "ENTRY_END", "15:30")))
+
+
+def should_hedge(p: dict[str, Any], current: float,
+                 open_positions: list[dict[str, Any]]) -> bool:
+    """True when a losing ORIGINAL position should get an opposite-side hedge.
+
+    Rules: hedging enabled; the row is not itself a hedge; unrealised loss has
+    reached HEDGE_TRIGGER_RUPEES; and no opposite-type position is already open
+    for the same underlying (one hedge at a time — re-hedge only after the
+    previous one banked).
+    """
+    if not getattr(config, "HEDGE_ON_LOSS", False) or p.get("is_hedge"):
+        return False
+    pnl = (current - float(p["price"])) * p["qty"]
+    if pnl > -getattr(config, "HEDGE_TRIGGER_RUPEES", 4000.0):
+        return False
+    und, _ = _underlying_of(p["symbol"])
+    if und is None:
+        return False
+    my_type = _opt_type(p["symbol"])
+    for o in open_positions:
+        o_und, _ = _underlying_of(o["symbol"])
+        if o_und == und and _opt_type(o["symbol"]) != my_type:
+            return False  # opposite hedge already open
+    return True
+
+
+def place_hedge(
+    p: dict[str, Any],
+    kite_client: Any,
+    upstox: Any,
+    notifier: Any | None = None,
+) -> dict[str, Any] | None:
+    """Open the opposite-direction ATM option for a bleeding position.
+
+    Original CE -> buy PE (and vice versa), same index, MAX_LOTS_PER_TRADE lots,
+    recorded with is_hedge=1 so it is never itself hedged. The normal ₹
+    take-profit banks it; the monitor re-hedges if the original keeps bleeding.
+    """
+    from src.storage import db
+    from src.broker import instruments as inst_mod
+
+    index_symbol, spec = _underlying_of(p["symbol"])
+    if index_symbol is None:
+        return None
+    direction = "short" if _opt_type(p["symbol"]) == "CE" else "long"
+
+    ltp = kite_client.ltp([index_symbol])[index_symbol]["last_price"]
+    opt = inst_mod.resolve_weekly_atm_option(kite_client, index_symbol, direction, ltp)
+    if not opt:
+        log.warning("Hedge: no option resolved for %s %s", index_symbol, direction)
+        return None
+    full = f"{opt['exchange']}:{opt['tradingsymbol']}"
+    premium = float(kite_client.ltp([full])[full]["last_price"])
+    lot_size = int(opt.get("lot_size") or config.LOT_SIZES.get(spec["lot_key"], 0))
+    lots = max(1, getattr(config, "MAX_LOTS_PER_TRADE", 1) or 1)
+    qty = lots * lot_size
+    if qty <= 0 or premium <= 0:
+        return None
+
+    ux = upstox.resolve_option(index_symbol, opt.get("expiry"),
+                               opt.get("strike"), opt.get("instrument_type"))
+    if not ux:
+        log.warning("Hedge: Upstox contract not found for %s", opt["tradingsymbol"])
+        return None
+    resp = upstox.place_order(ux["instrument_key"], qty, "BUY", order_type="MARKET")
+    ids = resp.get("order_ids") or []
+    order_id = str(ids[0]) if ids else "UPSTOX-NA"
+
+    date_iso = mc.now_ist().date().isoformat()
+    db.insert_trade({
+        "signal_id": None,
+        "ts": mc.now_ist().isoformat(timespec="seconds"),
+        "symbol": opt["tradingsymbol"], "side": "BUY", "qty": qty,
+        "price": premium, "order_id": order_id, "mode": "UPSTOX_SANDBOX",
+        "status": "OPEN", "exit_price": None, "pnl": None,
+        # Reference only (auto stops are managed by config flags).
+        "stop_price": round(premium * 0.8, 2), "target_price": None,
+        "broker_key": ux["instrument_key"], "is_hedge": 1,
+    })
+    db.bump_trades_count(date_iso)
+    log.info("HEDGE opened %s x%d @ %.2f (against %s)",
+             opt["tradingsymbol"], qty, premium, p["symbol"])
+    if notifier is not None:
+        try:
+            notifier.send_message(
+                f"🛡️ *Hedge opened* {opt['tradingsymbol']} x{qty} @ {premium}\n"
+                f"எதிர் திசை வர்த்தகம் — {p['symbol']} நஷ்டத்தை ஈடுசெய்ய. "
+                f"₹{config.PROFIT_TARGET_RUPEES:,.0f} லாபத்தில் தானாக வெளியேறும்.")
+        except Exception:  # noqa: BLE001
+            pass
+    return {"placed": True, "tradingsymbol": opt["tradingsymbol"], "qty": qty,
+            "premium": premium}
+
+
 def monitor_paper_positions(
     client: Any | None = None,
     price_fn: Any | None = None,
@@ -490,8 +621,9 @@ def monitor_upstox_positions(
     date_iso = mc.now_ist().date().isoformat()
     closed: list[dict[str, Any]] = []
 
-    for p in db.get_open_positions("UPSTOX_SANDBOX"):
-        p = dict(p)
+    open_rows = [dict(r) for r in db.get_open_positions("UPSTOX_SANDBOX")]
+    hedged_now: set[str] = set()
+    for p in open_rows:
         sym = p["symbol"]
         exch = _option_exchange(sym)
         current = _safe_ltp(kite_client, sym, exch, price_fn)
@@ -503,6 +635,20 @@ def monitor_upstox_positions(
         if new_peak is not None and new_peak != (p.get("peak_price") or 0):
             db.update_peak_price(p["id"], new_peak)
         if reason is None:
+            # Hedge-recovery: bleeding original + no opposite open -> counter-trade.
+            und, _spec = _underlying_of(sym)
+            if (und and und not in hedged_now and _in_entry_window()
+                    and should_hedge(p, current, open_rows)):
+                ds_now = dict(db.get_or_create_daily_state(date_iso))
+                if ds_now.get("trades_count", 0) < config.MAX_TRADES_PER_DAY:
+                    try:
+                        if upstox is None:
+                            from src.broker.upstox_client import UpstoxClient
+                            upstox = UpstoxClient()
+                        if place_hedge(p, kite_client, upstox, notifier):
+                            hedged_now.add(und)
+                    except Exception as exc:  # noqa: BLE001 - hedging must not break exits
+                        log.error("Hedge placement failed for %s: %s", sym, exc)
             continue
 
         # Close the position on Upstox (SELL the option we bought).
