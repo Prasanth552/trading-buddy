@@ -66,12 +66,16 @@ def _fetch_history(client: Any, token: int, days: int, interval: str, offset: in
 
 
 def _simulate_trade(df, i: int, sig, n: int,
-                    st_arr=None, atr_arr=None) -> tuple[str, float, int]:
+                    st_arr=None, atr_arr=None, sigs=None) -> tuple[str, float, int]:
     """Walk forward from bar ``i`` to resolve one trade under ``config.EXIT_MODE``.
 
     Returns (outcome, pnl₹, exit_bar_index). P&L scales with the favourable move
     relative to the initial risk R (a full initial-stop loss = -MAX_RISK).
     Intraday only: squared off at the entry day's last bar.
+
+    With ``config.STOP_AND_REVERSE`` and ``sigs`` given, an OPPOSITE signal at a
+    later bar closes the trade at that bar's close (outcome 'reverse'); the
+    caller then re-enters in the new direction at the same bar.
     """
     entry = float(sig.entry)
     stop0 = float(sig.stop)
@@ -89,6 +93,14 @@ def _simulate_trade(df, i: int, sig, n: int,
     def _pnl(px: float) -> float:
         move = (px - entry) if is_long else (entry - px)
         return round((move / R) * risk_rs, 2)
+
+    reverse_on = sigs is not None and getattr(config, "STOP_AND_REVERSE", False)
+
+    def _reversal(j: int) -> bool:
+        if not reverse_on:
+            return False
+        s2 = sigs.get(j)
+        return s2 is not None and s2.direction != sig.direction
 
     # --- Fixed target + initial stop (current live behaviour) --------------
     if mode == "target":
@@ -110,6 +122,8 @@ def _simulate_trade(df, i: int, sig, n: int,
                 return "stop", -risk_rs, j
             if prof_hit:
                 return "profit", round(tp_payoff, 2), j
+            if _reversal(j):
+                return "reverse", _pnl(cl_arr[j]), j
             j += 1
         last = max(i, j - 1)
         return "eod", _pnl(cl_arr[last]), last
@@ -123,6 +137,8 @@ def _simulate_trade(df, i: int, sig, n: int,
             hi = hi_arr[j]; lo = lo_arr[j]
             if (is_long and lo <= dead) or ((not is_long) and hi >= dead):
                 return "premium_lost", -pmult * risk_rs, j   # full premium gone
+            if _reversal(j):
+                return "reverse", _pnl(cl_arr[j]), j
             j += 1
         last = max(i, j - 1)
         return "eod", _pnl(cl_arr[last]), last
@@ -147,6 +163,9 @@ def _simulate_trade(df, i: int, sig, n: int,
         if tp_level is not None and (
                 (is_long and hi >= tp_level) or ((not is_long) and lo <= tp_level)):
             return "profit", float(config.PROFIT_TARGET_RUPEES), j
+        # 2b) stop-and-reverse: opposite signal closes at this bar's close.
+        if _reversal(j):
+            return "reverse", _pnl(cl_arr[j]), j
         # 2) Supertrend flip exit.
         if mode == "trail_st" and st_arr is not None:
             d = st_arr[j]
@@ -232,14 +251,18 @@ def backtest_symbol(client: Any, symbol: str, days: int, interval: str,
         if day_count.get(day, 0) >= per_sym_cap:
             i += 1
             continue
-        outcome, pnl, exit_i = _simulate_trade(df, i, sig, n, st_arr, atr_arr)
+        outcome, pnl, exit_i = _simulate_trade(df, i, sig, n, st_arr, atr_arr, sigs)
         if outcome == "skip":
             i += 1
             continue
         day_count[day] = day_count.get(day, 0) + 1
         trades.append({"ts": ts, "dir": sig.direction, "outcome": outcome, "pnl": pnl})
-        # One position per symbol at a time: resume only AFTER this trade exits.
-        i = max(i + 1, exit_i + 1)
+        if outcome == "reverse":
+            # Re-enter at the reversal bar so the opposite signal is taken.
+            i = exit_i
+        else:
+            # One position per symbol at a time: resume only AFTER this trade exits.
+            i = max(i + 1, exit_i + 1)
 
     return _summarise(symbol, trades, n)
 
@@ -273,7 +296,7 @@ def _summarise(symbol: str, trades: list[dict[str, Any]], bars: int) -> dict[str
         "max_drawdown": round(mdd, 2),
         "by_outcome": {
             o: sum(1 for t in trades if t["outcome"] == o)
-            for o in ("profit", "flip", "stop", "premium_lost", "eod")
+            for o in ("profit", "flip", "stop", "premium_lost", "reverse", "eod")
         },
     }
 
@@ -294,7 +317,8 @@ def _print_report(results: list[dict[str, Any]], days: int, offset: int = 0) -> 
         print(f"    trades {r['trades']}  ·  win-rate {r['win_rate']}%  "
               f"({r['wins']}W / {r['losses']}L)")
         print(f"    outcomes: target {bo['profit']} · flip {bo['flip']} · "
-              f"stop {bo['stop']} · premium-lost {bo['premium_lost']} · square-off {bo['eod']}")
+              f"stop {bo['stop']} · premium-lost {bo['premium_lost']} · "
+              f"reverse {bo['reverse']} · square-off {bo['eod']}")
         print(f"    total P&L ₹{r['total_pnl']:,.0f}  ·  avg/trade ₹{r['avg_pnl']:,.0f}")
         print(f"    profit factor {r['profit_factor']}  ·  max drawdown ₹{r['max_drawdown']:,.0f}")
         agg_total += r["total_pnl"]; agg_trades += r["trades"]

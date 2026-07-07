@@ -132,6 +132,11 @@ ATR_TARGET_MULT: float = 2.0       # target = entry ± 2 × ATR (1:2 RR)
 # Backtest (in- & out-of-sample) showed trail_atr is the best exit; the old
 # fixed ₹ target was the worst. Live now rides the trend with a trailing stop.
 EXIT_MODE: str = "trail_atr"
+# Stop-and-reverse (backtest experiment): when an OPPOSITE signal fires while a
+# position is open, close it and enter the new direction — the validated form
+# of "averaging with an opposite trade" (no dead leg, no double theta). OFF in
+# live until the backtest approves it on both windows.
+STOP_AND_REVERSE: bool = False
 ATR_TRAIL_MULT: float = 2.0        # chandelier trailing-stop distance in ATRs
 # For the "no_stop" backtest experiment only: how many ATRs of adverse index
 # move wipes out the option premium (ATM option → ~0, theta included). Loss is
