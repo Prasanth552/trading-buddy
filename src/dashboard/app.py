@@ -112,8 +112,8 @@ def api_positions(_: None = Depends(require_auth)) -> JSONResponse:
     Falls back to entry-only data if no Kite session is available.
     """
     rows = _rows(
-        "SELECT id, symbol, side, qty, price, stop_price, target_price, mode, status, ts "
-        "FROM trades WHERE status='OPEN' AND side='BUY' ORDER BY id DESC")
+        "SELECT id, symbol, side, qty, price, stop_price, target_price, mode, status, ts, "
+        "is_hedge, index_entry FROM trades WHERE status='OPEN' AND side='BUY' ORDER BY id DESC")
     kite = _kite()
     from src.execution import executor
     total_unreal = 0.0
@@ -162,8 +162,8 @@ def api_close(trade_id: int, _: None = Depends(require_auth)) -> JSONResponse:
 @app.get("/api/trades")
 def api_trades(_: None = Depends(require_auth)) -> JSONResponse:
     return JSONResponse(_rows(
-        "SELECT ts, symbol, side, qty, price, exit_price, pnl, mode, status "
-        "FROM trades ORDER BY id DESC LIMIT 30"))
+        "SELECT ts, symbol, side, qty, price, exit_price, pnl, mode, status, "
+        "is_hedge, index_entry FROM trades ORDER BY id DESC LIMIT 30"))
 
 
 @app.get("/api/signals")
@@ -301,15 +301,20 @@ async function load(){
   const liveTxt=P.live?('Live P&L: '+pnl(P.total_unrealised)+' · exit: '+exitTxt)
     :'⚠️ no live price (Kite session needed) — showing entry only';
   $('posnote').innerHTML=liveTxt;
-  const posCols=[['Symbol',r=>r.symbol],['Qty',r=>r.qty],
-    ['Entry',r=>r.price],['Now',r=>r.current_premium??'-'],
+  const posCols=[['Symbol',r=>(r.is_hedge?'🛡️ ':'')+r.symbol],
+    ['Index @',r=>r.index_entry?Math.round(r.index_entry).toLocaleString('en-IN'):'-'],
+    ['Qty',r=>r.qty],
+    ['Prem In',r=>r.price],['Now',r=>r.current_premium??'-'],
     ['Live P&L',r=>pnl(r.unrealised_pnl)]];
   if(P.stops_enabled!==false){posCols.push(['Stop',r=>r.stop_price],['Target',r=>r.target_price]);}
   posCols.push(['Action',r=>'<button class=close-btn onclick="closePos('+r.id+',\\''+r.symbol+'\\')">✖ Close</button>']);
   $('positions').innerHTML=tbl(pos,posCols);
   const T=await (await fetch('/api/trades')).json();
-  $('trades').innerHTML=tbl(T,[['Time',r=>(r.ts||'').slice(5,16)],['Symbol',r=>r.symbol],['Side',r=>r.side],
-    ['Qty',r=>r.qty],['Entry',r=>r.price],['Exit',r=>r.exit_price??'-'],['P&L',r=>pnl(r.pnl)],['Status',r=>r.status]]);
+  $('trades').innerHTML=tbl(T,[['Time',r=>(r.ts||'').slice(5,16)],
+    ['Symbol',r=>(r.is_hedge?'🛡️ ':'')+r.symbol],
+    ['Index @',r=>r.index_entry?Math.round(r.index_entry).toLocaleString('en-IN'):'-'],
+    ['Qty',r=>r.qty],['Prem In',r=>r.price],['Prem Out',r=>r.exit_price??'-'],
+    ['P&L',r=>pnl(r.pnl)],['Status',r=>r.status]]);
   const G=await (await fetch('/api/signals')).json();
   $('signals').innerHTML=tbl(G,[['Time',r=>(r.ts||'').slice(5,16)],['Symbol',r=>r.symbol],['Dir',r=>r.direction],
     ['Entry',r=>r.entry],['Stop',r=>r.stop],['Target',r=>r.target]]);
