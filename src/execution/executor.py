@@ -118,9 +118,31 @@ def unrealised_pnl(entry_premium: float, current_premium: float, qty: int) -> fl
     return round((current_premium - entry_premium) * qty, 2)
 
 
-# Square off intraday positions near the close (broker auto-squares MIS anyway).
+# Square-off time near the close (used daily in intraday mode, or only on the
+# contract's own expiry day in positional mode).
 from datetime import time as _dtime
 _EOD_SQUAREOFF = _dtime(15, 15)
+
+
+def _squareoff_due(p: dict[str, Any]) -> bool:
+    """Should this position be force-closed at 15:15 today?
+
+    Intraday mode: every day. Positional mode: only on (or past) the contract's
+    own expiry day — options settle at expiry and cannot be carried beyond it.
+    Rows with unknown expiry fall back to intraday behaviour for safety.
+    """
+    if not (mc.is_market_open() and mc.now_ist().time() >= _EOD_SQUAREOFF):
+        return False
+    if getattr(config, "INTRADAY_SQUAREOFF", True):
+        return True
+    exp = p.get("expiry")
+    if not exp:
+        return True  # unknown expiry -> safe intraday behaviour
+    from datetime import date as _date
+    try:
+        return mc.now_ist().date() >= _date.fromisoformat(str(exp)[:10])
+    except ValueError:
+        return True
 
 
 def trailing_exit(
@@ -145,7 +167,7 @@ def resolve_exit(p: dict[str, Any], current: float) -> tuple[str | None, float |
     Returns (reason, exit_price, new_peak). ``new_peak`` is non-None only for the
     trailing mode (so the caller can persist it). Square-off near the close wins.
     """
-    if mc.is_market_open() and mc.now_ist().time() >= _EOD_SQUAREOFF:
+    if _squareoff_due(p):
         peak = max(p.get("peak_price") or p["price"], current)
         return "squareoff", round(float(current), 2), peak
     # Rupee take-profit — applies in ALL exit modes: bank the win once the
@@ -221,7 +243,7 @@ class Executor:
     def _place(
         self, order: dict[str, Any], signal_id: int | None, status: str,
         stop_price: float | None = None, target_price: float | None = None,
-        broker_key: str | None = None,
+        broker_key: str | None = None, expiry: str | None = None,
     ) -> str:
         """Place one order and record it. PAPER -> simulated id; LIVE -> real id."""
         from src.storage import db
@@ -274,6 +296,7 @@ class Executor:
             "stop_price": stop_price,
             "target_price": target_price,
             "broker_key": broker_key,
+            "expiry": expiry,
         })
         log.info("ORDER (submitted) id=%s status=%s", order_id, status)
         return order_id
@@ -335,10 +358,12 @@ class Executor:
 
         # Fail-safe: any error in the placement path stops trading + alerts.
         try:
+            opt_expiry = option.get("expiry")
             entry_id = self._place(
                 entry, signal.get("id"), status="OPEN",
                 stop_price=sizing.stop_premium, target_price=sizing.target_premium,
-                broker_key=entry.get("upstox_instrument_key"))
+                broker_key=entry.get("upstox_instrument_key"),
+                expiry=str(opt_expiry)[:10] if opt_expiry else None)
             if config.EXECUTION_BROKER == "upstox":
                 # Protective stop is app-monitored for Upstox sandbox (the monitor
                 # places the closing SELL on stop/target). LIVE should add a resting
@@ -542,6 +567,7 @@ def place_hedge(
         # Reference only (auto stops are managed by config flags).
         "stop_price": round(premium * 0.8, 2), "target_price": None,
         "broker_key": ux["instrument_key"], "is_hedge": 1,
+        "expiry": str(opt.get("expiry"))[:10] if opt.get("expiry") else None,
     })
     db.bump_trades_count(date_iso)
     log.info("HEDGE opened %s x%d @ %.2f (against %s)",

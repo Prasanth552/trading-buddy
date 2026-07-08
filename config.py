@@ -167,6 +167,11 @@ HEDGE_ON_LOSS: bool = True
 HEDGE_TRIGGER_RUPEES: float = 4000.0
 ZERO_CLOSE_PCT: float = 0.10
 
+# Positional weekly options (user request, Jul 9): hold positions overnight —
+# NO daily 15:15 square-off. A contract still MUST close on its own expiry day
+# (options settle; can't be held past expiry). Set True to restore intraday.
+INTRADAY_SQUAREOFF: bool = False
+
 # RSI momentum window allowed for entries. Wide on purpose: in trend-following
 # a strong trend can ride RSI high/low for a long time, so we only exclude truly
 # blown-off extremes rather than normal trend momentum.
@@ -195,7 +200,7 @@ OPTION_SPECS: dict[str, dict[str, Any]] = {
 # Approx ATM option delta — maps an index stop distance to an option-premium stop.
 OPTION_DELTA_ASSUMPTION: float = 0.5
 # Order product/type defaults (Zerodha: no Bracket/Cover orders — use SL-M + separate leg).
-ORDER_PRODUCT: str = "MIS"   # intraday (Kite naming; Upstox uses "I" — see below)
+ORDER_PRODUCT: str = "NRML"  # carry-forward (Kite naming; Upstox uses "D" — see below)
 ENTRY_ORDER_TYPE: str = "MARKET"
 STOP_ORDER_TYPE: str = "SL-M"
 
@@ -213,7 +218,7 @@ UPSTOX_ORDER_URL: str = "https://api-sandbox.upstox.com/v3/order/place"
 UPSTOX_INSTRUMENTS_URL: str = (
     "https://assets.upstox.com/market-quote/instruments/exchange/complete.json.gz"
 )
-UPSTOX_PRODUCT: str = "I"        # intraday
+UPSTOX_PRODUCT: str = "D"        # delivery/carry-forward — hold weekly options overnight
 UPSTOX_VALIDITY: str = "DAY"
 UPSTOX_ENTRY_ORDER_TYPE: str = "MARKET"
 UPSTOX_STOP_ORDER_TYPE: str = "SL-M"
