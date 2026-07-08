@@ -466,12 +466,15 @@ def should_hedge(p: dict[str, Any], current: float,
                  open_positions: list[dict[str, Any]]) -> bool:
     """True when a losing ORIGINAL position should get an opposite-side hedge.
 
-    Rules: hedging enabled; the row is not itself a hedge; unrealised loss has
-    reached HEDGE_TRIGGER_RUPEES; and no opposite-type position is already open
-    for the same underlying (one hedge at a time — re-hedge only after the
-    previous one banked).
+    Rules: hedging enabled; unrealised loss has reached HEDGE_TRIGGER_RUPEES;
+    and no opposite-type position is already open for the same underlying (one
+    counter-position at a time — re-hedge only after the previous one banked).
+
+    Bleeding HEDGES are themselves compensated (the chain continues until a leg
+    hits zero-close or square-off) — the opposite-open check is what prevents
+    runaway stacking: with a CE and PE both open, neither can spawn another.
     """
-    if not getattr(config, "HEDGE_ON_LOSS", False) or p.get("is_hedge"):
+    if not getattr(config, "HEDGE_ON_LOSS", False):
         return False
     pnl = (current - float(p["price"])) * p["qty"]
     if pnl > -getattr(config, "HEDGE_TRIGGER_RUPEES", 4000.0):

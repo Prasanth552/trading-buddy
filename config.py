@@ -30,7 +30,10 @@ WATCH_ONLY: list[str] = []   # all analysed symbols are now traded
 # account, drop these back to 50_000 / 500 / 3 / 1_500 before going live.
 CAPITAL: int = 200_000            # Rs sandbox capital (dummy)
 MAX_RISK_PER_TRADE: int = 10_000  # Rs sandbox — sized for NIFTY lot 65
-MAX_TRADES_PER_DAY: int = 10
+# Effectively uncapped for the sandbox hedge-recovery week: the compensation
+# chain must not be cut off mid-rescue (Jul-9: the 10-trade cap blocked the
+# compensating trades and turned a ~10k day into -45k).
+MAX_TRADES_PER_DAY: int = 100
 MAX_DAILY_LOSS: int = 200_000     # Rs SANDBOX ONLY — effectively disables the
 # kill switch so every trade plays out and we gather a full performance sample.
 # ⚠️ MUST drop back to ~3% of real capital (e.g. 6_000 on ₹2L) BEFORE going LIVE.
@@ -61,10 +64,9 @@ STRATEGY_UNIVERSE: list[str] = [
 PRIMARY_TIMEFRAME: str = "15min"   # trend, pivots, RSI, patterns
 ENTRY_TIMEFRAME: str = "5min"      # entry-timing confirmation
 ANALYSIS_INTERVAL_MIN: int = 15    # how often to re-analyse the watchlist
-# How often to check OPEN positions for stop/trailing exits — much more frequent
-# than the analysis cycle so a fast move is cut near the stop, not up to 15 min
-# late (which let single trades lose 2x their intended risk).
-MONITOR_INTERVAL_MIN: int = 2
+# How often to check OPEN positions for exits/take-profit/hedge triggers.
+# Every minute: hedges open and bank as close to their levels as possible.
+MONITOR_INTERVAL_MIN: int = 1
 
 # Kite historical-data interval strings keyed by our timeframe labels.
 KITE_INTERVALS: dict[str, str] = {"15min": "15minute", "5min": "5minute", "day": "day"}
