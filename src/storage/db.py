@@ -121,6 +121,9 @@ def init_db() -> None:
         # overnight but are squared off on their own expiry day.
         if "expiry" not in cols:
             conn.execute("ALTER TABLE trades ADD COLUMN expiry TEXT")
+        # Index (spot) level at entry — shown in reports as the trade's entry point.
+        if "index_entry" not in cols:
+            conn.execute("ALTER TABLE trades ADD COLUMN index_entry REAL")
         # Trade-journal context (JSON) on the signal: the conditions at decision time.
         sig_cols = {r[1] for r in conn.execute("PRAGMA table_info(signals)")}
         if "context" not in sig_cols:
@@ -222,16 +225,17 @@ def insert_trade(trade: dict[str, Any]) -> int:
             """INSERT INTO trades
                (signal_id, ts, symbol, side, qty, price, order_id, mode, status,
                 exit_price, pnl, stop_price, target_price, broker_key, is_hedge,
-                expiry)
+                expiry, index_entry)
                VALUES (:signal_id, :ts, :symbol, :side, :qty, :price, :order_id,
                        :mode, :status, :exit_price, :pnl, :stop_price, :target_price,
-                       :broker_key, :is_hedge, :expiry)""",
+                       :broker_key, :is_hedge, :expiry, :index_entry)""",
             {**{k: trade.get(k) for k in
                 ("signal_id", "ts", "symbol", "side", "qty", "price", "order_id",
                  "mode", "status", "exit_price", "pnl", "stop_price", "target_price",
                  "broker_key")},
              "is_hedge": trade.get("is_hedge", 0),
-             "expiry": trade.get("expiry")},
+             "expiry": trade.get("expiry"),
+             "index_entry": trade.get("index_entry")},
         )
         return cur.lastrowid
 

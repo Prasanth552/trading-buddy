@@ -244,6 +244,7 @@ class Executor:
         self, order: dict[str, Any], signal_id: int | None, status: str,
         stop_price: float | None = None, target_price: float | None = None,
         broker_key: str | None = None, expiry: str | None = None,
+        index_entry: float | None = None,
     ) -> str:
         """Place one order and record it. PAPER -> simulated id; LIVE -> real id."""
         from src.storage import db
@@ -297,6 +298,7 @@ class Executor:
             "target_price": target_price,
             "broker_key": broker_key,
             "expiry": expiry,
+            "index_entry": index_entry,
         })
         log.info("ORDER (submitted) id=%s status=%s", order_id, status)
         return order_id
@@ -363,7 +365,8 @@ class Executor:
                 entry, signal.get("id"), status="OPEN",
                 stop_price=sizing.stop_premium, target_price=sizing.target_premium,
                 broker_key=entry.get("upstox_instrument_key"),
-                expiry=str(opt_expiry)[:10] if opt_expiry else None)
+                expiry=str(opt_expiry)[:10] if opt_expiry else None,
+                index_entry=float(signal.get("entry") or 0) or None)
             if config.EXECUTION_BROKER == "upstox":
                 # Protective stop is app-monitored for Upstox sandbox (the monitor
                 # places the closing SELL on stop/target). LIVE should add a resting
@@ -568,6 +571,7 @@ def place_hedge(
         "stop_price": round(premium * 0.8, 2), "target_price": None,
         "broker_key": ux["instrument_key"], "is_hedge": 1,
         "expiry": str(opt.get("expiry"))[:10] if opt.get("expiry") else None,
+        "index_entry": round(float(ltp), 2),
     })
     db.bump_trades_count(date_iso)
     log.info("HEDGE opened %s x%d @ %.2f (against %s)",

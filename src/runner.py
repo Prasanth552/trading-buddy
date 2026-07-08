@@ -172,8 +172,8 @@ def eod_summary(client: Any, notifier: Any | None) -> str:
     ds = dict(db.get_or_create_daily_state(date_iso))
     with db.get_conn() as conn:
         trades = conn.execute(
-            "SELECT ts, symbol, qty, price, exit_price, pnl, status FROM trades "
-            "WHERE ts LIKE ? AND side='BUY' ORDER BY id",
+            "SELECT ts, symbol, qty, price, exit_price, pnl, status, is_hedge, "
+            "index_entry FROM trades WHERE ts LIKE ? AND side='BUY' ORDER BY id",
             (f"{date_iso}%",),
         ).fetchall()
         sig_count = conn.execute(
@@ -181,27 +181,74 @@ def eod_summary(client: Any, notifier: Any | None) -> str:
         ).fetchone()[0]
 
     from src.notify import messages
-    # One clear line per trade: entry -> exit and rupee P&L.
+    # One clear line per trade: direction, index entry point, premium in -> out, P&L.
     orders = []
     for t in trades:
         hhmm = (t["ts"] or "")[11:16]
-        if t["exit_price"] is not None:
-            pnl = t["pnl"] or 0.0
+        d = dict(t)
+        is_call = d["symbol"].upper().endswith("CE")
+        direction = "📈CALL வாங்கல் (ஏறும்)" if is_call else "📉PUT வாங்கல் (இறங்கும்)"
+        hedge = " 🛡️hedge" if d.get("is_hedge") else ""
+        idx = (f" | index @{d['index_entry']:,.0f}" if d.get("index_entry") else "")
+        if d["exit_price"] is not None:
+            pnl = d["pnl"] or 0.0
             mark = "🟢" if pnl > 0 else "🔴"
-            reason = (t["status"] or "").replace("CLOSED_", "")
+            reason = (d["status"] or "").replace("CLOSED_", "")
             orders.append(
-                f"{mark} {hhmm} {t['symbol']} x{t['qty']} | "
-                f"{t['price']} → {t['exit_price']} | ₹{pnl:,.0f} ({reason})")
+                f"{mark} {hhmm} {direction}{hedge} {d['symbol']} x{d['qty']}{idx} | "
+                f"prem {d['price']} → {d['exit_price']} | ₹{pnl:,.0f} ({reason})")
         else:
             orders.append(
-                f"⏳ {hhmm} {t['symbol']} x{t['qty']} | entry {t['price']} | still OPEN")
+                f"⏳ {hhmm} {direction}{hedge} {d['symbol']} x{d['qty']}{idx} | "
+                f"prem {d['price']} | still OPEN")
     text = messages.eod_summary(
         date_iso, config.MODE, sig_count, ds["trades_count"],
         config.MAX_TRADES_PER_DAY, ds["realised_pnl"],
         bool(ds["kill_switch_tripped"]), orders=orders or None)
     _safe_notify(notifier, text)
+
+    # Whole-day AI insight (one consolidated view instead of scattered
+    # per-signal analyses). Best-effort: never break the summary.
+    if notifier is not None and trades:
+        try:
+            insight = _daily_insight(date_iso, [dict(t) for t in trades], ds)
+            _safe_notify(notifier, "📔 *இன்றைய முழு-நாள் பகுப்பாய்வு*\n\n" + insight)
+        except Exception as exc:  # noqa: BLE001
+            log.error("Daily insight failed: %s", exc)
+
     log.info("EOD summary sent.")
     return text
+
+
+def _daily_insight(date_iso: str, trades: list[dict], ds: dict) -> str:
+    """One LLM-generated whole-day review: what the market did, what the bot
+    did (originals vs hedges), what worked/hurt, and one thing to watch."""
+    from src.llm.client import LLMClient
+
+    lines = []
+    for t in trades:
+        kind = "HEDGE" if t.get("is_hedge") else "ORIG"
+        opt = "CALL(bullish)" if t["symbol"].upper().endswith("CE") else "PUT(bearish)"
+        lines.append(
+            f"{(t['ts'] or '')[11:16]} {kind} {opt} {t['symbol']} x{t['qty']} "
+            f"index@{t.get('index_entry')} prem {t['price']}->{t['exit_price']} "
+            f"pnl {t['pnl']} status {t['status']}")
+    tamil = config.ALERT_LANGUAGE.lower() in ("tamil", "ta")
+    system = (
+        "You are a trading-day reviewer for an NSE index-options PAPER-trading bot "
+        "that buys options and uses a hedge-recovery flow (opposite-side hedges when "
+        "a position bleeds). Given today's trade log, write a WHOLE-DAY review: "
+        "(1) one-line day summary with net P&L, (2) what the market likely did based "
+        "on the trade directions/outcomes, (3) what worked, (4) what hurt, "
+        "(5) ONE concrete thing to watch tomorrow. Be factual, use only the given "
+        "data, keep under ~160 words."
+        + (" Respond in simple Tamil; keep numbers and NIFTY/SENSEX/CALL/PUT in "
+           "English." if tamil else " Respond in concise English.")
+    )
+    user = (f"Date: {date_iso}\nRealised P&L: Rs {ds['realised_pnl']:,.0f}\n"
+            f"Trades ({len(trades)}):\n" + "\n".join(lines))
+    return LLMClient().complete_text(
+        system=system, user=user, model=config.LLM_SMART_MODEL, max_tokens=500)
 
 
 def weekly_review(notifier: Any | None) -> str:
