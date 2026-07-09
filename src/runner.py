@@ -272,7 +272,8 @@ def _settings_banner() -> str:
     ambiguous and a deploy that didn't take effect is visible immediately."""
     stops = "ON" if getattr(config, "STOP_LOSS_ENABLED", True) else "OFF (manual cuts)"
     hedge = "ON" if getattr(config, "HEDGE_ON_LOSS", False) else "OFF"
-    style = "intraday" if getattr(config, "INTRADAY_SQUAREOFF", True) else "positional"
+    style = ("intraday (daily 15:15 squareoff)" if getattr(config, "INTRADAY_SQUAREOFF", True)
+             else "holds till TP/expiry")
     return (f"⚙️ Bot alive · stops={stops} · hedge chain {hedge} · {style} · "
             f"TP ₹{getattr(config, 'PROFIT_TARGET_RUPEES', 0):,.0f} · "
             f"{getattr(config, 'MAX_LOTS_PER_TRADE', 0)} lots · "
