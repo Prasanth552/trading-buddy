@@ -265,6 +265,20 @@ def weekly_review(notifier: Any | None) -> str:
     return text
 
 
+def _settings_banner() -> str:
+    """One-line daily statement of the ACTIVE rules the running process loaded.
+
+    Sent at startup and at the 9:05 pre-open check so silence is never
+    ambiguous and a deploy that didn't take effect is visible immediately."""
+    stops = "ON" if getattr(config, "STOP_LOSS_ENABLED", True) else "OFF (manual cuts)"
+    hedge = "ON" if getattr(config, "HEDGE_ON_LOSS", False) else "OFF"
+    style = "intraday" if getattr(config, "INTRADAY_SQUAREOFF", True) else "positional"
+    return (f"⚙️ Bot alive · stops={stops} · hedge chain {hedge} · {style} · "
+            f"TP ₹{getattr(config, 'PROFIT_TARGET_RUPEES', 0):,.0f} · "
+            f"{getattr(config, 'MAX_LOTS_PER_TRADE', 0)} lots · "
+            f"monitor {getattr(config, 'MONITOR_INTERVAL_MIN', 15)}min")
+
+
 def _ensure_or_refresh_session(notifier: Any | None) -> Any | None:
     """Pre-open: reuse cached token, try TOTP auto-login, else alert for manual login."""
     from src.broker.session import ensure_session, automated_login
@@ -355,6 +369,7 @@ def start_scheduler(confirm_live: bool = False) -> None:
     def preopen_job() -> None:
         if mc.is_trading_day():
             _ensure_or_refresh_session(notifier)
+            _safe_notify(notifier, _settings_banner())
 
     # Cycle: every ANALYSIS_INTERVAL_MIN minutes, weekdays, market hours (gated inside).
     sched.add_job(cycle_job, CronTrigger(
@@ -408,6 +423,7 @@ def start_scheduler(confirm_live: bool = False) -> None:
     log.info("Scheduler started (MODE=%s). Market hours %s-%s IST. Ctrl-C to stop.",
              config.MODE, config.MARKET_OPEN, config.MARKET_CLOSE)
     _safe_notify(notifier, messages.started(config.MODE))
+    _safe_notify(notifier, _settings_banner())
     try:
         sched.start()
     except (KeyboardInterrupt, SystemExit):
