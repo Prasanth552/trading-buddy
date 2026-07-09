@@ -167,6 +167,11 @@ HEDGE_ON_LOSS: bool = True
 HEDGE_TRIGGER_RUPEES: float = 4000.0
 ZERO_CLOSE_PCT: float = 0.10
 
+# 15-minute market pulse on Telegram: every analysis cycle sends a compact
+# per-symbol read (price, ST/ADX/RSI, and which gate blocks a trade). ~25
+# messages/day during market hours — set False to silence.
+CANDLE_PULSE: bool = True
+
 # Positional weekly options (user request, Jul 9): hold positions overnight —
 # NO daily 15:15 square-off. A contract still MUST close on its own expiry day
 # (options settle; can't be held past expiry). Set True to restore intraday.

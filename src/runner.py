@@ -58,6 +58,59 @@ def _entry_block_reason(index_symbol: str, date_iso: str) -> str | None:
     return None
 
 
+def _nanish(x: Any) -> bool:
+    return x is None or (isinstance(x, float) and x != x)
+
+
+def _gate_read(s: dict[str, Any]) -> str:
+    """One-line read: LONG/SHORT setup ready, or which gates block the nearer side."""
+    ltp = s.get("ltp"); vw = s.get("vwap"); ef = s.get("ema_fast"); es = s.get("ema_slow")
+    st = s.get("supertrend_dir"); adx = s.get("adx"); rsi = s.get("rsi_fast")
+    if any(_nanish(v) for v in (ltp, vw, ef, es, st, adx, rsi)):
+        return "தரவு போதவில்லை"
+    long_fails, short_fails = [], []
+    if not ltp > vw: long_fails.append("price<VWAP")
+    if not ltp > es: long_fails.append("price<EMA21")
+    if not ef > es: long_fails.append("EMA9<21")
+    if not st > 0: long_fails.append("ST↓")
+    if not ltp < vw: short_fails.append("price>VWAP")
+    if not ltp < es: short_fails.append("price>EMA21")
+    if not ef < es: short_fails.append("EMA9>21")
+    if not st < 0: short_fails.append("ST↑")
+    if adx < config.ADX_MIN_TREND:
+        long_fails.append(f"ADX {adx:.0f} weak"); short_fails.append(f"ADX {adx:.0f} weak")
+    if not (config.RSI_LONG_MIN <= rsi <= config.RSI_LONG_MAX):
+        long_fails.append(f"RSI {rsi:.0f} out")
+    if not (config.RSI_SHORT_MIN <= rsi <= config.RSI_SHORT_MAX):
+        short_fails.append(f"RSI {rsi:.0f} out")
+    if not long_fails:
+        return "📈 LONG setup தயார் ✔"
+    if not short_fails:
+        return "📉 SHORT setup தயார் ✔"
+    side, fails = (("LONG", long_fails) if len(long_fails) <= len(short_fails)
+                   else ("SHORT", short_fails))
+    return f"{side} காத்திருப்பு — தடை: {', '.join(fails[:2])}"
+
+
+def _candle_pulse(notifier: Any | None, snaps: list[dict[str, Any]],
+                  signals_fired: int) -> None:
+    """15-min market pulse to Telegram — analysis every candle, trade or not."""
+    if notifier is None or not getattr(config, "CANDLE_PULSE", False) or not snaps:
+        return
+    lines = [f"🕒 *{mc.now_ist():%H:%M} — 15min candle நிலவரம்*"]
+    for s in snaps:
+        name = s["symbol"].split(":")[-1].replace(" 50", "").replace("NIFTY BANK", "BANKNIFTY")
+        st = s.get("supertrend_dir") or 0
+        ltp = s.get("ltp"); adx = s.get("adx"); rsi = s.get("rsi_fast")
+        head = (f"*{name}* {ltp:,.0f} | ST{'↑' if st > 0 else '↓'} "
+                f"ADX {0 if _nanish(adx) else adx:.0f} RSI {0 if _nanish(rsi) else rsi:.0f}"
+                if not _nanish(ltp) else f"*{name}* தரவு இல்லை")
+        lines.append(f"{head}\n   → {_gate_read(s)}")
+    if signals_fired:
+        lines.append(f"⚡ இந்த candle-இல் {signals_fired} signal(s) fired")
+    _safe_notify(notifier, "\n".join(lines))
+
+
 def run_cycle(client: Any, notifier: Any | None, executor: Any) -> dict[str, Any]:
     """Run one full analysis/execution pass. Returns a small result summary."""
     from src.data import market_data
@@ -160,6 +213,12 @@ def run_cycle(client: Any, notifier: Any | None, executor: Any) -> dict[str, Any
         except Exception as exc:  # noqa: BLE001 - fail safe: log + alert, don't crash loop
             log.error("Execution error for %s: %s", snap["symbol"], exc)
             _safe_notify(notifier, f"⚠️ Execution error {snap['symbol']}: {exc}")
+
+    # 15-min market pulse (analysis every candle, independent of trades).
+    try:
+        _candle_pulse(notifier, snaps, signals_fired)
+    except Exception as exc:  # noqa: BLE001 - pulse must never break the cycle
+        log.error("Candle pulse failed: %s", exc)
 
     log.info("Cycle complete — %d signal(s) fired.", signals_fired)
     return {"signals": signals_fired, "symbols": len(snaps)}
