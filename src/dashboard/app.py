@@ -161,9 +161,23 @@ def api_close(trade_id: int, _: None = Depends(require_auth)) -> JSONResponse:
 
 @app.get("/api/trades")
 def api_trades(_: None = Depends(require_auth)) -> JSONResponse:
-    return JSONResponse(_rows(
-        "SELECT ts, symbol, side, qty, price, exit_price, pnl, mode, status, "
-        "is_hedge, index_entry FROM trades ORDER BY id DESC LIMIT 30"))
+    """Recent trades; still-OPEN rows are enriched with live premium + P&L."""
+    rows = _rows(
+        "SELECT id, ts, symbol, side, qty, price, exit_price, pnl, mode, status, "
+        "is_hedge, index_entry, stop_price, target_price "
+        "FROM trades ORDER BY id DESC LIMIT 30")
+    kite = _kite()
+    if kite is not None:
+        from src.execution import executor
+        for r in rows:
+            if r["status"] == "OPEN" and r["side"] == "BUY":
+                try:
+                    live = executor.position_pnl(r, kite)
+                    r["current_premium"] = live["current_premium"]
+                    r["unrealised_pnl"] = live["unrealised_pnl"]
+                except Exception:  # noqa: BLE001 - display-only enrichment
+                    pass
+    return JSONResponse(rows)
 
 
 @app.get("/api/signals")
@@ -301,7 +315,9 @@ async function load(){
   const liveTxt=P.live?('Live P&L: '+pnl(P.total_unrealised)+' · exit: '+exitTxt)
     :'⚠️ no live price (Kite session needed) — showing entry only';
   $('posnote').innerHTML=liveTxt;
+  const dirOf=r=>r.symbol&&r.symbol.toUpperCase().endsWith('CE')?'📈 CALL':'📉 PUT';
   const posCols=[['Symbol',r=>(r.is_hedge?'🛡️ ':'')+r.symbol],
+    ['Dir',dirOf],
     ['Index @',r=>r.index_entry?Math.round(r.index_entry).toLocaleString('en-IN'):'-'],
     ['Qty',r=>r.qty],
     ['Prem In',r=>r.price],['Now',r=>r.current_premium??'-'],
@@ -312,9 +328,12 @@ async function load(){
   const T=await (await fetch('/api/trades')).json();
   $('trades').innerHTML=tbl(T,[['Time',r=>(r.ts||'').slice(5,16)],
     ['Symbol',r=>(r.is_hedge?'🛡️ ':'')+r.symbol],
+    ['Dir',dirOf],
     ['Index @',r=>r.index_entry?Math.round(r.index_entry).toLocaleString('en-IN'):'-'],
-    ['Qty',r=>r.qty],['Prem In',r=>r.price],['Prem Out',r=>r.exit_price??'-'],
-    ['P&L',r=>pnl(r.pnl)],['Status',r=>r.status]]);
+    ['Qty',r=>r.qty],['Prem In',r=>r.price],
+    ['Prem Out',r=>r.exit_price??(r.current_premium!=null?('now '+r.current_premium):'-')],
+    ['P&L',r=>r.pnl!=null?pnl(r.pnl):(r.unrealised_pnl!=null?pnl(r.unrealised_pnl):'-')],
+    ['Status',r=>r.status]]);
   const G=await (await fetch('/api/signals')).json();
   $('signals').innerHTML=tbl(G,[['Time',r=>(r.ts||'').slice(5,16)],['Symbol',r=>r.symbol],['Dir',r=>r.direction],
     ['Entry',r=>r.entry],['Stop',r=>r.stop],['Target',r=>r.target]]);
