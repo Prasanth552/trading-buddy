@@ -61,7 +61,7 @@ def order_placed(symbol: str, direction: str, qty: int, entry: float,
 def exit_msg(symbol: str, reason: str, exit_price: float, pnl: float) -> str:
     # A win is a target hit, or any other exit (trail/square-off/manual) in profit.
     profit = reason in ("target", "profit") or (
-        reason in ("manual", "trail", "squareoff", "flip") and pnl >= 0)
+        reason in ("manual", "trail", "squareoff", "flip", "swap") and pnl >= 0)
     if _ta():
         if profit:
             head = ("🎯 *லாபத்தில் வெளியேறியது*" if reason != "manual"
@@ -69,7 +69,8 @@ def exit_msg(symbol: str, reason: str, exit_price: float, pnl: float) -> str:
             return (f"{head} {symbol}\n"
                     f"விலை {exit_price} ஐ அடைந்தது. லாபம்: ₹{pnl:,.2f} 🎉")
         head = {"manual": "↩️ *நீங்கள் கைமுறையாக வெளியேறினீர்கள்*",
-                "zero": "🫥 *பிரீமியம் பூஜ்ஜியமானது — மூடப்பட்டது*"}.get(
+                "zero": "🫥 *பிரீமியம் பூஜ்ஜியமானது — மூடப்பட்டது*",
+                "swap": "🔁 *Hedge மூடி எதிர் திசைக்கு மாற்றம் (swap)*"}.get(
                     reason, "🛑 *ஸ்டாப்பில் வெளியேறியது*")
         return (f"{head} {symbol}\n"
                 f"விலை {exit_price} ஐ அடைந்தது. நஷ்டம்: ₹{pnl:,.2f}\n"
@@ -77,7 +78,7 @@ def exit_msg(symbol: str, reason: str, exit_price: float, pnl: float) -> str:
     emoji = "🎯" if profit else "🛑"
     label = {"target": "TARGET", "profit": "PROFIT ₹", "stop": "STOP",
              "manual": "MANUAL", "trail": "TRAIL", "squareoff": "EOD",
-             "flip": "FLIP", "zero": "ZERO"}.get(reason, reason.upper())
+             "flip": "FLIP", "zero": "ZERO", "swap": "SWAP"}.get(reason, reason.upper())
     return f"{emoji} *EXIT ({label})* {symbol} @ {exit_price} | P&L ₹{pnl:,.2f}"
 
 

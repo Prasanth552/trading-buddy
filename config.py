@@ -166,6 +166,12 @@ STOP_LOSS_ENABLED: bool = False
 HEDGE_ON_LOSS: bool = True
 HEDGE_TRIGGER_RUPEES: float = 4000.0
 ZERO_CLOSE_PCT: float = 0.10
+# Swap, don't stack (user, Jul 11): when a HEDGE itself bleeds to the trigger,
+# CLOSE it (realise ~-4k) and open the opposite side in its place — instead of
+# keeping the bleeding leg open alongside a new one (Friday's -44k pileup:
+# bottom-bought PEs + top-bought CE all open together). Originals unchanged:
+# still held for recovery / zero-close.
+HEDGE_SWAP_ON_REVERSE: bool = True
 
 # 15-minute market pulse on Telegram: every analysis cycle sends a compact
 # per-symbol read (price, ST/ADX/RSI, and which gate blocks a trade). ~25

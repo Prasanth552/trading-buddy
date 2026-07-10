@@ -511,6 +511,10 @@ def should_hedge(p: dict[str, Any], current: float,
     """
     if not getattr(config, "HEDGE_ON_LOSS", False):
         return False
+    # In swap mode, bleeding hedges are SWAPPED (closed + reversed), not stacked
+    # over — the swap path in the monitor handles them.
+    if p.get("is_hedge") and getattr(config, "HEDGE_SWAP_ON_REVERSE", False):
+        return False
     pnl = (current - float(p["price"])) * p["qty"]
     if pnl > -getattr(config, "HEDGE_TRIGGER_RUPEES", 4000.0):
         return False
@@ -680,6 +684,49 @@ def monitor_upstox_positions(
         if new_peak is not None and new_peak != (p.get("peak_price") or 0):
             db.update_peak_price(p["id"], new_peak)
         if reason is None:
+            # Swap, don't stack: a HEDGE that bleeds to the trigger is CLOSED and
+            # replaced by the opposite side (one working leg at a time).
+            if (p.get("is_hedge") and getattr(config, "HEDGE_SWAP_ON_REVERSE", False)
+                    and (current - float(p["price"])) * p["qty"]
+                    <= -getattr(config, "HEDGE_TRIGGER_RUPEES", 4000.0)):
+                try:
+                    if upstox is None:
+                        from src.broker.upstox_client import UpstoxClient
+                        upstox = UpstoxClient()
+                    upstox.place_order(p["broker_key"], p["qty"], "SELL",
+                                       order_type="MARKET")
+                    pnl = round((current - p["price"]) * p["qty"], 2)
+                    db.close_position(p["id"], round(float(current), 2), pnl,
+                                      status="CLOSED_SWAP")
+                    db.add_realised_pnl(date_iso, pnl)
+                    closed.append({"symbol": sym, "reason": "swap",
+                                   "exit_price": round(float(current), 2), "pnl": pnl})
+                    log.info("HEDGE SWAP: closed %s @ %.2f (P&L %.0f), reversing.",
+                             sym, current, pnl)
+                    if notifier is not None:
+                        try:
+                            notifier.send_message(messages.exit_msg(
+                                sym, "swap", round(float(current), 2), pnl))
+                        except Exception:  # noqa: BLE001
+                            pass
+                    # Open the opposite leg unless a position that direction is
+                    # already open (e.g. the original) or we're outside the window.
+                    und2, _ = _underlying_of(sym)
+                    new_type = "PE" if _opt_type(sym) == "CE" else "CE"
+                    already = any(
+                        o["id"] != p["id"]
+                        and _underlying_of(o["symbol"])[0] == und2
+                        and _opt_type(o["symbol"]) == new_type
+                        for o in open_rows)
+                    import time as _time
+                    cooled = (_time.time() - _LAST_HEDGE_AT.get(und2, 0)
+                              >= _HEDGE_COOLDOWN_SECONDS)
+                    if not already and cooled and _in_entry_window():
+                        if place_hedge(p, kite_client, upstox, notifier):
+                            hedged_now.add(und2)
+                except Exception as exc:  # noqa: BLE001 - never break the monitor
+                    log.error("Hedge swap failed for %s: %s", sym, exc)
+                continue
             # Hedge-recovery: bleeding original + no opposite open -> counter-trade.
             und, _spec = _underlying_of(sym)
             if (und and und not in hedged_now and _in_entry_window()
