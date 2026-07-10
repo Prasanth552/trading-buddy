@@ -490,6 +490,13 @@ def _in_entry_window() -> bool:
             <= _hhmm(getattr(config, "ENTRY_END", "15:30")))
 
 
+# Race guard: the 15-min cycle's monitor pass and the 1-min monitor job can run
+# in the same instant and both place the same hedge (seen live: duplicate rows
+# one second apart). Track the last hedge time per underlying.
+_LAST_HEDGE_AT: dict[str, float] = {}
+_HEDGE_COOLDOWN_SECONDS = 120
+
+
 def should_hedge(p: dict[str, Any], current: float,
                  open_positions: list[dict[str, Any]]) -> bool:
     """True when a losing ORIGINAL position should get an opposite-side hedge.
@@ -510,6 +517,9 @@ def should_hedge(p: dict[str, Any], current: float,
     und, _ = _underlying_of(p["symbol"])
     if und is None:
         return False
+    import time as _time
+    if _time.time() - _LAST_HEDGE_AT.get(und, 0) < _HEDGE_COOLDOWN_SECONDS:
+        return False  # a hedge for this underlying was just placed (race guard)
     my_type = _opt_type(p["symbol"])
     for o in open_positions:
         o_und, _ = _underlying_of(o["symbol"])
@@ -574,6 +584,8 @@ def place_hedge(
         "index_entry": round(float(ltp), 2),
     })
     db.bump_trades_count(date_iso)
+    import time as _time
+    _LAST_HEDGE_AT[index_symbol] = _time.time()
     log.info("HEDGE opened %s x%d @ %.2f (against %s)",
              opt["tradingsymbol"], qty, premium, p["symbol"])
     if notifier is not None:

@@ -53,19 +53,25 @@ def _rows(query: str, params: tuple = ()) -> list[dict[str, Any]]:
 _clients: dict[str, Any] = {}
 
 
-def _kite() -> Any | None:
-    """Return a Kite client, (re)connecting as needed.
+_KITE_TTL_SECONDS = 300  # re-validate the cached session every 5 minutes
 
-    Never caches a failure: if the session was unavailable (e.g. the dashboard
-    restarted with a stale daily token), every refresh retries, so live P&L
-    comes back as soon as a valid token exists instead of staying blank.
+
+def _kite() -> Any | None:
+    """Return a Kite client, re-validating the session every few minutes.
+
+    Kite tokens expire daily; a client cached forever goes stale and price
+    fetches fail silently (showing '-' on the dashboard). Re-running
+    ensure_session() on a TTL picks up the fresh daily token file written by
+    the scheduler's morning auto-login. Failures are never cached.
     """
+    import time as _time
     cli = _clients.get("kite")
-    if cli is not None:
+    if cli is not None and _time.time() - _clients.get("kite_ts", 0) < _KITE_TTL_SECONDS:
         return cli
     try:
         from src.broker.session import ensure_session
-        _clients["kite"] = ensure_session()
+        _clients["kite"] = ensure_session()  # validates the token via profile()
+        _clients["kite_ts"] = _time.time()
         return _clients["kite"]
     except Exception as exc:  # noqa: BLE001 - dashboard must not crash
         _clients.pop("kite", None)
