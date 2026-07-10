@@ -143,6 +143,7 @@ def api_positions(_: None = Depends(require_auth)) -> JSONResponse:
         "positions": rows,
         "total_unrealised": round(total_unreal, 2),
         "live": kite is not None,
+        "kite_err": None if kite is not None else _clients.get("kite_err", "unknown"),
         "profit_target": config.PROFIT_TARGET_RUPEES,
         "exit_mode": getattr(config, "EXIT_MODE", "target"),
         "stops_enabled": getattr(config, "STOP_LOSS_ENABLED", True),
