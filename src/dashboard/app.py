@@ -97,7 +97,22 @@ def api_status(_: None = Depends(require_auth)) -> JSONResponse:
     db.init_db()
     today = mc.now_ist().date().isoformat()
     ds = dict(db.get_or_create_daily_state(today))
+    with db.get_conn() as conn:
+        # Capital deployed in open positions (premium paid x qty).
+        utilized = conn.execute(
+            "SELECT COALESCE(SUM(price*qty),0) FROM trades "
+            "WHERE status='OPEN' AND side='BUY'").fetchone()[0]
+        # Lifetime realised P&L -> current account value on sandbox capital.
+        lifetime_pnl = conn.execute(
+            "SELECT COALESCE(SUM(pnl),0) FROM trades WHERE pnl IS NOT NULL"
+        ).fetchone()[0]
+    capital = float(getattr(config, "CAPITAL", 0))
+    account_value = capital + lifetime_pnl
     return JSONResponse({
+        "capital": capital,
+        "utilized": round(utilized, 2),
+        "available": round(account_value - utilized, 2),
+        "account_value": round(account_value, 2),
         "now": mc.now_ist().strftime("%Y-%m-%d %H:%M:%S IST"),
         "mode": config.MODE,
         "broker": config.EXECUTION_BROKER,
@@ -299,8 +314,14 @@ async function load(){
   const ks=s.kill_switch?'<span class="pill bad">TRIPPED</span>':'<span class="pill ok">armed</span>';
   const mk=s.market.startsWith('OPEN')?'<span class="pill ok">'+s.market+'</span>':'<span class="pill neu">'+s.market+'</span>';
   const pz=s.paused?'<span class="pill bad">PAUSED</span>':'<span class="pill ok">running</span>';
+  const inr=v=>'₹'+Math.round(v).toLocaleString('en-IN');
+  const utilPct=s.capital>0?Math.round(100*s.utilized/s.capital):0;
   $('cards').innerHTML=[
    ['Market',mk],['State',pz],
+   ['Capital',inr(s.capital)],
+   ['Account value',(s.account_value>=s.capital?'<span class=pos>':'<span class=neg>')+inr(s.account_value)+'</span>'],
+   ['Utilized',inr(s.utilized)+' <span class=note>('+utilPct+'%)</span>'],
+   ['Available',inr(s.available)],
    ['Trades today',s.trades_count+' / '+s.max_trades],
    ["Today's P&L",pnl(s.realised_pnl)],
    ['Kill switch',ks],['Loss limit','₹'+s.max_daily_loss]
