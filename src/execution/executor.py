@@ -550,6 +550,10 @@ def place_hedge(
     index_symbol, spec = _underlying_of(p["symbol"])
     if index_symbol is None:
         return None
+    # Reserve the cooldown slot BEFORE placing so a concurrent caller can't
+    # pass the cooldown check while this order is in flight (duplicate guard).
+    import time as _time
+    _LAST_HEDGE_AT[index_symbol] = _time.time()
     direction = "short" if _opt_type(p["symbol"]) == "CE" else "long"
 
     ltp = kite_client.ltp([index_symbol])[index_symbol]["last_price"]
@@ -588,8 +592,6 @@ def place_hedge(
         "index_entry": round(float(ltp), 2),
     })
     db.bump_trades_count(date_iso)
-    import time as _time
-    _LAST_HEDGE_AT[index_symbol] = _time.time()
     log.info("HEDGE opened %s x%d @ %.2f (against %s)",
              opt["tradingsymbol"], qty, premium, p["symbol"])
     if notifier is not None:
@@ -688,7 +690,8 @@ def monitor_upstox_positions(
             # replaced by the opposite side (one working leg at a time).
             if (p.get("is_hedge") and getattr(config, "HEDGE_SWAP_ON_REVERSE", False)
                     and (current - float(p["price"])) * p["qty"]
-                    <= -getattr(config, "HEDGE_TRIGGER_RUPEES", 4000.0)):
+                    <= -getattr(config, "HEDGE_SWAP_TRIGGER_RUPEES",
+                                getattr(config, "HEDGE_TRIGGER_RUPEES", 4000.0))):
                 try:
                     if upstox is None:
                         from src.broker.upstox_client import UpstoxClient

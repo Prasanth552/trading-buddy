@@ -172,6 +172,11 @@ ZERO_CLOSE_PCT: float = 0.10
 # bottom-bought PEs + top-bought CE all open together). Originals unchanged:
 # still held for recovery / zero-close.
 HEDGE_SWAP_ON_REVERSE: bool = True
+# Swap trigger widened (user, Jul 13): hold a bleeding hedge through normal
+# dips down to -8k; swap only beyond that. Halves chop false-alarms (Jul-13:
+# 13 swaps x ~4.6k) while keeping the per-leg worst case defined (~-8k, never
+# Friday's open-ended -44k pileup).
+HEDGE_SWAP_TRIGGER_RUPEES: float = 8000.0
 
 # 15-minute market pulse on Telegram: every analysis cycle sends a compact
 # per-symbol read (price, ST/ADX/RSI, and which gate blocks a trade). ~25

@@ -132,25 +132,9 @@ def run_cycle(client: Any, notifier: Any | None, executor: Any) -> dict[str, Any
         guardrails.trip_kill_switch(date_iso, client=client, notifier=notifier)
         return {"skipped": "kill_switch_tripped_now"}
 
-    # 0. Monitor open positions first (close on stop/target, realize P&L, and
-    #    trip the kill switch if the daily loss limit is breached).
-    try:
-        if config.EXECUTION_BROKER == "upstox":
-            from src.execution.executor import monitor_upstox_positions
-            exits = monitor_upstox_positions(kite_client=client, notifier=notifier)
-        else:
-            from src.execution.executor import monitor_paper_positions
-            exits = monitor_paper_positions(client=client, notifier=notifier)
-        if exits:
-            log.info("Monitor closed %d position(s).", len(exits))
-    except Exception as exc:  # noqa: BLE001
-        log.error("Monitor step failed: %s", exc)
-
-    # Re-read kill-switch state in case the monitor just tripped it.
-    ds = dict(db.get_or_create_daily_state(date_iso))
-    if ds.get("kill_switch_tripped"):
-        log.info("Kill switch tripped during monitor — no new trades.")
-        return {"skipped": "kill_switch", "monitored": True}
+    # NOTE: position monitoring (exits/hedges/swaps) is owned EXCLUSIVELY by the
+    # 1-min monitor_job. Running it here too made the two threads race on the
+    # :00/:15/:30/:45 marks and place duplicate hedges (seen live Jul 10 & 13).
 
     # 1. News (cheap Haiku tagging) — failures shouldn't stop the cycle.
     try:
