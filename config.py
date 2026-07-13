@@ -186,6 +186,10 @@ CANDLE_PULSE: bool = True
 # 15-60 min direction per index. Informational only — not a trading input.
 PULSE_PREDICTION: bool = True
 
+# Morning briefing at 08:30 IST: top-10 overnight/pre-market news + an overall
+# day prediction built from them (smart model, once a day).
+MORNING_BRIEF: bool = True
+
 # Positional weekly options (user request, Jul 9): hold positions overnight —
 # NO daily 15:15 square-off. A contract still MUST close on its own expiry day
 # (options settle; can't be held past expiry). Set True to restore intraday.

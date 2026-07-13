@@ -311,11 +311,14 @@ def _daily_insight(date_iso: str, trades: list[dict], ds: dict) -> str:
     system = (
         "You are a trading-day reviewer for an NSE index-options PAPER-trading bot "
         "that buys options and uses a hedge-recovery flow (opposite-side hedges when "
-        "a position bleeds). Given today's trade log, write a WHOLE-DAY review: "
-        "(1) one-line day summary with net P&L, (2) what the market likely did based "
-        "on the trade directions/outcomes, (3) what worked, (4) what hurt, "
-        "(5) ONE concrete thing to watch tomorrow. Be factual, use only the given "
-        "data, keep under ~160 words."
+        "a position bleeds, swap on deeper loss). Given today's trade log, write a "
+        "WHOLE-DAY review with a LEARN-FROM-MISTAKES focus: "
+        "(1) one-line day summary with net P&L, (2) what the market likely did, "
+        "(3) what worked, (4) 'இன்றைய தவறுகள்' — the SPECIFIC mistakes visible in "
+        "the log (entered against trend? held a bleeder too long? hedge churn in "
+        "chop? banked too early?), each with its rupee cost, (5) 'நாளைக்கான பாடம்' "
+        "— ONE concrete lesson to apply tomorrow. Be factual, use only the given "
+        "data, keep under ~200 words."
         + (" Respond in simple Tamil; keep numbers and NIFTY/SENSEX/CALL/PUT in "
            "English." if tamil else " Respond in concise English.")
     )
@@ -352,6 +355,52 @@ def _settings_banner() -> str:
             f"TP ₹{getattr(config, 'PROFIT_TARGET_RUPEES', 0):,.0f} · "
             f"{getattr(config, 'MAX_LOTS_PER_TRADE', 0)} lots · "
             f"monitor {getattr(config, 'MONITOR_INTERVAL_MIN', 15)}min")
+
+
+def morning_brief(notifier: Any | None) -> str | None:
+    """08:30 briefing: top-10 news of the last ~16h + an overall day prediction."""
+    from src.storage import db
+    from src.llm.client import LLMClient
+    from datetime import timedelta
+
+    # Freshen the news pool first (best-effort), then pull the recent window.
+    try:
+        from src.news import feeds, analyzer
+        analyzer.analyze_and_store(feeds.poll(relevant_only=True))
+    except Exception as exc:  # noqa: BLE001
+        log.error("Morning brief news refresh failed: %s", exc)
+    since = (mc.now_ist() - timedelta(hours=16)).isoformat()
+    with db.get_conn() as conn:
+        rows = conn.execute(
+            "SELECT ts, symbol, sentiment, confidence, headline FROM news_items "
+            "WHERE ts >= ? ORDER BY CASE confidence WHEN 'high' THEN 0 "
+            "WHEN 'medium' THEN 1 ELSE 2 END, ts DESC LIMIT 30", (since,),
+        ).fetchall()
+    if not rows:
+        _safe_notify(notifier, "🌅 காலை நிலவரம்: கடந்த இரவில் முக்கியச் செய்திகள் இல்லை.")
+        return None
+
+    items = "\n".join(
+        f"- [{r['symbol'] or 'macro'}/{r['sentiment']}/{r['confidence']}] {r['headline']}"
+        for r in rows)
+    system = (
+        "You are a pre-market briefing writer for an Indian index-options trader "
+        "(NIFTY/SENSEX/BANKNIFTY). From the tagged news list, produce:\n"
+        "(1) 'இன்றைய Top 10 செய்திகள்' — the 10 MOST market-moving items, one short "
+        "line each, numbered, with 🟢/🔴/⚪ for bullish/bearish/neutral;\n"
+        "(2) 'இன்றைய ஒட்டுமொத்தக் கணிப்பு' — expected open (gap-up/down/flat), the "
+        "day's likely bias per index, and 1-2 key things to watch.\n"
+        "Simple Tamil, numbers/instrument names in English, under ~220 words. "
+        "Be direct; this is an estimate from news, not advice.")
+    try:
+        text = LLMClient().complete_text(
+            system=system, user=items, model=config.LLM_SMART_MODEL, max_tokens=800)
+    except Exception as exc:  # noqa: BLE001
+        log.error("Morning brief LLM failed: %s", exc)
+        return None
+    _safe_notify(notifier, "🌅 *காலை 8:30 நிலவரம் — Top 10 News + கணிப்பு*\n\n" + text)
+    log.info("Morning brief sent.")
+    return text
 
 
 def _ensure_or_refresh_session(notifier: Any | None) -> Any | None:
@@ -446,6 +495,13 @@ def start_scheduler(confirm_live: bool = False) -> None:
             _ensure_or_refresh_session(notifier)
             _safe_notify(notifier, _settings_banner())
 
+    def brief_job() -> None:
+        if mc.is_trading_day() and getattr(config, "MORNING_BRIEF", False):
+            try:
+                morning_brief(notifier)
+            except Exception as exc:  # noqa: BLE001
+                log.error("Morning brief failed: %s", exc)
+
     # Cycle: every ANALYSIS_INTERVAL_MIN minutes, weekdays, market hours (gated inside).
     sched.add_job(cycle_job, CronTrigger(
         day_of_week="mon-fri", hour="9-15",
@@ -460,6 +516,9 @@ def start_scheduler(confirm_live: bool = False) -> None:
     # Pre-open token check/refresh.
     sched.add_job(preopen_job, CronTrigger(
         day_of_week="mon-fri", hour=9, minute=5, timezone=config.TIMEZONE))
+    # Morning news briefing (top-10 + day prediction).
+    sched.add_job(brief_job, CronTrigger(
+        day_of_week="mon-fri", hour=8, minute=30, timezone=config.TIMEZONE))
 
     # Weekly AI performance review — Friday after close.
     def review_job() -> None:
