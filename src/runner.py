@@ -92,6 +92,33 @@ def _gate_read(s: dict[str, Any]) -> str:
     return f"{side} காத்திருப்பு — தடை: {', '.join(fails[:2])}"
 
 
+def _pulse_prediction(snaps: list[dict[str, Any]]) -> str | None:
+    """Fast-model prediction for the next 15-60 min, from the live indicator data."""
+    try:
+        from src.llm.client import LLMClient
+        rows = []
+        for s in snaps:
+            name = s["symbol"].split(":")[-1]
+            rows.append(
+                f"{name}: price {s.get('ltp')}, VWAP {s.get('vwap')}, "
+                f"EMA9 {s.get('ema_fast')}, EMA21 {s.get('ema_slow')}, "
+                f"Supertrend {'up' if (s.get('supertrend_dir') or 0) > 0 else 'down'}, "
+                f"ADX {s.get('adx')}, RSI {s.get('rsi_fast')}")
+        system = (
+            "You are an intraday index analyst. From the given 15-min indicator "
+            "snapshot, write for EACH index one short line: likely direction for the "
+            "next 15-60 minutes (மேலே/கீழே/பக்கவாட்டு) + confidence (குறைவு/நடுத்தரம்/அதிகம்) "
+            "+ the key level to watch. Then ONE overall market line. Simple Tamil, "
+            "numbers/index names in English, under 90 words total. This is an "
+            "indicator-based estimate, not advice — no disclaimers needed, be direct.")
+        return LLMClient().complete_text(
+            system=system, user="\n".join(rows),
+            model=config.LLM_FAST_MODEL, max_tokens=300)
+    except Exception as exc:  # noqa: BLE001 - prediction is best-effort
+        log.error("Pulse prediction failed: %s", exc)
+        return None
+
+
 def _candle_pulse(notifier: Any | None, snaps: list[dict[str, Any]],
                   signals_fired: int) -> None:
     """15-min market pulse to Telegram — analysis every candle, trade or not."""
@@ -108,6 +135,10 @@ def _candle_pulse(notifier: Any | None, snaps: list[dict[str, Any]],
         lines.append(f"{head}\n   → {_gate_read(s)}")
     if signals_fired:
         lines.append(f"⚡ இந்த candle-இல் {signals_fired} signal(s) fired")
+    if getattr(config, "PULSE_PREDICTION", False):
+        pred = _pulse_prediction(snaps)
+        if pred:
+            lines.append(f"\n🔮 *அடுத்த 15-60 நிமிடக் கணிப்பு:*\n{pred}")
     _safe_notify(notifier, "\n".join(lines))
 
 

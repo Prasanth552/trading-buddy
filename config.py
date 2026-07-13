@@ -182,6 +182,9 @@ HEDGE_SWAP_TRIGGER_RUPEES: float = 8000.0
 # per-symbol read (price, ST/ADX/RSI, and which gate blocks a trade). ~25
 # messages/day during market hours — set False to silence.
 CANDLE_PULSE: bool = True
+# Add an LLM prediction (fast model) to each 15-min pulse: market read + next
+# 15-60 min direction per index. Informational only — not a trading input.
+PULSE_PREDICTION: bool = True
 
 # Positional weekly options (user request, Jul 9): hold positions overnight —
 # NO daily 15:15 square-off. A contract still MUST close on its own expiry day
