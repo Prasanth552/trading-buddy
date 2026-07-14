@@ -496,6 +496,32 @@ def _in_entry_window() -> bool:
 _LAST_HEDGE_AT: dict[str, float] = {}
 _HEDGE_COOLDOWN_SECONDS = 120
 
+# Market trend view per underlying (+1 up / -1 down) — refreshed by the 15-min
+# analysis cycle from the Supertrend. Hedges must AGREE with this trend.
+_TREND_VIEW: dict[str, float] = {}
+
+
+def update_trend_view(index_symbol: str, st_dir: Any) -> None:
+    """Record the latest Supertrend direction for an index (called each cycle)."""
+    try:
+        if st_dir is not None and st_dir == st_dir:  # NaN guard
+            _TREND_VIEW[index_symbol] = 1.0 if float(st_dir) > 0 else -1.0
+    except (TypeError, ValueError):
+        pass
+
+
+def _hedge_direction_allowed(bleeding_symbol: str, und: str) -> bool:
+    """True if the would-be hedge (opposite of the bleeding leg) agrees with the
+    current Supertrend. Blocks counter-trend hedges; blocks when no trend view
+    exists yet (pre-first-cycle)."""
+    if not getattr(config, "HEDGE_TREND_GATE", False):
+        return True
+    trend = _TREND_VIEW.get(und)
+    if trend is None:
+        return False
+    new_type = "PE" if _opt_type(bleeding_symbol) == "CE" else "CE"
+    return (new_type == "CE" and trend > 0) or (new_type == "PE" and trend < 0)
+
 
 def should_hedge(p: dict[str, Any], current: float,
                  open_positions: list[dict[str, Any]]) -> bool:
@@ -521,6 +547,8 @@ def should_hedge(p: dict[str, Any], current: float,
     und, _ = _underlying_of(p["symbol"])
     if und is None:
         return False
+    if not _hedge_direction_allowed(p["symbol"], und):
+        return False  # counter-trend hedge blocked (trend gate)
     import time as _time
     if _time.time() - _LAST_HEDGE_AT.get(und, 0) < _HEDGE_COOLDOWN_SECONDS:
         return False  # a hedge for this underlying was just placed (race guard)
@@ -724,7 +752,8 @@ def monitor_upstox_positions(
                     import time as _time
                     cooled = (_time.time() - _LAST_HEDGE_AT.get(und2, 0)
                               >= _HEDGE_COOLDOWN_SECONDS)
-                    if not already and cooled and _in_entry_window():
+                    if (not already and cooled and _in_entry_window()
+                            and _hedge_direction_allowed(sym, und2)):
                         if place_hedge(p, kite_client, upstox, notifier):
                             hedged_now.add(und2)
                 except Exception as exc:  # noqa: BLE001 - never break the monitor

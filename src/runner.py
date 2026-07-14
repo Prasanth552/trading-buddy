@@ -179,6 +179,10 @@ def run_cycle(client: Any, notifier: Any | None, executor: Any) -> dict[str, Any
     # 2. Technicals → signals → (on signal) analysis + alert + execution.
     signals_fired = 0
     snaps = market_data.snapshot_watchlist(client, symbols=config.WATCHLIST)
+    # Feed the hedge trend-gate with the fresh Supertrend view.
+    from src.execution import executor as executor_mod
+    for snap in snaps:
+        executor_mod.update_trend_view(snap["symbol"], snap.get("supertrend_dir"))
     for snap in snaps:
         news = engine.news_view_for_symbol(snap["symbol"])
         sig = engine.evaluate(snap, news=news)

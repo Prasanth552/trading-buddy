@@ -177,6 +177,11 @@ HEDGE_SWAP_ON_REVERSE: bool = True
 # 13 swaps x ~4.6k) while keeping the per-leg worst case defined (~-8k, never
 # Friday's open-ended -44k pileup).
 HEDGE_SWAP_TRIGGER_RUPEES: float = 8000.0
+# Trend gate (Jul 14, from live ledger evidence): a hedge may only OPEN in the
+# direction of the current Supertrend. Stops the swap bleed caused by buying
+# counter-trend hedges on ordinary dips (Jul-14: five CE hedges bought into a
+# falling market = -43k swaps while the PE originals won all day).
+HEDGE_TREND_GATE: bool = True
 
 # 15-minute market pulse on Telegram: every analysis cycle sends a compact
 # per-symbol read (price, ST/ADX/RSI, and which gate blocks a trade). ~25
