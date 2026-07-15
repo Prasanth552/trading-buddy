@@ -146,15 +146,35 @@ def automated_login(client: KiteClient | None = None) -> KiteClient:
                          "twofa_value": otp, "twofa_type": "totp"}, timeout=15)
     r2.raise_for_status()
 
-    # 3. Hit the connect login URL; the redirect to the (unreachable) redirect URL
-    #    carries ?request_token=... — capture it from the resulting connection error.
+    # 3. Walk the connect flow hop-by-hop and capture request_token from the
+    #    redirect chain (robust against changes in the final redirect behaviour;
+    #    the old method parsed a connection-error string and broke silently).
+    from urllib.parse import urljoin
     request_token: str | None = None
-    try:
-        sess.get(client.login_url(), timeout=15)
-    except requests.exceptions.RequestException as exc:
-        m = re.search(r"request_token=([A-Za-z0-9]+)", str(exc))
+    url = client.login_url()
+    for _hop in range(8):
+        try:
+            r = sess.get(url, timeout=15, allow_redirects=False)
+        except requests.exceptions.RequestException as exc:
+            m = re.search(r"request_token=([A-Za-z0-9]+)", str(exc))
+            if m:
+                request_token = m.group(1)
+            else:
+                log.error("Auto-login: request error at %s: %s", url, exc)
+            break
+        loc = r.headers.get("Location", "") or ""
+        m = re.search(r"request_token=([A-Za-z0-9]+)", loc)
         if m:
             request_token = m.group(1)
+            break
+        if r.status_code in (301, 302, 303, 307, 308) and loc:
+            url = urljoin(url, loc)
+            continue
+        # Dead end (e.g. a consent/authorize page or re-login) — log what we hit
+        # so the exact blocker is visible in the journal.
+        log.error("Auto-login dead end: HTTP %s at %s | body: %r",
+                  r.status_code, url, (r.text or "")[:300])
+        break
     if not request_token:
         raise KiteClientError("Automated login failed to capture request_token.")
 

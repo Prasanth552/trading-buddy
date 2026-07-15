@@ -447,10 +447,18 @@ def start_scheduler(confirm_live: bool = False) -> None:
             return
         try:
             client = ensure_session()
-        except KiteClientError as exc:
-            log.warning("No session: %s", exc)
-            _safe_notify(notifier, "⚠️ No Kite session — run `python main.py --login`.")
-            return
+        except KiteClientError:
+            # Auto-retry the TOTP login every cycle instead of losing the day.
+            try:
+                from src.broker.session import automated_login
+                client = automated_login()
+                _safe_notify(notifier, "✅ Kite auto-login recovered — bot resuming.")
+            except Exception as exc:  # noqa: BLE001
+                log.warning("No session (auto-retry failed): %s", exc)
+                _safe_notify(notifier,
+                             "⚠️ Kite login DOWN (auto-retry failing every 15 min). "
+                             "If it persists, run `python main.py --login` on the server.")
+                return
         executor = Executor(client=client, notifier=notifier,
                             mode=config.MODE, confirm_live=confirm_live)
         try:
