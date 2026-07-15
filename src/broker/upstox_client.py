@@ -95,7 +95,7 @@ class UpstoxClient:
                 self.token = None
         if not self.token:
             self.token = os.getenv("UPSTOX_SANDBOX_TOKEN")
-        if not self.token:
+        if not self.token and not getattr(config, "UPSTOX_SIMULATE_ORDERS", False):
             raise UpstoxError(
                 "No Upstox token — run `python -m src.broker.upstox_data` to log in, "
                 "or set UPSTOX_SANDBOX_TOKEN in .env."
@@ -157,6 +157,14 @@ class UpstoxClient:
             "tag": tag,
         }
         log.info("UPSTOX ORDER (pre-submit) %s %s x%d", transaction_type, instrument_token, quantity)
+        # Paper simulation: skip the sandbox HTTP call (whose token expires and
+        # breaks trading) and return a simulated fill. P&L still uses REAL premium
+        # prices from the data feed, so the whole hedge flow works token-free.
+        if getattr(config, "UPSTOX_SIMULATE_ORDERS", False):
+            import time as _t
+            oid = f"SIM-{int(_t.time()*1000)}"
+            log.info("UPSTOX ORDER simulated ok id=%s", oid)
+            return {"order_ids": [oid], "raw": {"simulated": True}}
         resp = requests.post(config.UPSTOX_ORDER_URL, json=body, headers=self._headers(), timeout=15)
         data = resp.json()
         if data.get("status") != "success":

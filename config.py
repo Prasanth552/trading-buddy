@@ -237,6 +237,11 @@ STOP_ORDER_TYPE: str = "SL-M"
 # Plan: analyse/data on KITE, place (dummy/sandbox) trades on UPSTOX.
 # --------------------------------------------------------------------------
 EXECUTION_BROKER: str = "upstox"   # "internal" (simulate in-app) | "upstox" (sandbox orders)
+# Simulate order fills instead of sending them to the Upstox sandbox. Keeps the
+# FULL upstox flow (option resolution, hedges, swaps, monitor) but replaces the
+# actual order HTTP call with a simulated fill — so a dead sandbox order token
+# never halts trading. P&L still uses real premium prices from the data feed.
+UPSTOX_SIMULATE_ORDERS: bool = True
 
 # Market-DATA broker (Jul 15): Kite Connect subscription lapsed (paid 1 month
 # by design); Upstox's API is free. "upstox" serves candles/LTP/instruments via
