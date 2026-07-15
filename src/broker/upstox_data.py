@@ -248,7 +248,115 @@ def interactive_login() -> None:
     print("✅ Upstox data login OK — token saved for today.")
 
 
+# --- automated daily login (best-effort, undocumented endpoints) ------------
+_LOGIN_SVC = "https://service.upstox.com/login/open/v6"
+_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+       "Chrome/124.0 Safari/537.36")
+
+
+def _dbg(step: str, r) -> dict:
+    body: Any
+    try:
+        body = r.json()
+    except Exception:  # noqa: BLE001
+        body = (r.text or "")[:400]
+    log.info("Upstox login [%s] HTTP %s: %r", step, r.status_code, body)
+    return body if isinstance(body, dict) else {}
+
+
+def automated_login() -> "UpstoxData":
+    """Headless daily login via mobile + TOTP + PIN. Best-effort; logs each step.
+
+    OPT-IN: needs UPSTOX_API_KEY/SECRET + UPSTOX_MOBILE/PIN/TOTP_SECRET in .env.
+    Endpoints are undocumented and may change — falls back to interactive_login.
+    """
+    import pyotp
+
+    api_key = os.getenv("UPSTOX_API_KEY")
+    secret = os.getenv("UPSTOX_API_SECRET")
+    mobile = (os.getenv("UPSTOX_MOBILE") or "").strip()
+    pin = (os.getenv("UPSTOX_PIN") or "").strip()
+    totp_secret = (os.getenv("UPSTOX_TOTP_SECRET") or "").replace(" ", "").strip()
+    if not all((api_key, secret, mobile, pin, totp_secret)):
+        raise UpstoxDataError("Automated login needs UPSTOX_API_KEY/SECRET/MOBILE/"
+                              "PIN/TOTP_SECRET in .env.")
+
+    s = requests.Session()
+    s.headers.update({"User-Agent": _UA, "Content-Type": "application/json",
+                      "Accept": "application/json", "Origin": "https://login.upstox.com",
+                      "Referer": "https://login.upstox.com/"})
+
+    # Step 1 — 1FA: submit mobile, get a validation/session id.
+    r = s.post(f"{_LOGIN_SVC}/auth/1fa",
+               json={"data": {"mobileNumber": mobile, "userId": "", "otpType": "totp"}},
+               timeout=20)
+    d1 = _dbg("1fa", r)
+    val_id = (d1.get("data") or {}).get("validationToken") or \
+             (d1.get("data") or {}).get("valId") or (d1.get("data") or {}).get("userId")
+
+    # Step 2 — TOTP verify.
+    otp = pyotp.TOTP(totp_secret).now()
+    r = s.post(f"{_LOGIN_SVC}/auth/1fa/totp/verify",
+               json={"data": {"otp": otp, "validationToken": val_id}}, timeout=20)
+    d2 = _dbg("totp-verify", r)
+
+    # Step 3 — PIN (2FA).
+    r = s.post(f"{_LOGIN_SVC}/auth/2fa",
+               json={"data": {"twoFAMethod": "SECURE_PIN", "inputText": pin,
+                              "validationToken": val_id}}, timeout=20)
+    d3 = _dbg("pin", r)
+
+    # Step 4 — authorize -> capture ?code= from the redirect chain.
+    from urllib.parse import urljoin
+    import re
+    auth_url = (f"{config.UPSTOX_API_BASE}/v2/login/authorization/dialog"
+                f"?response_type=code&client_id={api_key}"
+                f"&redirect_uri={config.UPSTOX_REDIRECT_URI}")
+    code: str | None = None
+    url = auth_url
+    for _hop in range(8):
+        try:
+            rr = s.get(url, timeout=20, allow_redirects=False)
+        except requests.exceptions.RequestException as exc:
+            m = re.search(r"[?&]code=([^&]+)", str(exc))
+            code = m.group(1) if m else None
+            break
+        loc = rr.headers.get("Location", "") or ""
+        m = re.search(r"[?&]code=([^&]+)", loc)
+        if m:
+            code = m.group(1)
+            break
+        if rr.status_code in (301, 302, 303, 307, 308) and loc:
+            url = urljoin(url, loc)
+            continue
+        _dbg(f"authorize-deadend@{url}", rr)
+        break
+    if not code:
+        raise UpstoxDataError("Automated login: could not capture authorization code "
+                              "(see the logged steps above for where it stopped).")
+
+    # Step 5 — exchange code for access token.
+    tr = requests.post(f"{config.UPSTOX_API_BASE}/v2/login/authorization/token",
+                       data={"code": code, "client_id": api_key, "client_secret": secret,
+                             "redirect_uri": config.UPSTOX_REDIRECT_URI,
+                             "grant_type": "authorization_code"},
+                       headers={"Accept": "application/json",
+                                "Content-Type": "application/x-www-form-urlencoded"},
+                       timeout=20)
+    token = tr.json().get("access_token")
+    if not token:
+        raise UpstoxDataError(f"Token exchange failed: {tr.json()}")
+    save_token(token)
+    log.info("Automated Upstox data login OK.")
+    return UpstoxData(access_token=token)
+
+
 if __name__ == "__main__":
     from dotenv import load_dotenv
     load_dotenv()
-    interactive_login()
+    import sys
+    if "--auto" in sys.argv:
+        automated_login()
+        print("✅ automated login OK")
+    else:
+        interactive_login()
