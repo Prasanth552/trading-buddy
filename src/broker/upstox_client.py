@@ -83,11 +83,22 @@ class UpstoxClient:
     """Thin Upstox order client (sandbox token-based)."""
 
     def __init__(self, sandbox_token: str | None = None) -> None:
-        self.token = sandbox_token or os.getenv("UPSTOX_SANDBOX_TOKEN")
+        # Prefer the fresh daily OAuth token (refreshed by the data login) over
+        # the separate sandbox token, which expires unpredictably (UDAPI100050
+        # "Invalid token" on Jul 15). Fall back to UPSTOX_SANDBOX_TOKEN.
+        self.token = sandbox_token
+        if not self.token:
+            try:
+                from src.broker.upstox_data import load_cached_token
+                self.token = load_cached_token()
+            except Exception:  # noqa: BLE001
+                self.token = None
+        if not self.token:
+            self.token = os.getenv("UPSTOX_SANDBOX_TOKEN")
         if not self.token:
             raise UpstoxError(
-                "UPSTOX_SANDBOX_TOKEN missing — generate it in the Upstox developer "
-                "apps portal (Sandbox) and set it in .env."
+                "No Upstox token — run `python -m src.broker.upstox_data` to log in, "
+                "or set UPSTOX_SANDBOX_TOKEN in .env."
             )
         self._instruments: list[dict[str, Any]] | None = None
 
