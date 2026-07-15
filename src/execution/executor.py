@@ -410,19 +410,22 @@ def _option_exchange(tradingsymbol: str) -> str:
 
 def _safe_ltp(
     client: Any, sym: str, exch: str, price_fn: Any | None = None,
+    key: str | None = None,
 ) -> float | None:
     """Fetch the option's last price, returning None if it can't be priced.
 
-    Kite returns an empty dict for an expired/unknown contract; we treat that
-    (and any error) as "un-priceable" rather than raising — so the monitor never
-    crashes or spams ERROR for a dead option.
+    Prefers the exact broker instrument ``key`` when available (robust across
+    symbol-format differences between brokers); falls back to EXCHANGE:SYMBOL.
+    Empty quotes / errors return None so the monitor never crashes on a dead
+    option.
     """
     try:
         if price_fn is not None:
             return price_fn(sym, exch)
-        full = f"{exch}:{sym}"
-        data = client.ltp([full])
-        info = data.get(full) if isinstance(data, dict) else None
+        lookup = key if (key and getattr(config, "DATA_BROKER", "kite") == "upstox") \
+            else f"{exch}:{sym}"
+        data = client.ltp([lookup])
+        info = data.get(lookup) if isinstance(data, dict) else None
         if not info or not info.get("last_price"):
             return None
         return float(info["last_price"])
@@ -462,7 +465,9 @@ def _force_close_if_stale(
 # Hedge-recovery flow (sandbox experiment)
 # --------------------------------------------------------------------------
 def _opt_type(tradingsymbol: str) -> str:
-    return "CE" if tradingsymbol.upper().endswith("CE") else "PE"
+    # Contains (not endswith): Kite format ends with CE/PE, Upstox format embeds
+    # it mid-symbol ("NIFTY 24100 CE 17 JUL 26").
+    return "CE" if "CE" in tradingsymbol.upper() else "PE"
 
 
 def _underlying_of(tradingsymbol: str) -> tuple[str, dict[str, Any]] | tuple[None, None]:
@@ -653,7 +658,7 @@ def monitor_paper_positions(
         p = dict(p)
         sym = p["symbol"]
         exch = _option_exchange(sym)
-        current = _safe_ltp(client, sym, exch, price_fn)
+        current = _safe_ltp(client, sym, exch, price_fn, key=p.get("broker_key"))
         if current is None:
             _force_close_if_stale(p, date_iso, notifier)
             continue
@@ -705,7 +710,7 @@ def monitor_upstox_positions(
     for p in open_rows:
         sym = p["symbol"]
         exch = _option_exchange(sym)
-        current = _safe_ltp(kite_client, sym, exch, price_fn)
+        current = _safe_ltp(kite_client, sym, exch, price_fn, key=p.get("broker_key"))
         if current is None:
             _force_close_if_stale(p, date_iso, notifier)
             continue
@@ -810,7 +815,7 @@ def position_pnl(
     current premium, unrealised P&L (₹) and the rupee profit target."""
     sym = p["symbol"]
     exch = _option_exchange(sym)
-    current = _safe_ltp(kite_client, sym, exch, price_fn)
+    current = _safe_ltp(kite_client, sym, exch, price_fn, key=p.get("broker_key"))
     return {
         "id": p["id"], "symbol": sym, "qty": p["qty"],
         "entry_premium": p["price"],
@@ -849,7 +854,7 @@ def manual_close(
     sym = p["symbol"]
     exch = _option_exchange(sym)
 
-    current = _safe_ltp(kite_client, sym, exch, price_fn)
+    current = _safe_ltp(kite_client, sym, exch, price_fn, key=p.get("broker_key"))
     if current is None:
         # Un-priceable (e.g. expired contract): close at entry premium (P&L 0)
         # rather than leaving it stuck OPEN.

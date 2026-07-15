@@ -343,7 +343,7 @@ async function load(){
   const liveTxt=P.live?('Live P&L: '+pnl(P.total_unrealised)+' · exit: '+exitTxt)
     :'⚠️ no live price (Kite session needed) — showing entry only';
   $('posnote').innerHTML=liveTxt;
-  const dirOf=r=>r.symbol&&r.symbol.toUpperCase().endsWith('CE')?'📈 CALL':'📉 PUT';
+  const dirOf=r=>r.symbol&&r.symbol.toUpperCase().includes('CE')?'📈 CALL':'📉 PUT';
   const posCols=[['Symbol',r=>(r.is_hedge?'🛡️ ':'')+r.symbol],
     ['Dir',dirOf],
     ['Index @',r=>r.index_entry?Math.round(r.index_entry).toLocaleString('en-IN'):'-'],

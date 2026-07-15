@@ -238,6 +238,25 @@ STOP_ORDER_TYPE: str = "SL-M"
 # --------------------------------------------------------------------------
 EXECUTION_BROKER: str = "upstox"   # "internal" (simulate in-app) | "upstox" (sandbox orders)
 
+# Market-DATA broker (Jul 15): Kite Connect subscription lapsed (paid 1 month
+# by design); Upstox's API is free. "upstox" serves candles/LTP/instruments via
+# a drop-in client with the same interface as KiteClient. Needs UPSTOX_API_KEY,
+# UPSTOX_API_SECRET in .env and a daily login (~30s):
+#   .venv/bin/python -m src.broker.upstox_data
+DATA_BROKER: str = "upstox"        # "kite" | "upstox"
+UPSTOX_API_BASE: str = "https://api.upstox.com"
+UPSTOX_REDIRECT_URI: str = "https://127.0.0.1"
+# Watchlist symbol -> Upstox index instrument key.
+UPSTOX_INDEX_KEYS: dict[str, str] = {
+    "NSE:NIFTY 50":   "NSE_INDEX|Nifty 50",
+    "BSE:SENSEX":     "BSE_INDEX|SENSEX",
+    "NSE:NIFTY BANK": "NSE_INDEX|Nifty Bank",
+}
+# Our timeframe labels -> Upstox v3 historical (unit, interval).
+UPSTOX_INTERVALS: dict[str, tuple] = {
+    "15minute": ("minutes", 15), "5minute": ("minutes", 5), "day": ("days", 1),
+}
+
 # Upstox API (orders only; data stays on Kite). Sandbox uses a separate 30-day
 # token (UPSTOX_SANDBOX_TOKEN) — no daily login on the execution side.
 # Sandbox host is api-sandbox.upstox.com (verified). For LIVE, switch to

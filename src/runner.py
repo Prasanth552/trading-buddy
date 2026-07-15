@@ -264,7 +264,7 @@ def eod_summary(client: Any, notifier: Any | None) -> str:
     for t in trades:
         hhmm = (t["ts"] or "")[11:16]
         d = dict(t)
-        is_call = d["symbol"].upper().endswith("CE")
+        is_call = "CE" in d["symbol"].upper()
         direction = "📈CALL வாங்கல் (ஏறும்)" if is_call else "📉PUT வாங்கல் (இறங்கும்)"
         hedge = " 🛡️hedge" if d.get("is_hedge") else ""
         idx = (f" | index @{d['index_entry']:,.0f}" if d.get("index_entry") else "")
@@ -306,7 +306,7 @@ def _daily_insight(date_iso: str, trades: list[dict], ds: dict) -> str:
     lines = []
     for t in trades:
         kind = "HEDGE" if t.get("is_hedge") else "ORIG"
-        opt = "CALL(bullish)" if t["symbol"].upper().endswith("CE") else "PUT(bearish)"
+        opt = "CALL(bullish)" if "CE" in t["symbol"].upper() else "PUT(bearish)"
         lines.append(
             f"{(t['ts'] or '')[11:16]} {kind} {opt} {t['symbol']} x{t['qty']} "
             f"index@{t.get('index_entry')} prem {t['price']}->{t['exit_price']} "

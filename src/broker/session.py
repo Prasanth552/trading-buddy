@@ -63,14 +63,19 @@ def _is_valid(client: KiteClient) -> bool:
 def ensure_session(
     client: KiteClient | None = None,
     request_token: str | None = None,
-) -> KiteClient:
-    """Return a KiteClient with a valid access token for today.
+):
+    """Return a validated market-data client for today.
 
-    Resolution order:
-      1. Reuse cached token if it validates.
-      2. If ``request_token`` is supplied, exchange it for an access token.
-      3. Otherwise raise — caller should run the interactive login (--login).
+    When ``config.DATA_BROKER == "upstox"`` this returns the drop-in UpstoxData
+    client (same .ltp/.historical_data/.instruments surface); otherwise the
+    KiteClient flow below applies.
     """
+    if getattr(config, "DATA_BROKER", "kite") == "upstox" and client is None:
+        from src.broker.upstox_data import ensure_upstox_data_session, UpstoxDataError
+        try:
+            return ensure_upstox_data_session()
+        except UpstoxDataError as exc:
+            raise KiteClientError(str(exc)) from exc
     client = client or KiteClient()
 
     cached = load_cached_token()
@@ -118,6 +123,11 @@ def automated_login(client: KiteClient | None = None) -> KiteClient:
     if Zerodha changes them. It stores your Zerodha password in .env — only enable
     it if you accept that. It cannot be exercised without real credentials.
     """
+    if getattr(config, "DATA_BROKER", "kite") == "upstox":
+        # No headless Upstox login yet — surface the manual command instead.
+        raise KiteClientError(
+            "Upstox data token expired — run: .venv/bin/python -m src.broker.upstox_data")
+
     user_id = os.getenv("KITE_USER_ID")
     password = os.getenv("KITE_PASSWORD")
     totp_secret = os.getenv("KITE_TOTP_SECRET")
