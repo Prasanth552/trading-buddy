@@ -281,40 +281,54 @@ def automated_login() -> "UpstoxData":
         raise UpstoxDataError("Automated login needs UPSTOX_API_KEY/SECRET/MOBILE/"
                               "PIN/TOTP_SECRET in .env.")
 
+    from urllib.parse import urljoin, urlparse, parse_qs
+    import re
+
     s = requests.Session()
+    device = ("pltfm=WEB|osn=Linux|osv=x86_64|dvid=|apnm=login|apvr=2.0.0|"
+              "mfr=|mdl=|ntwtp=4g|dctp=DESKTOP")
     s.headers.update({"User-Agent": _UA, "Content-Type": "application/json",
                       "Accept": "application/json", "Origin": "https://login.upstox.com",
-                      "Referer": "https://login.upstox.com/"})
+                      "Referer": "https://login.upstox.com/", "x-device-details": device})
 
-    # Step 1 — 1FA: submit mobile, get a validation/session id.
+    # Step 0 — establish the login session: follow the OAuth dialog to the login
+    # page (sets cookies), and capture the login client_id + user_id it lands on.
+    auth_url = (f"{config.UPSTOX_API_BASE}/v2/login/authorization/dialog"
+                f"?response_type=code&client_id={api_key}"
+                f"&redirect_uri={config.UPSTOX_REDIRECT_URI}")
+    landed = s.get(auth_url, timeout=20, allow_redirects=True)
+    q = parse_qs(urlparse(landed.url).query)
+    login_client_id = (q.get("client_id") or [""])[0]
+    user_id = (q.get("user_id") or [""])[0]
+    log.info("Upstox login [session] landed=%s login_client_id=%s user_id=%s",
+             landed.url, login_client_id, user_id)
+    ctx = {"clientId": login_client_id, "userId": user_id}
+
+    # Step 1 — 1FA: submit mobile within the session context.
     r = s.post(f"{_LOGIN_SVC}/auth/1fa",
-               json={"data": {"mobileNumber": mobile, "userId": "", "otpType": "totp"}},
+               json={"data": {"mobileNumber": mobile, "countryCode": "91", **ctx}},
                timeout=20)
     d1 = _dbg("1fa", r)
-    val_id = (d1.get("data") or {}).get("validationToken") or \
-             (d1.get("data") or {}).get("valId") or (d1.get("data") or {}).get("userId")
+    val_id = ((d1.get("data") or {}).get("validationToken")
+              or (d1.get("data") or {}).get("valId")
+              or (d1.get("data") or {}).get("userId") or user_id)
 
     # Step 2 — TOTP verify.
     otp = pyotp.TOTP(totp_secret).now()
     r = s.post(f"{_LOGIN_SVC}/auth/1fa/totp/verify",
-               json={"data": {"otp": otp, "validationToken": val_id}}, timeout=20)
-    d2 = _dbg("totp-verify", r)
+               json={"data": {"otp": otp, "validationToken": val_id, **ctx}}, timeout=20)
+    _dbg("totp-verify", r)
 
     # Step 3 — PIN (2FA).
     r = s.post(f"{_LOGIN_SVC}/auth/2fa",
                json={"data": {"twoFAMethod": "SECURE_PIN", "inputText": pin,
-                              "validationToken": val_id}}, timeout=20)
-    d3 = _dbg("pin", r)
+                              "validationToken": val_id, **ctx}}, timeout=20)
+    _dbg("pin", r)
 
-    # Step 4 — authorize -> capture ?code= from the redirect chain.
-    from urllib.parse import urljoin
-    import re
-    auth_url = (f"{config.UPSTOX_API_BASE}/v2/login/authorization/dialog"
-                f"?response_type=code&client_id={api_key}"
-                f"&redirect_uri={config.UPSTOX_REDIRECT_URI}")
+    # Step 4 — re-hit the dialog; now authenticated it should redirect with ?code=
     code: str | None = None
     url = auth_url
-    for _hop in range(8):
+    for _hop in range(10):
         try:
             rr = s.get(url, timeout=20, allow_redirects=False)
         except requests.exceptions.RequestException as exc:
@@ -322,7 +336,7 @@ def automated_login() -> "UpstoxData":
             code = m.group(1) if m else None
             break
         loc = rr.headers.get("Location", "") or ""
-        m = re.search(r"[?&]code=([^&]+)", loc)
+        m = re.search(r"[?&]code=([^&]+)", loc) or re.search(r"[?&]code=([^&]+)", rr.url)
         if m:
             code = m.group(1)
             break
