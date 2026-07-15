@@ -37,14 +37,18 @@ def candles_to_df(candles: list[dict[str, Any]]) -> pd.DataFrame:
     return df
 
 
-def resolve_tokens(client: KiteClient, symbols: list[str]) -> dict[str, int]:
-    """Map ``EXCHANGE:SYMBOL`` strings to instrument tokens via the LTP endpoint."""
+def resolve_tokens(client: KiteClient, symbols: list[str]) -> dict[str, Any]:
+    """Map ``EXCHANGE:SYMBOL`` strings to instrument tokens via the LTP endpoint.
+
+    Tokens are kept as-is: Kite returns ints, Upstox returns string keys like
+    ``NSE_INDEX|Nifty 50`` — both are passed straight back to historical_data().
+    """
     data = client.ltp(symbols)
-    tokens: dict[str, int] = {}
+    tokens: dict[str, Any] = {}
     for sym in symbols:
         info = data.get(sym)
-        if info and "instrument_token" in info:
-            tokens[sym] = int(info["instrument_token"])
+        if info and info.get("instrument_token") is not None:
+            tokens[sym] = info["instrument_token"]
         else:
             log.warning("Could not resolve instrument token for %s", sym)
     return tokens
