@@ -16,9 +16,26 @@ MODE: str = "PAPER"  # "PAPER" | "LIVE"  — keep PAPER until proven.
 # Instruments to ANALYSE (the underlying index charts).
 # Trades are executed as WEEKLY OPTIONS / defined-risk spreads on these.
 WATCHLIST: list[str] = [
-    "NSE:NIFTY 50",    # weekly expiry, lot 65
-    "BSE:SENSEX",      # weekly expiry (different day), lot 20
-    "NSE:NIFTY BANK",  # monthly expiry, lot 30 — now traded too (more setups)
+    # --- Indices (weekly/monthly options) ---
+    "NSE:NIFTY 50",
+    "BSE:SENSEX",
+    "NSE:NIFTY BANK",
+    # --- F&O stocks (monthly options, sandbox diversification) ---
+    "NSE:RELIANCE",
+    "NSE:HDFCBANK",
+    "NSE:ICICIBANK",
+    "NSE:INFY",
+    "NSE:TCS",
+    "NSE:SBIN",
+    "NSE:AXISBANK",
+    "NSE:KOTAKBANK",
+    "NSE:ITC",
+    "NSE:LT",
+    "NSE:BHARTIARTL",
+    "NSE:HINDUNILVR",
+    "NSE:MARUTI",
+    "NSE:TATAMOTORS",
+    "NSE:BAJFINANCE",
 ]
 
 WATCH_ONLY: list[str] = []   # all analysed symbols are now traded
@@ -46,7 +63,13 @@ MAX_LOTS_PER_TRADE: int = 5
 MIN_DAYS_TO_EXPIRY: int = 1
 
 # Lot sizes (Jan 2026 SEBI/NSE revision) — VERIFY against broker before live use.
-LOT_SIZES: dict[str, int] = {"NIFTY": 65, "SENSEX": 20, "BANKNIFTY": 30}
+LOT_SIZES: dict[str, int] = {
+    "NIFTY": 65, "SENSEX": 20, "BANKNIFTY": 30,
+    "RELIANCE": 250, "HDFCBANK": 550, "ICICIBANK": 700,
+    "INFY": 400, "TCS": 175, "SBIN": 750, "AXISBANK": 625,
+    "KOTAKBANK": 400, "ITC": 1600, "LT": 150, "BHARTIARTL": 475,
+    "HINDUNILVR": 300, "MARUTI": 100, "TATAMOTORS": 1400, "BAJFINANCE": 125,
+}
 
 # Tradable style on this capital: option BUYING and DEBIT/CREDIT SPREADS only.
 # Naked option selling and futures need ~Rs 1-1.5 lakh+ margin -> out of scope.
@@ -214,6 +237,21 @@ SYMBOL_NEWS_KEYWORDS: dict[str, str] = {
     "NSE:NIFTY 50": "NIFTY",
     "BSE:SENSEX": "SENSEX",
     "NSE:NIFTY BANK": "BANK",
+    "NSE:RELIANCE": "RELIANCE",
+    "NSE:HDFCBANK": "HDFC",
+    "NSE:ICICIBANK": "ICICI",
+    "NSE:INFY": "INFOSYS",
+    "NSE:TCS": "TCS",
+    "NSE:SBIN": "SBI",
+    "NSE:AXISBANK": "AXIS",
+    "NSE:KOTAKBANK": "KOTAK",
+    "NSE:ITC": "ITC",
+    "NSE:LT": "LARSEN",
+    "NSE:BHARTIARTL": "AIRTEL",
+    "NSE:HINDUNILVR": "HINDUSTAN",
+    "NSE:MARUTI": "MARUTI",
+    "NSE:TATAMOTORS": "TATA MOTORS",
+    "NSE:BAJFINANCE": "BAJAJ",
 }
 
 # --------------------------------------------------------------------------
@@ -221,9 +259,24 @@ SYMBOL_NEWS_KEYWORDS: dict[str, str] = {
 # --------------------------------------------------------------------------
 # Index -> (NFO/BFO option exchange, F&O underlying name, strike step, lot key).
 OPTION_SPECS: dict[str, dict[str, Any]] = {
-    "NSE:NIFTY 50":  {"exchange": "NFO", "name": "NIFTY",     "strike_step": 50,  "lot_key": "NIFTY"},
-    "BSE:SENSEX":    {"exchange": "BFO", "name": "SENSEX",    "strike_step": 100, "lot_key": "SENSEX"},
-    "NSE:NIFTY BANK":{"exchange": "NFO", "name": "BANKNIFTY", "strike_step": 100, "lot_key": "BANKNIFTY"},
+    "NSE:NIFTY 50":   {"exchange": "NFO", "name": "NIFTY",      "strike_step": 50,   "lot_key": "NIFTY"},
+    "BSE:SENSEX":     {"exchange": "BFO", "name": "SENSEX",     "strike_step": 100,  "lot_key": "SENSEX"},
+    "NSE:NIFTY BANK": {"exchange": "NFO", "name": "BANKNIFTY",  "strike_step": 100,  "lot_key": "BANKNIFTY"},
+    "NSE:RELIANCE":   {"exchange": "NFO", "name": "RELIANCE",   "strike_step": 20,   "lot_key": "RELIANCE"},
+    "NSE:HDFCBANK":   {"exchange": "NFO", "name": "HDFCBANK",   "strike_step": 20,   "lot_key": "HDFCBANK"},
+    "NSE:ICICIBANK":  {"exchange": "NFO", "name": "ICICIBANK",  "strike_step": 10,   "lot_key": "ICICIBANK"},
+    "NSE:INFY":       {"exchange": "NFO", "name": "INFY",       "strike_step": 20,   "lot_key": "INFY"},
+    "NSE:TCS":        {"exchange": "NFO", "name": "TCS",        "strike_step": 50,   "lot_key": "TCS"},
+    "NSE:SBIN":       {"exchange": "NFO", "name": "SBIN",       "strike_step": 5,    "lot_key": "SBIN"},
+    "NSE:AXISBANK":   {"exchange": "NFO", "name": "AXISBANK",   "strike_step": 20,   "lot_key": "AXISBANK"},
+    "NSE:KOTAKBANK":  {"exchange": "NFO", "name": "KOTAKBANK",  "strike_step": 20,   "lot_key": "KOTAKBANK"},
+    "NSE:ITC":        {"exchange": "NFO", "name": "ITC",        "strike_step": 5,    "lot_key": "ITC"},
+    "NSE:LT":         {"exchange": "NFO", "name": "LT",         "strike_step": 20,   "lot_key": "LT"},
+    "NSE:BHARTIARTL": {"exchange": "NFO", "name": "BHARTIARTL", "strike_step": 20,   "lot_key": "BHARTIARTL"},
+    "NSE:HINDUNILVR": {"exchange": "NFO", "name": "HINDUNILVR", "strike_step": 20,   "lot_key": "HINDUNILVR"},
+    "NSE:MARUTI":     {"exchange": "NFO", "name": "MARUTI",     "strike_step": 100,  "lot_key": "MARUTI"},
+    "NSE:TATAMOTORS": {"exchange": "NFO", "name": "TATAMOTORS", "strike_step": 10,   "lot_key": "TATAMOTORS"},
+    "NSE:BAJFINANCE": {"exchange": "NFO", "name": "BAJFINANCE", "strike_step": 50,   "lot_key": "BAJFINANCE"},
 }
 # Approx ATM option delta — maps an index stop distance to an option-premium stop.
 OPTION_DELTA_ASSUMPTION: float = 0.5
@@ -256,6 +309,21 @@ UPSTOX_INDEX_KEYS: dict[str, str] = {
     "NSE:NIFTY 50":   "NSE_INDEX|Nifty 50",
     "BSE:SENSEX":     "BSE_INDEX|SENSEX",
     "NSE:NIFTY BANK": "NSE_INDEX|Nifty Bank",
+    "NSE:RELIANCE":   "NSE_EQ|RELIANCE",
+    "NSE:HDFCBANK":   "NSE_EQ|HDFCBANK",
+    "NSE:ICICIBANK":  "NSE_EQ|ICICIBANK",
+    "NSE:INFY":       "NSE_EQ|INFY",
+    "NSE:TCS":        "NSE_EQ|TCS",
+    "NSE:SBIN":       "NSE_EQ|SBIN",
+    "NSE:AXISBANK":   "NSE_EQ|AXISBANK",
+    "NSE:KOTAKBANK":  "NSE_EQ|KOTAKBANK",
+    "NSE:ITC":        "NSE_EQ|ITC",
+    "NSE:LT":         "NSE_EQ|LT",
+    "NSE:BHARTIARTL": "NSE_EQ|BHARTIARTL",
+    "NSE:HINDUNILVR": "NSE_EQ|HINDUNILVR",
+    "NSE:MARUTI":     "NSE_EQ|MARUTI",
+    "NSE:TATAMOTORS": "NSE_EQ|TATAMOTORS",
+    "NSE:BAJFINANCE": "NSE_EQ|BAJFINANCE",
 }
 # Our timeframe labels -> Upstox v3 historical (unit, interval).
 UPSTOX_INTERVALS: dict[str, tuple] = {
@@ -280,6 +348,21 @@ UPSTOX_OPTION_SEGMENTS: dict[str, dict[str, str]] = {
     "NSE:NIFTY 50":   {"segment": "NSE_FO", "name": "NIFTY"},
     "BSE:SENSEX":     {"segment": "BSE_FO", "name": "SENSEX"},
     "NSE:NIFTY BANK": {"segment": "NSE_FO", "name": "BANKNIFTY"},
+    "NSE:RELIANCE":   {"segment": "NSE_FO", "name": "RELIANCE"},
+    "NSE:HDFCBANK":   {"segment": "NSE_FO", "name": "HDFCBANK"},
+    "NSE:ICICIBANK":  {"segment": "NSE_FO", "name": "ICICIBANK"},
+    "NSE:INFY":       {"segment": "NSE_FO", "name": "INFY"},
+    "NSE:TCS":        {"segment": "NSE_FO", "name": "TCS"},
+    "NSE:SBIN":       {"segment": "NSE_FO", "name": "SBIN"},
+    "NSE:AXISBANK":   {"segment": "NSE_FO", "name": "AXISBANK"},
+    "NSE:KOTAKBANK":  {"segment": "NSE_FO", "name": "KOTAKBANK"},
+    "NSE:ITC":        {"segment": "NSE_FO", "name": "ITC"},
+    "NSE:LT":         {"segment": "NSE_FO", "name": "LT"},
+    "NSE:BHARTIARTL": {"segment": "NSE_FO", "name": "BHARTIARTL"},
+    "NSE:HINDUNILVR": {"segment": "NSE_FO", "name": "HINDUNILVR"},
+    "NSE:MARUTI":     {"segment": "NSE_FO", "name": "MARUTI"},
+    "NSE:TATAMOTORS": {"segment": "NSE_FO", "name": "TATAMOTORS"},
+    "NSE:BAJFINANCE": {"segment": "NSE_FO", "name": "BAJFINANCE"},
 }
 
 TIMEZONE: str = "Asia/Kolkata"
