@@ -20,22 +20,11 @@ WATCHLIST: list[str] = [
     "NSE:NIFTY 50",
     "BSE:SENSEX",
     "NSE:NIFTY BANK",
-    # --- F&O stocks (monthly options, sandbox diversification) ---
-    "NSE:RELIANCE",
-    "NSE:HDFCBANK",
-    "NSE:ICICIBANK",
-    "NSE:INFY",
-    "NSE:TCS",
-    "NSE:SBIN",
-    "NSE:AXISBANK",
-    "NSE:KOTAKBANK",
-    "NSE:ITC",
-    "NSE:LT",
-    "NSE:BHARTIARTL",
-    "NSE:HINDUNILVR",
-    "NSE:MARUTI",
-    "NSE:TATAMOTORS",
-    "NSE:BAJFINANCE",
+    # --- F&O stocks (profitable in 90d backtest, trail_atr) ---
+    "NSE:TCS",         # +₹30k, 83% win, PF 1.50
+    "NSE:LT",          # +₹14k, 79% win, PF 1.14
+    "NSE:ITC",         # +₹6.9k, 77% win, PF 1.09
+    "NSE:SBIN",        # +₹3k, 78% win, PF 1.03
 ]
 
 WATCH_ONLY: list[str] = []   # all analysed symbols are now traded
