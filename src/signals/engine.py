@@ -75,17 +75,144 @@ def evaluate(
 ) -> Signal | None:
     """Evaluate one symbol's snapshot into a Signal or None.
 
-    Dispatches on ``config.STRATEGY_MODE``: "trend" (EMA/VWAP/Supertrend/ADX,
-    trades WITH the trend) or "meanrev" (legacy pivot mean-reversion).
+    Dispatches on ``config.STRATEGY_MODE``:
+      "trend"   — EMA/VWAP/Supertrend/ADX (trades WITH the trend)
+      "orb"     — Opening Range Breakout only
+      "both"    — trend + ORB in parallel (returns the first that fires)
+      "meanrev" — legacy pivot mean-reversion
     """
     news = news or {"net": "neutral", "has_high_bull": False, "has_high_bear": False}
-    if getattr(config, "STRATEGY_MODE", "trend") == "trend":
+    mode = getattr(config, "STRATEGY_MODE", "trend")
+    if mode == "trend":
         return _evaluate_trend(snapshot, news)
+    if mode == "orb":
+        return _evaluate_orb(snapshot)
+    if mode == "both":
+        return _evaluate_trend(snapshot, news) or _evaluate_orb(snapshot)
     return _evaluate_meanrev(snapshot, news)
 
 
 def _nan(x: Any) -> bool:
     return x is None or (isinstance(x, float) and x != x)
+
+
+# --------------------------------------------------------------------------
+# ORB (Opening Range Breakout) state — persists across cycles within a day
+# --------------------------------------------------------------------------
+# {symbol: {"date": "YYYY-MM-DD", "high": float, "low": float, "fired": bool}}
+_orb_ranges: dict[str, dict[str, Any]] = {}
+
+
+def compute_orb_range(symbol: str, intraday_df: Any) -> dict[str, float] | None:
+    """Compute the ORB high/low from intraday bars within the range window.
+
+    Called from the runner each cycle; caches per symbol per day.
+    """
+    import pandas as pd
+    today = mc.now_ist().date().isoformat()
+    cached = _orb_ranges.get(symbol)
+    if cached and cached["date"] == today and cached.get("high") is not None:
+        return {"high": cached["high"], "low": cached["low"]}
+
+    if intraday_df is None or len(intraday_df) == 0:
+        return None
+
+    from datetime import time as _t
+    range_end = _t(9, 15 + getattr(config, "ORB_RANGE_MINUTES", 30))
+    today_bars = intraday_df[intraday_df.index.date == mc.now_ist().date()]
+    if len(today_bars) == 0:
+        return None
+    range_bars = today_bars[today_bars.index.time <= range_end]
+    if len(range_bars) == 0:
+        return None
+
+    orb_high = float(range_bars["high"].max())
+    orb_low = float(range_bars["low"].min())
+
+    now_t = mc.now_ist().time()
+    if now_t >= range_end:
+        _orb_ranges[symbol] = {
+            "date": today, "high": orb_high, "low": orb_low, "fired": False,
+        }
+    return {"high": orb_high, "low": orb_low}
+
+
+def _evaluate_orb(snapshot: dict[str, Any]) -> Signal | None:
+    """Opening Range Breakout: buy above ORB high, short below ORB low.
+
+    Stop = opposite end of the range. Target = 2× range width.
+    One trade per symbol per day. Only fires after the range window closes.
+    """
+    from datetime import time as _t
+
+    symbol = snapshot["symbol"]
+    ltp = snapshot.get("ltp")
+    atr_val = snapshot.get("atr")
+    if _nan(ltp) or _nan(atr_val):
+        return None
+
+    now_t = mc.now_ist().time()
+    range_end = _t(9, 15 + getattr(config, "ORB_RANGE_MINUTES", 30))
+    close_t_str = getattr(config, "ORB_CLOSE_TIME", "14:30")
+    h, m = close_t_str.split(":")
+    close_t = _t(int(h), int(m))
+
+    if now_t <= range_end or now_t >= close_t:
+        return None
+
+    today = mc.now_ist().date().isoformat()
+    cached = _orb_ranges.get(symbol)
+    if not cached or cached["date"] != today or cached.get("high") is None:
+        return None
+    if cached.get("fired"):
+        return None
+
+    orb_high = cached["high"]
+    orb_low = cached["low"]
+    orb_width = orb_high - orb_low
+    if orb_width <= 0:
+        return None
+
+    min_range = getattr(config, "ORB_MIN_RANGE_POINTS", 0)
+    if min_range > 0 and orb_width < min_range:
+        return None
+
+    rr = getattr(config, "ORB_RR_RATIO", 2.0)
+
+    if ltp > orb_high:
+        direction = "long"
+        entry = float(ltp)
+        stop = orb_low
+        target = entry + rr * orb_width
+    elif ltp < orb_low:
+        direction = "short"
+        entry = float(ltp)
+        stop = orb_high
+        target = entry - rr * orb_width
+    else:
+        return None
+
+    cached["fired"] = True
+
+    rationale = (
+        f"{direction.upper()} (ORB) LTP {entry:,.2f} broke "
+        f"{'above' if direction == 'long' else 'below'} range "
+        f"[{orb_low:,.2f} - {orb_high:,.2f}] (width {orb_width:,.2f}). "
+        f"Stop {stop:,.2f}, target {target:,.2f} (RR {rr}). "
+        f"ATR {atr_val:,.2f}."
+    )
+
+    return Signal(
+        symbol=symbol,
+        direction=direction,
+        entry=round(entry, 2),
+        stop=round(stop, 2),
+        target=round(target, 2),
+        qty=config.MIN_LOT_SIZE,
+        max_risk=float(config.MAX_RISK_PER_TRADE),
+        rationale=rationale,
+        status="new",
+    )
 
 
 def _evaluate_trend(

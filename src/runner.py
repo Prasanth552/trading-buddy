@@ -83,13 +83,22 @@ def _gate_read(s: dict[str, Any]) -> str:
         long_fails.append(f"RSI {rsi:.0f} out")
     if not (config.RSI_SHORT_MIN <= rsi <= config.RSI_SHORT_MAX):
         short_fails.append(f"RSI {rsi:.0f} out")
+    # ORB status (if active).
+    orb_info = ""
+    if getattr(config, "STRATEGY_MODE", "trend") in ("orb", "both"):
+        from src.signals.engine import _orb_ranges
+        cached = _orb_ranges.get(s["symbol"])
+        if cached and cached.get("high") is not None:
+            orb_info = (f" | ORB [{cached['low']:,.0f}-{cached['high']:,.0f}]"
+                        f"{'✓fired' if cached.get('fired') else ''}")
+
     if not long_fails:
-        return "📈 LONG setup தயார் ✔"
+        return f"📈 LONG setup தயார் ✔{orb_info}"
     if not short_fails:
-        return "📉 SHORT setup தயார் ✔"
+        return f"📉 SHORT setup தயார் ✔{orb_info}"
     side, fails = (("LONG", long_fails) if len(long_fails) <= len(short_fails)
                    else ("SHORT", short_fails))
-    return f"{side} காத்திருப்பு — தடை: {', '.join(fails[:2])}"
+    return f"{side} காத்திருப்பு — தடை: {', '.join(fails[:2])}{orb_info}"
 
 
 def _pulse_prediction(snaps: list[dict[str, Any]]) -> str | None:
@@ -355,7 +364,8 @@ def _settings_banner() -> str:
     hedge = "ON" if getattr(config, "HEDGE_ON_LOSS", False) else "OFF"
     style = ("intraday (daily 15:15 squareoff)" if getattr(config, "INTRADAY_SQUAREOFF", True)
              else "holds till TP/expiry")
-    return (f"⚙️ Bot alive · stops={stops} · hedge chain {hedge} · {style} · "
+    mode = getattr(config, "STRATEGY_MODE", "trend")
+    return (f"⚙️ Bot alive · strategy={mode} · stops={stops} · hedge chain {hedge} · {style} · "
             f"TP ₹{getattr(config, 'PROFIT_TARGET_RUPEES', 0):,.0f} · "
             f"{getattr(config, 'MAX_LOTS_PER_TRADE', 0)} lots · "
             f"monitor {getattr(config, 'MONITOR_INTERVAL_MIN', 15)}min")

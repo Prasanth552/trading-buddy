@@ -92,7 +92,12 @@ def snapshot_for_symbol(
     prev_day = previous_day_ohlc(client, token)
     ltp_data = client.ltp([symbol]).get(symbol, {})
     ltp = ltp_data.get("last_price")
-    return indicators.build_snapshot(symbol, intraday, prev_day, ltp=ltp)
+    snap = indicators.build_snapshot(symbol, intraday, prev_day, ltp=ltp)
+    # Feed the ORB range computer with today's intraday bars.
+    if getattr(config, "STRATEGY_MODE", "trend") in ("orb", "both"):
+        from src.signals.engine import compute_orb_range
+        compute_orb_range(symbol, intraday)
+    return snap
 
 
 def snapshot_watchlist(
