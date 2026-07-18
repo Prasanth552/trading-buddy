@@ -32,9 +32,10 @@ from src.utils.logging import get_logger
 
 log = get_logger("backtest")
 
-# How many trailing 15-min bars to feed the snapshot (mirrors the live ~5-day
-# fetch so EMA/VWAP/ADX/ATR are computed over the same window).
-WINDOW_BARS = 130
+# How many trailing bars to feed the snapshot. 130 for 15-min (~5 trading days),
+# 50 for daily candles (~2.5 months for EMA/ADX to warm up).
+WINDOW_BARS_15M = 130
+WINDOW_BARS_DAILY = 50
 
 # Per-run caches so --sweep doesn't re-download or re-compute each combo.
 _HIST_CACHE: dict[tuple, Any] = {}
@@ -66,12 +67,16 @@ def _fetch_history(client: Any, token: int, days: int, interval: str, offset: in
 
 
 def _simulate_trade(df, i: int, sig, n: int,
-                    st_arr=None, atr_arr=None, sigs=None) -> tuple[str, float, int]:
+                    st_arr=None, atr_arr=None, sigs=None,
+                    daily_mode: bool = False) -> tuple[str, float, int]:
     """Walk forward from bar ``i`` to resolve one trade under ``config.EXIT_MODE``.
 
     Returns (outcome, pnl₹, exit_bar_index). P&L scales with the favourable move
     relative to the initial risk R (a full initial-stop loss = -MAX_RISK).
-    Intraday only: squared off at the entry day's last bar.
+
+    ``daily_mode=True``: bars are daily candles; trades hold across days until
+    stop/target/trail triggers. ``daily_mode=False`` (default): intraday, squared
+    off at the entry day's last bar.
 
     With ``config.STOP_AND_REVERSE`` and ``sigs`` given, an OPPOSITE signal at a
     later bar closes the trade at that bar's close (outcome 'reverse'); the
@@ -89,6 +94,11 @@ def _simulate_trade(df, i: int, sig, n: int,
     dates = df.index
     entry_day = dates[i].date()
     mode = getattr(config, "EXIT_MODE", "target")
+
+    def _same_session(j: int) -> bool:
+        if daily_mode:
+            return True  # hold across days; exit only on stop/target/trail
+        return dates[j].date() == entry_day
 
     def _pnl(px: float) -> float:
         move = (px - entry) if is_long else (entry - px)
@@ -112,7 +122,7 @@ def _simulate_trade(df, i: int, sig, n: int,
             tp_level = float(sig.target)
             tp_payoff = (abs(sig.target - entry) / R) * risk_rs
         j = i + 1
-        while j < n and dates[j].date() == entry_day:
+        while j < n and _same_session(j):
             hi = hi_arr[j]; lo = lo_arr[j]
             if is_long:
                 stop_hit, prof_hit = lo <= stop0, hi >= tp_level
@@ -133,7 +143,7 @@ def _simulate_trade(df, i: int, sig, n: int,
         pmult = getattr(config, "PREMIUM_RISK_MULT", 3.0)
         dead = entry - pmult * R if is_long else entry + pmult * R  # premium→0 level
         j = i + 1
-        while j < n and dates[j].date() == entry_day:
+        while j < n and _same_session(j):
             hi = hi_arr[j]; lo = lo_arr[j]
             if (is_long and lo <= dead) or ((not is_long) and hi >= dead):
                 return "premium_lost", -pmult * risk_rs, j   # full premium gone
@@ -152,7 +162,7 @@ def _simulate_trade(df, i: int, sig, n: int,
     cur_stop = stop0
     peak = entry
     j = i + 1
-    while j < n and dates[j].date() == entry_day:
+    while j < n and _same_session(j):
         hi = hi_arr[j]; lo = lo_arr[j]
         # 1) stop (initial or trailed) — conservative, checked first.
         if is_long and lo <= cur_stop:
@@ -184,10 +194,12 @@ def _simulate_trade(df, i: int, sig, n: int,
 
 
 def backtest_symbol(client: Any, symbol: str, days: int, interval: str,
-                    offset: int = 0) -> dict[str, Any]:
+                    offset: int = 0, daily_mode: bool = False) -> dict[str, Any]:
     """Run the strategy over one symbol's history; return a stats dict."""
     from src.data import market_data, indicators
     from src.signals import engine
+
+    WINDOW_BARS = WINDOW_BARS_DAILY if daily_mode else WINDOW_BARS_15M
 
     tokens = market_data.resolve_tokens(client, [symbol])
     token = tokens.get(symbol)
@@ -244,14 +256,15 @@ def backtest_symbol(client: Any, symbol: str, days: int, interval: str,
             continue
         ts = df.index[i]
         day = ts.date()
-        # Session-time filter: skip the noisy open/close auctions.
-        if not (start_t <= ts.time() <= end_t):
+        # Session-time filter: skip the noisy open/close auctions (intraday only).
+        if not daily_mode and not (start_t <= ts.time() <= end_t):
             i += 1
             continue
         if day_count.get(day, 0) >= per_sym_cap:
             i += 1
             continue
-        outcome, pnl, exit_i = _simulate_trade(df, i, sig, n, st_arr, atr_arr, sigs)
+        outcome, pnl, exit_i = _simulate_trade(df, i, sig, n, st_arr, atr_arr, sigs,
+                                               daily_mode=daily_mode)
         if outcome == "skip":
             i += 1
             continue
@@ -332,11 +345,12 @@ def _print_report(results: list[dict[str, Any]], days: int, offset: int = 0) -> 
 
 
 def _run_all(client: Any, symbols: list[str], days: int, interval: str,
-             offset: int = 0) -> list[dict[str, Any]]:
+             offset: int = 0, daily_mode: bool = False) -> list[dict[str, Any]]:
     out = []
     for sym in symbols:
         try:
-            out.append(backtest_symbol(client, sym, days, interval, offset))
+            out.append(backtest_symbol(client, sym, days, interval, offset,
+                                       daily_mode=daily_mode))
         except Exception as exc:  # noqa: BLE001
             out.append({"symbol": sym, "error": str(exc)})
     return out
@@ -435,10 +449,14 @@ def main() -> int:
                     help="Override EXIT_MODE: target | ST-flip trail | ATR trail | no stop-loss.")
     ap.add_argument("--offset", type=int, default=0,
                     help="End the window N days ago (for out-of-sample testing).")
+    ap.add_argument("--daily", action="store_true",
+                    help="Use daily candles instead of 15-min (covers longer history).")
     args = ap.parse_args()
 
     if args.exit_mode:
         config.EXIT_MODE = args.exit_mode
+    if args.daily:
+        args.interval = "day"
 
     from src.broker.session import ensure_session
     from src.broker.kite_client import KiteClientError
@@ -457,9 +475,12 @@ def main() -> int:
         print(f"… fetching {args.days}d (×2 windows) and sweeping entry filters …")
         _filter_sweep(client, symbols, args.days, args.interval)
         return 0
+    dm = getattr(args, "daily", False)
+    tf = "daily" if dm else "15min"
     print(f"… backtesting {len(symbols)} symbol(s) · {args.days}d "
-          f"· exit={config.EXIT_MODE} · offset={args.offset}d …")
-    results = _run_all(client, symbols, args.days, args.interval, args.offset)
+          f"· {tf} · exit={config.EXIT_MODE} · offset={args.offset}d …")
+    results = _run_all(client, symbols, args.days, args.interval, args.offset,
+                        daily_mode=dm)
     _print_report(results, args.days, args.offset)
     return 0
 
