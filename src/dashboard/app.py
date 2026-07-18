@@ -14,7 +14,7 @@ import secrets
 from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 
 import config
@@ -251,6 +251,169 @@ def index(_: None = Depends(require_auth)) -> str:
     return _PAGE
 
 
+# --------------------------------------------------------------------------
+# Chart Analyzer
+# --------------------------------------------------------------------------
+_CHART_SYSTEM = """You are an expert technical analyst for the Indian stock market (NSE/BSE).
+You analyse chart images — candlestick, line, or bar charts — and produce a
+structured, actionable report. Cover ALL of the following:
+
+1. **Chart type & timeframe** — what you see (candlestick/line, 1min/15min/daily/weekly, etc.).
+2. **Trend identification** — primary trend (up/down/sideways), trend strength, and
+   any trend-line breaks or channel boundaries visible.
+3. **Key support & resistance levels** — mark every price level that has acted as
+   S/R (round numbers, prior swing highs/lows, gap zones).
+4. **Candlestick / price-action patterns** — e.g. hammer, engulfing, doji, inside bar,
+   double top/bottom, head-and-shoulders, flags, wedges, cup-and-handle.
+5. **Indicator readings** (if visible on the chart) — moving averages, RSI, MACD,
+   Bollinger Bands, volume profile, Supertrend, etc.
+6. **Volume analysis** — is volume confirming the move? Divergences?
+7. **Prediction / next likely move** — based on everything above, give a SHORT-TERM
+   (next 1-5 sessions) and MEDIUM-TERM (next 2-4 weeks) directional view with
+   specific price targets and invalidation (stop-loss) levels.
+8. **Recommended trade setup** — direction (long/short/wait), entry zone, stop-loss,
+   target(s), and risk-reward ratio. If no clear setup exists, say "No trade — wait."
+
+Be specific with numbers. Use ₹ for prices. If the chart is unclear or low quality,
+say what you CAN and CANNOT determine. Never fabricate data you cannot see."""
+
+_CHART_PROMPT = "Analyse this chart image. Provide the full 8-section technical analysis and prediction."
+
+
+@app.post("/api/chart-analyze")
+async def api_chart_analyze(
+    file: UploadFile = File(...),
+    _: None = Depends(require_auth),
+) -> JSONResponse:
+    """Accept a chart image, send it to Claude vision, return the analysis."""
+    content_type = file.content_type or "image/png"
+    if not content_type.startswith("image/"):
+        return JSONResponse({"error": "Upload an image file (PNG, JPG, WEBP)."}, status_code=400)
+    data = await file.read()
+    if len(data) > 20 * 1024 * 1024:
+        return JSONResponse({"error": "Image too large (max 20 MB)."}, status_code=400)
+    img_b64 = base64.b64encode(data).decode()
+    try:
+        from src.llm.client import LLMClient, LLMError
+        llm = LLMClient()
+        analysis = llm.analyze_image(
+            system=_CHART_SYSTEM,
+            image_b64=img_b64,
+            media_type=content_type,
+            prompt=_CHART_PROMPT,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse({"error": str(exc)}, status_code=500)
+    return JSONResponse({"analysis": analysis})
+
+
+@app.get("/chart", response_class=HTMLResponse)
+def chart_page(_: None = Depends(require_auth)) -> str:
+    return _CHART_PAGE
+
+
+_CHART_PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>Chart Analyzer — Trading Buddy</title>
+<style>
+:root{--bg:#0f1419;--card:#1a212b;--mut:#8b97a7;--grn:#27c281;--red:#ff5d5d;--acc:#4c9aff;--txt:#e6edf3}
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--txt);
+ padding:14px;max-width:960px;margin:auto}
+a{color:var(--acc);text-decoration:none}
+h1{font-size:22px;margin:4px 0 2px}
+.sub{color:var(--mut);font-size:13px;margin-bottom:18px}
+.upload-zone{border:2px dashed #2d3748;border-radius:14px;padding:40px 20px;text-align:center;
+ cursor:pointer;transition:border-color .2s,background .2s;margin-bottom:18px;position:relative}
+.upload-zone:hover,.upload-zone.drag{border-color:var(--acc);background:rgba(76,154,255,.06)}
+.upload-zone input{position:absolute;inset:0;opacity:0;cursor:pointer}
+.upload-zone .icon{font-size:48px;margin-bottom:8px}
+.upload-zone .label{font-size:15px;color:var(--mut)}
+.preview-wrap{text-align:center;margin-bottom:16px}
+.preview-wrap img{max-width:100%;max-height:400px;border-radius:10px;border:1px solid #2d3748}
+.btn{display:inline-block;padding:12px 28px;border:0;border-radius:10px;font-size:15px;font-weight:600;
+ cursor:pointer;background:var(--acc);color:#fff;transition:opacity .2s}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.btn.loading{position:relative;color:transparent}
+.btn.loading::after{content:'';position:absolute;top:50%;left:50%;width:20px;height:20px;
+ margin:-10px 0 0 -10px;border:3px solid rgba(255,255,255,.3);border-top-color:#fff;
+ border-radius:50%;animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.result{background:var(--card);border-radius:14px;padding:20px 22px;margin-top:18px;
+ line-height:1.7;font-size:14px;white-space:pre-wrap;word-wrap:break-word}
+.result h1,.result h2,.result h3{color:var(--acc);margin:18px 0 6px}
+.result h1{font-size:18px} .result h2{font-size:16px} .result h3{font-size:14px}
+.result strong{color:var(--grn)}
+.result em{color:#ffb454}
+.error{color:var(--red);margin-top:14px;font-size:14px}
+.back{display:inline-block;margin-bottom:12px;font-size:13px}
+</style></head><body>
+<a href="/" class=back>&larr; Dashboard</a>
+<h1>📊 Chart Analyzer</h1>
+<div class=sub>Upload a chart image (Nifty, Bank Nifty, any stock) — AI analyses patterns, S/R, and predicts the next move.</div>
+
+<div class=upload-zone id=dropzone>
+ <input type=file id=fileInput accept="image/*">
+ <div class=icon>📈</div>
+ <div class=label>Drop chart image here or click to browse<br><small>PNG, JPG, WEBP — max 20 MB</small></div>
+</div>
+<div class=preview-wrap id=previewWrap style=display:none><img id=preview></div>
+<div style=text-align:center>
+ <button class=btn id=analyzeBtn disabled onclick=analyze()>Analyze Chart</button>
+</div>
+<div class=error id=error></div>
+<div class=result id=result style=display:none></div>
+
+<script>
+const dropzone=$('dropzone'),fileInput=$('fileInput'),preview=$('preview'),
+ previewWrap=$('previewWrap'),btn=$('analyzeBtn'),resultDiv=$('result'),errDiv=$('error');
+let selectedFile=null;
+function $(id){return document.getElementById(id)}
+
+['dragover','dragenter'].forEach(e=>dropzone.addEventListener(e,ev=>{ev.preventDefault();dropzone.classList.add('drag')}));
+['dragleave','drop'].forEach(e=>dropzone.addEventListener(e,ev=>{ev.preventDefault();dropzone.classList.remove('drag')}));
+dropzone.addEventListener('drop',ev=>{if(ev.dataTransfer.files.length)pickFile(ev.dataTransfer.files[0])});
+fileInput.addEventListener('change',()=>{if(fileInput.files.length)pickFile(fileInput.files[0])});
+
+function pickFile(f){
+ if(!f.type.startsWith('image/')){errDiv.textContent='Please select an image file.';return}
+ if(f.size>20*1024*1024){errDiv.textContent='File too large (max 20 MB).';return}
+ selectedFile=f; errDiv.textContent=''; resultDiv.style.display='none';
+ const r=new FileReader();
+ r.onload=()=>{preview.src=r.result;previewWrap.style.display='';dropzone.style.display='none'};
+ r.readAsDataURL(f);
+ btn.disabled=false;
+}
+
+async function analyze(){
+ if(!selectedFile)return;
+ btn.disabled=true;btn.classList.add('loading');btn.textContent='Analyzing…';
+ errDiv.textContent='';resultDiv.style.display='none';
+ const fd=new FormData();fd.append('file',selectedFile);
+ try{
+  const r=await fetch('/api/chart-analyze',{method:'POST',body:fd});
+  const d=await r.json();
+  if(d.error){errDiv.textContent=d.error;return}
+  resultDiv.innerHTML=markdownToHtml(d.analysis);
+  resultDiv.style.display='';
+ }catch(e){errDiv.textContent='Request failed: '+e}
+ finally{btn.disabled=false;btn.classList.remove('loading');btn.textContent='Analyze Chart'}
+}
+
+function markdownToHtml(md){
+ return md
+  .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+  .replace(/^### (.+)$/gm,'<h3>$1</h3>')
+  .replace(/^## (.+)$/gm,'<h2>$1</h2>')
+  .replace(/^# (.+)$/gm,'<h1>$1</h1>')
+  .replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
+  .replace(/\*(.+?)\*/g,'<em>$1</em>')
+  .replace(/^[-*] (.+)$/gm,'• $1')
+  .replace(/\n{2,}/g,'<br><br>')
+}
+</script></body></html>"""
+
+
 _PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <title>Trading Buddy</title>
@@ -282,7 +445,7 @@ _PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
  .close-btn{padding:6px 12px;border:0;border-radius:8px;background:#3a2a13;color:#ffb454;
    font-size:13px;font-weight:600;cursor:pointer;flex:none;width:auto}
 </style></head><body>
-<h1>📈 Trading Buddy</h1><div class=sub id=sub>loading…</div>
+<h1>📈 Trading Buddy</h1><div class=sub id=sub>loading… · <a href="/chart" style="color:#4c9aff">📊 Chart Analyzer</a></div>
 <div class=grid id=cards></div>
 <div class=btns><button class=pause onclick="ctl('pause')">⏸ Pause</button>
  <button class=resume onclick="ctl('resume')">▶ Resume</button></div>

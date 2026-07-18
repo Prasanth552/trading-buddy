@@ -79,3 +79,29 @@ class LLMClient:
             messages=[{"role": "user", "content": user}],
         )
         return next((b.text for b in resp.content if b.type == "text"), "")
+
+    def analyze_image(
+        self,
+        system: str,
+        image_b64: str,
+        media_type: str,
+        prompt: str,
+        model: str | None = None,
+        max_tokens: int = 4096,
+    ) -> str:
+        """Send an image (base64) + text prompt and return the analysis."""
+        model = model or config.LLM_SMART_MODEL
+        resp = self.client.messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            system=system,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {
+                        "type": "base64", "media_type": media_type, "data": image_b64}},
+                    {"type": "text", "text": prompt},
+                ],
+            }],
+        )
+        return next((b.text for b in resp.content if b.type == "text"), "")
