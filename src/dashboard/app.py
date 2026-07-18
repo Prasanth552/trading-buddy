@@ -277,12 +277,18 @@ structured, actionable report. Cover ALL of the following:
 Be specific with numbers. Use ₹ for prices. If the chart is unclear or low quality,
 say what you CAN and CANNOT determine. Never fabricate data you cannot see."""
 
-_CHART_PROMPT = "Analyse this chart image. Provide the full 8-section technical analysis and prediction."
+_CHART_PROMPT_EN = "Analyse this chart image. Provide the full 8-section technical analysis and prediction."
+_CHART_PROMPT_TA = (
+    "Analyse this chart image. Provide the full 8-section technical analysis and prediction. "
+    "IMPORTANT: Write your ENTIRE response in Tamil (தமிழ்). Use Tamil script throughout. "
+    "Keep stock names, numbers, and ₹ symbols as-is, but all explanations and sentences must be in Tamil."
+)
 
 
 @app.post("/api/chart-analyze")
 async def api_chart_analyze(
     file: UploadFile = File(...),
+    request: Request = None,
     _: None = Depends(require_auth),
 ) -> JSONResponse:
     """Accept a chart image, send it to Claude vision, return the analysis."""
@@ -293,6 +299,8 @@ async def api_chart_analyze(
     if len(data) > 20 * 1024 * 1024:
         return JSONResponse({"error": "Image too large (max 20 MB)."}, status_code=400)
     img_b64 = base64.b64encode(data).decode()
+    lang = (request.query_params.get("lang") or "en") if request else "en"
+    prompt = _CHART_PROMPT_TA if lang == "ta" else _CHART_PROMPT_EN
     try:
         from src.llm.client import LLMClient, LLMError
         llm = LLMClient()
@@ -300,7 +308,7 @@ async def api_chart_analyze(
             system=_CHART_SYSTEM,
             image_b64=img_b64,
             media_type=content_type,
-            prompt=_CHART_PROMPT,
+            prompt=prompt,
         )
     except Exception as exc:  # noqa: BLE001
         return JSONResponse({"error": str(exc)}, status_code=500)
@@ -347,10 +355,20 @@ h1{font-size:22px;margin:4px 0 2px}
 .result em{color:#ffb454}
 .error{color:var(--red);margin-top:14px;font-size:14px}
 .back{display:inline-block;margin-bottom:12px;font-size:13px}
+.lang-toggle{display:flex;gap:0;border-radius:8px;overflow:hidden;border:1px solid #2d3748;
+ width:fit-content;margin-bottom:16px}
+.lang-toggle button{padding:8px 18px;border:0;background:var(--card);color:var(--mut);
+ font-size:13px;font-weight:600;cursor:pointer;transition:all .2s}
+.lang-toggle button.active{background:var(--acc);color:#fff}
 </style></head><body>
 <a href="/" class=back>&larr; Dashboard</a>
 <h1>📊 Chart Analyzer</h1>
 <div class=sub>Upload a chart image (Nifty, Bank Nifty, any stock) — AI analyses patterns, S/R, and predicts the next move.</div>
+
+<div class=lang-toggle>
+ <button id=langEn class=active onclick="setLang('en')">English</button>
+ <button id=langTa onclick="setLang('ta')">தமிழ்</button>
+</div>
 
 <div class=upload-zone id=dropzone>
  <input type=file id=fileInput accept="image/*">
@@ -368,7 +386,12 @@ h1{font-size:22px;margin:4px 0 2px}
 const dropzone=$('dropzone'),fileInput=$('fileInput'),preview=$('preview'),
  previewWrap=$('previewWrap'),btn=$('analyzeBtn'),resultDiv=$('result'),errDiv=$('error');
 let selectedFile=null;
+let lang='en';
 function $(id){return document.getElementById(id)}
+function setLang(l){lang=l;
+ $('langEn').classList.toggle('active',l==='en');
+ $('langTa').classList.toggle('active',l==='ta');
+}
 
 ['dragover','dragenter'].forEach(e=>dropzone.addEventListener(e,ev=>{ev.preventDefault();dropzone.classList.add('drag')}));
 ['dragleave','drop'].forEach(e=>dropzone.addEventListener(e,ev=>{ev.preventDefault();dropzone.classList.remove('drag')}));
@@ -391,7 +414,7 @@ async function analyze(){
  errDiv.textContent='';resultDiv.style.display='none';
  const fd=new FormData();fd.append('file',selectedFile);
  try{
-  const r=await fetch('/api/chart-analyze',{method:'POST',body:fd});
+  const r=await fetch('/api/chart-analyze?lang='+lang,{method:'POST',body:fd});
   const d=await r.json();
   if(d.error){errDiv.textContent=d.error;return}
   resultDiv.innerHTML=markdownToHtml(d.analysis);
