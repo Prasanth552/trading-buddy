@@ -401,15 +401,16 @@ async function analyze(){
 }
 
 function markdownToHtml(md){
+ var LT=String.fromCharCode(60),GT=String.fromCharCode(62);
  return md
-  .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-  .replace(/^### (.+)$/gm,'<h3>$1</h3>')
-  .replace(/^## (.+)$/gm,'<h2>$1</h2>')
-  .replace(/^# (.+)$/gm,'<h1>$1</h1>')
-  .replace(/[*][*](.+?)[*][*]/g,'<strong>$1</strong>')
-  .replace(/[*](.+?)[*]/g,'<em>$1</em>')
-  .replace(/^[-*] (.+)$/gm,'• $1')
-  .replace(/\n{2,}/g,'<br><br>')
+  .replace(/&/g,'&amp;').replace(new RegExp(LT,'g'),'&lt;').replace(new RegExp(GT,'g'),'&gt;')
+  .replace(/^### (.+)$/gm,LT+'h3>$1'+LT+'/h3>')
+  .replace(/^## (.+)$/gm,LT+'h2>$1'+LT+'/h2>')
+  .replace(/^# (.+)$/gm,LT+'h1>$1'+LT+'/h1>')
+  .replace(/[*][*](.+?)[*][*]/g,LT+'strong>$1'+LT+'/strong>')
+  .replace(/[*](.+?)[*]/g,LT+'em>$1'+LT+'/em>')
+  .replace(/^[-] (.+)$/gm,'\\u2022 $1')
+  .replace(/\\n\\n+/g,LT+'br>'+LT+'br>')
 }
 </script></body></html>"""
 
