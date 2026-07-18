@@ -255,33 +255,31 @@ def index(_: None = Depends(require_auth)) -> str:
 # Chart Analyzer
 # --------------------------------------------------------------------------
 _CHART_SYSTEM = """You are an expert technical analyst for the Indian stock market (NSE/BSE).
-You analyse chart images — candlestick, line, or bar charts — and produce a
-structured, actionable report. Cover ALL of the following:
+You look at chart images and predict the next move in 15 to 60 minutes.
 
-1. **Chart type & timeframe** — what you see (candlestick/line, 1min/15min/daily/weekly, etc.).
-2. **Trend identification** — primary trend (up/down/sideways), trend strength, and
-   any trend-line breaks or channel boundaries visible.
-3. **Key support & resistance levels** — mark every price level that has acted as
-   S/R (round numbers, prior swing highs/lows, gap zones).
-4. **Candlestick / price-action patterns** — e.g. hammer, engulfing, doji, inside bar,
-   double top/bottom, head-and-shoulders, flags, wedges, cup-and-handle.
-5. **Indicator readings** (if visible on the chart) — moving averages, RSI, MACD,
-   Bollinger Bands, volume profile, Supertrend, etc.
-6. **Volume analysis** — is volume confirming the move? Divergences?
-7. **Prediction / next likely move** — based on everything above, give a SHORT-TERM
-   (next 1-5 sessions) and MEDIUM-TERM (next 2-4 weeks) directional view with
-   specific price targets and invalidation (stop-loss) levels.
-8. **Recommended trade setup** — direction (long/short/wait), entry zone, stop-loss,
-   target(s), and risk-reward ratio. If no clear setup exists, say "No trade — wait."
+Your response MUST follow this exact format:
 
-Be specific with numbers. Use ₹ for prices. If the chart is unclear or low quality,
-say what you CAN and CANNOT determine. Never fabricate data you cannot see."""
+## Direction: BULLISH / BEARISH / SIDEWAYS
 
-_CHART_PROMPT_EN = "Analyse this chart image. Provide the full 8-section technical analysis and prediction."
+## Confidence: HIGH / MEDIUM / LOW
+
+## Prediction
+What the price will likely do in the next 15-60 minutes — specific levels if visible.
+
+## Reasons
+List 3-5 clear reasons from what you see in the chart:
+- Trend direction, support/resistance levels
+- Candlestick patterns (hammer, engulfing, doji, etc.)
+- Indicator readings if visible (EMA, RSI, MACD, Supertrend, volume)
+- Price action at key levels
+
+Keep it short and direct. Use ₹ for prices. Never fabricate data you cannot see."""
+
+_CHART_PROMPT_EN = "Look at this chart. Is the next 15-60 minute move BULLISH or BEARISH? Give your prediction with reasons."
 _CHART_PROMPT_TA = (
-    "Analyse this chart image. Provide the full 8-section technical analysis and prediction. "
+    "Look at this chart. Is the next 15-60 minute move BULLISH or BEARISH? Give your prediction with reasons. "
     "IMPORTANT: Write your ENTIRE response in Tamil (தமிழ்). Use Tamil script throughout. "
-    "Keep stock names, numbers, and ₹ symbols as-is, but all explanations and sentences must be in Tamil."
+    "Keep stock names, numbers, ₹, BULLISH, BEARISH as-is, but all explanations must be in Tamil."
 )
 
 
