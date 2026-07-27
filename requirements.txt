@@ -11,6 +11,8 @@ pandas==2.2.3
 numpy==2.1.3
 # Telegram alerts (direct requests is also fine; bot lib used for commands)
 python-telegram-bot==21.7
+# Telegram userbot (listen to private channels for signals)
+telethon==1.37.0
 # Scheduling
 APScheduler==3.10.4
 # 2FA / TOTP
