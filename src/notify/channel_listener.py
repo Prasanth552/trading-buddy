@@ -57,11 +57,13 @@ a stop_loss. Trigger price defaults to 0 if not specified (market order)."""
 
 _PARSE_SCHEMA = {
     "type": "object",
+    "additionalProperties": False,
     "properties": {
         "signal": {
             "anyOf": [
                 {
                     "type": "object",
+                    "additionalProperties": False,
                     "properties": {
                         "action": {"type": "string", "enum": ["BUY", "SELL"]},
                         "symbol": {"type": "string"},
@@ -275,7 +277,14 @@ async def start_listener() -> None:
         return
 
     try:
-        channel_id_int = int(channel_id)
+        raw_id = int(channel_id)
+        # Telethon needs -100 prefix for channels/supergroups
+        if raw_id > 0:
+            channel_id_int = int(f"-100{raw_id}")
+        elif not str(raw_id).startswith("-100"):
+            channel_id_int = int(f"-100{abs(raw_id)}")
+        else:
+            channel_id_int = raw_id
     except ValueError:
         channel_id_int = None
 
