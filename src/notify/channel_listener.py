@@ -39,39 +39,109 @@ class ParsedSignal:
     targets: list[float]
 
 
-def parse_signal(text: str) -> ParsedSignal | None:
-    """Parse a channel signal message into structured data.
+_PARSE_SYSTEM = """You extract trading signals from Telegram messages.
+Return a JSON object with these fields (or null if the message is NOT a trading signal):
+{
+  "action": "BUY" or "SELL",
+  "symbol": stock name (e.g. "COFORGE", "JSW ENERGY", "NIFTY", "BANKNIFTY"),
+  "strike": strike price as number,
+  "option_type": "CE" or "PE",
+  "trigger_price": entry price / premium to enter above/below,
+  "stop_loss": stop loss price,
+  "targets": [target1, target2, ...]
+}
+If the message is not a trading signal (e.g. greetings, updates, market commentary,
+exit calls, "book profit" messages), return null.
+Only extract if you can identify action, symbol, strike, option_type, and at least
+a stop_loss. Trigger price defaults to 0 if not specified (market order)."""
 
-    Expected format (flexible whitespace/case):
-        BUY <SYMBOL> <STRIKE> <CE|PE> ABOVE <TRIGGER>
-        SL <STOP> TARGET <T1> <T2> ...
-    """
+_PARSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "signal": {
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["BUY", "SELL"]},
+                        "symbol": {"type": "string"},
+                        "strike": {"type": "number"},
+                        "option_type": {"type": "string", "enum": ["CE", "PE"]},
+                        "trigger_price": {"type": "number"},
+                        "stop_loss": {"type": "number"},
+                        "targets": {"type": "array", "items": {"type": "number"}},
+                    },
+                    "required": ["action", "symbol", "strike", "option_type", "stop_loss", "targets"],
+                },
+                {"type": "null"},
+            ]
+        }
+    },
+    "required": ["signal"],
+}
+
+
+def parse_signal(text: str) -> ParsedSignal | None:
+    """Parse a channel signal message using LLM to handle any format."""
+    text = text.strip()
+    if len(text) < 5:
+        return None
+
+    try:
+        from src.llm.client import LLMClient
+        llm = LLMClient()
+        result = llm.complete_json(
+            system=_PARSE_SYSTEM,
+            user=text,
+            schema=_PARSE_SCHEMA,
+            model=config.LLM_FAST_MODEL,
+            max_tokens=300,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.error("LLM parse failed: %s", exc)
+        return _parse_signal_regex(text)
+
+    sig = result.get("signal")
+    if sig is None:
+        return None
+
+    targets = sig.get("targets") or []
+    stop_loss = sig.get("stop_loss", 0)
+    if not targets or stop_loss <= 0:
+        return None
+
+    return ParsedSignal(
+        action=sig["action"],
+        symbol=sig["symbol"],
+        strike=float(sig["strike"]),
+        option_type=sig["option_type"],
+        trigger_price=float(sig.get("trigger_price", 0)),
+        stop_loss=float(stop_loss),
+        targets=[float(t) for t in targets],
+    )
+
+
+def _parse_signal_regex(text: str) -> ParsedSignal | None:
+    """Fallback regex parser if LLM is unavailable."""
     text = text.strip().upper()
     lines = [l.strip() for l in text.splitlines() if l.strip()]
     if len(lines) < 2:
         return None
 
+    joined = " ".join(lines)
+
     m = re.match(
         r'(BUY|SELL)\s+(.+?)\s+(\d+(?:\.\d+)?)\s+(CE|PE)\s+(?:ABOVE|BELOW|@|AT)\s+(\d+(?:\.\d+)?)',
-        lines[0],
+        joined,
     )
     if not m:
         return None
 
-    action = m.group(1)
-    symbol = m.group(2).strip()
-    strike = float(m.group(3))
-    option_type = m.group(4)
-    trigger_price = float(m.group(5))
-
-    stop_loss = 0.0
-    targets: list[float] = []
-
-    rest = " ".join(lines[1:])
+    rest = joined[m.end():]
     sl_m = re.search(r'SL\s+(\d+(?:\.\d+)?)', rest)
-    if sl_m:
-        stop_loss = float(sl_m.group(1))
+    stop_loss = float(sl_m.group(1)) if sl_m else 0.0
 
+    targets: list[float] = []
     tgt_m = re.search(r'(?:TARGET|TGT|T)\s+([\d.\s]+)', rest)
     if tgt_m:
         targets = [float(x) for x in tgt_m.group(1).split() if re.match(r'\d+\.?\d*$', x)]
@@ -80,11 +150,11 @@ def parse_signal(text: str) -> ParsedSignal | None:
         return None
 
     return ParsedSignal(
-        action=action,
-        symbol=symbol,
-        strike=strike,
-        option_type=option_type,
-        trigger_price=trigger_price,
+        action=m.group(1),
+        symbol=m.group(2).strip(),
+        strike=float(m.group(3)),
+        option_type=m.group(4),
+        trigger_price=float(m.group(5)),
         stop_loss=stop_loss,
         targets=targets,
     )
