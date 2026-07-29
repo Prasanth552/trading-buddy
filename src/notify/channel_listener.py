@@ -171,6 +171,49 @@ def _notify(msg: str) -> None:
         log.warning("Could not send Telegram notification: %s", msg)
 
 
+def _resolve_channel_option(
+    uc: Any, symbol: str, strike: float, option_type: str,
+) -> tuple[dict[str, Any] | None, int]:
+    """Search the Upstox instrument master for a specific option contract.
+
+    Returns (instrument_dict, lot_size).  Searches NSE_FO and BSE_FO segments,
+    picks the nearest monthly expiry >= today.
+    """
+    from datetime import date, datetime
+    from zoneinfo import ZoneInfo
+    from src.broker.upstox_client import _expiry_to_date
+
+    IST = ZoneInfo(config.TIMEZONE)
+    today = datetime.now(IST).date()
+
+    name = symbol.replace(" ", "").upper()
+    instruments = uc.load_instruments()
+
+    candidates: list[tuple[date, dict[str, Any]]] = []
+    for inst in instruments:
+        seg = inst.get("segment", "")
+        if seg not in ("NSE_FO", "BSE_FO"):
+            continue
+        if inst.get("name", "").upper() != name:
+            continue
+        if inst.get("instrument_type") != option_type:
+            continue
+        if abs(float(inst.get("strike_price", -1)) - strike) > 0.01:
+            continue
+        exp = _expiry_to_date(inst.get("expiry"))
+        if exp is None or exp < today:
+            continue
+        candidates.append((exp, inst))
+
+    if not candidates:
+        return None, 1
+
+    candidates.sort(key=lambda x: x[0])
+    chosen = candidates[0][1]
+    lot_size = int(chosen.get("lot_size", 1)) or 1
+    return chosen, lot_size
+
+
 def execute_signal(sig: ParsedSignal) -> dict[str, Any]:
     """Place an option order through the Upstox broker (paper/sandbox).
 
@@ -180,19 +223,28 @@ def execute_signal(sig: ParsedSignal) -> dict[str, Any]:
       - stop_loss                ->  SL premium
       - targets[0]               ->  target premium (use first target)
     """
-    from src.broker.upstox_client import UpstoxClient, UpstoxError
-    from src.broker.instruments import pick_atm_option
-    from src.broker.session import ensure_session
+    from src.broker.upstox_client import UpstoxClient
     from src.storage import db
 
     db.init_db()
 
-    lot_key = sig.symbol.replace(" ", "").upper()
-    lot_size = config.LOT_SIZES.get(lot_key, 1)
-
     risk_per_unit = sig.trigger_price - sig.stop_loss
     if risk_per_unit <= 0:
         return {"placed": False, "reason": "SL >= trigger price"}
+
+    try:
+        uc = UpstoxClient()
+        opt, master_lot_size = _resolve_channel_option(
+            uc, sig.symbol, sig.strike, sig.option_type,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {"placed": False, "reason": f"Option resolution failed: {exc}"}
+
+    if opt is None:
+        return {"placed": False, "reason": f"Could not resolve {sig.symbol} {sig.strike} {sig.option_type}"}
+
+    lot_key = sig.symbol.replace(" ", "").upper()
+    lot_size = config.LOT_SIZES.get(lot_key, master_lot_size)
 
     risk_per_lot = risk_per_unit * lot_size
     lots = max(1, int(config.MAX_RISK_PER_TRADE / risk_per_lot))
@@ -201,19 +253,7 @@ def execute_signal(sig: ParsedSignal) -> dict[str, Any]:
         lots = min(lots, max_lots)
     qty = lots * lot_size
 
-    try:
-        client = ensure_session()
-        from src.broker.instruments import resolve_weekly_atm_option
-        option_key = f"NSE:{sig.symbol}"
-        opt = resolve_weekly_atm_option(client, option_key, "long" if sig.action == "BUY" else "short",
-                                         sig.strike)
-    except Exception as exc:  # noqa: BLE001
-        return {"placed": False, "reason": f"Option resolution failed: {exc}"}
-
-    if opt is None:
-        return {"placed": False, "reason": f"Could not resolve {sig.symbol} {sig.strike} {sig.option_type}"}
-
-    instrument_token = opt.get("instrument_token") or opt.get("instrument_key", "")
+    instrument_token = opt.get("instrument_key") or opt.get("instrument_token", "")
 
     trade_row = {
         "ts": __import__("src.utils.market_calendar", fromlist=["now_ist"]).now_ist().isoformat(timespec="seconds"),
@@ -237,7 +277,6 @@ def execute_signal(sig: ParsedSignal) -> dict[str, Any]:
             order_id = f"SIM-CHANNEL-{int(_t.time()*1000)}"
             log.info("CHANNEL SIGNAL simulated order id=%s", order_id)
         else:
-            uc = UpstoxClient()
             result = uc.place_order(
                 instrument_token=instrument_token,
                 quantity=qty,
