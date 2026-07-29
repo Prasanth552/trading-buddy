@@ -1,13 +1,11 @@
 """Telegram channel signal listener — auto-executes option trades from signals.
 
 Listens to a private Telegram channel using Telethon (user account API).
-Supports the admin's full workflow:
-  1. BUY signal posted → queued as PENDING
-  2. "WAIT TO ACTIVATE" → stays pending
-  3. "CAN ENTER" → executes the oldest pending signal
-  4. "NOT ACTIVATED IGNORE" → discards the oldest pending signal
-  5. "BOOK / TRAIL / CLOSE NEAR COST" → closes the most recent open trade
-  6. "SL" (alone) → marks most recent trade as stopped out
+Flow:
+  1. BUY signal posted → execute immediately (trigger price in SL order)
+  2. "BOOK / TRAIL / CLOSE NEAR COST" → closes the most recent open trade
+  3. "SL" (alone) → marks most recent trade as stopped out
+  4. Other messages (WAIT, greetings, etc.) → ignored
 
 Run:  python -m src.notify.channel_listener
 Env:  TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_PHONE, SIGNAL_CHANNEL_ID
@@ -18,7 +16,7 @@ import asyncio
 import os
 import re
 import time as _time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from dotenv import load_dotenv
@@ -30,9 +28,6 @@ from src.utils.logging import get_logger
 
 log = get_logger("channel_listener")
 
-PENDING_EXPIRY_SEC = 300  # discard pending signals older than 5 minutes
-
-
 @dataclass
 class ParsedSignal:
     action: str          # BUY / SELL
@@ -42,63 +37,40 @@ class ParsedSignal:
     trigger_price: float # premium must cross this to enter
     stop_loss: float
     targets: list[float]
-    queued_at: float = field(default_factory=_time.time)
 
 
 # ---------------------------------------------------------------------------
-# Signal flow state (module-level, lives for the process lifetime)
+# State: recently executed trades (for matching exit messages)
 # ---------------------------------------------------------------------------
-_pending: list[ParsedSignal] = []
 _executed: list[dict[str, Any]] = []
 
 # ---------------------------------------------------------------------------
-# Follow-up message classification
+# Follow-up / exit message classification
 # ---------------------------------------------------------------------------
-_RE_WAIT = re.compile(r'WAIT\s+TO\s+ACTIVATE', re.I)
-_RE_ACTIVATE = re.compile(r'CAN\s+ENTER', re.I)
-_RE_IGNORE = re.compile(r'NOT\s+ACTIVATED|(?:^|\s)IGNORE(?:\s|$)', re.I)
 _RE_SL_HIT = re.compile(r'^\s*SL\s*$', re.I)
 _RE_BOOK = re.compile(r'BOOK|TRAIL|CLOSE\s+NEAR\s+COST', re.I)
 _RE_PRICE_ACTION = re.compile(r'^\s*(\d+(?:\.\d+)?)\s*,\s*(.+)', re.I)
 
 
 def _classify_followup(text: str) -> tuple[str, float | None]:
-    """Classify a non-signal message.
+    """Classify exit/follow-up messages.
 
     Returns (action, exit_price | None).
-    Actions: "wait", "activate", "ignore", "sl_hit", "book", "unknown"
+    Actions: "sl_hit", "book", "unknown"
     """
     text = text.strip()
 
     price_m = _RE_PRICE_ACTION.match(text)
     if price_m:
         price = float(price_m.group(1))
-        rest = price_m.group(2)
-        if _RE_BOOK.search(rest):
-            return "book", price
         return "book", price
 
-    if _RE_WAIT.search(text):
-        return "wait", None
-    if _RE_IGNORE.search(text):
-        return "ignore", None
-    if _RE_ACTIVATE.search(text):
-        return "activate", None
     if _RE_SL_HIT.match(text):
         return "sl_hit", None
     if _RE_BOOK.search(text):
         return "book", None
 
     return "unknown", None
-
-
-def _expire_stale_pending() -> None:
-    """Remove pending signals older than PENDING_EXPIRY_SEC."""
-    now = _time.time()
-    expired = [s for s in _pending if now - s.queued_at > PENDING_EXPIRY_SEC]
-    for s in expired:
-        _pending.remove(s)
-        log.info("Expired stale pending signal: %s %s %s", s.symbol, s.strike, s.option_type)
 
 
 # ---------------------------------------------------------------------------
@@ -447,43 +419,21 @@ async def start_listener() -> None:
             return
 
         log.info("Channel message: %s", text[:120])
-        _expire_stale_pending()
 
         # --- Try parsing as a new entry signal ---
         sig = parse_signal(text)
 
         if sig is not None:
-            _pending.append(sig)
-            log.info("Signal QUEUED (pending): %s %s %s %s trigger=%.2f SL=%.2f targets=%s",
+            log.info("Parsed signal: %s %s %s %s trigger=%.2f SL=%.2f targets=%s",
                      sig.action, sig.symbol, sig.strike, sig.option_type,
                      sig.trigger_price, sig.stop_loss, sig.targets)
+
             _notify(
-                f"*Signal received (pending)*\n"
+                f"*Signal received — executing*\n"
                 f"{sig.action} {sig.symbol} {int(sig.strike)} {sig.option_type}\n"
                 f"Entry ABOVE {sig.trigger_price} | SL: {sig.stop_loss} | "
-                f"Targets: {', '.join(str(t) for t in sig.targets)}\n"
-                f"Waiting for CAN ENTER..."
+                f"Targets: {', '.join(str(t) for t in sig.targets)}"
             )
-            return
-
-        # --- Not a signal → check if it's a follow-up ---
-        action, exit_price = _classify_followup(text)
-
-        if action == "wait":
-            n = len(_pending)
-            log.info("WAIT TO ACTIVATE — %d signal(s) pending", n)
-            return
-
-        if action == "activate":
-            if not _pending:
-                log.warning("CAN ENTER but no pending signals")
-                _notify("CAN ENTER received but no pending signals")
-                return
-
-            sig = _pending.pop(0)
-            log.info("ACTIVATING: %s %s %s %s @ %.2f",
-                     sig.action, sig.symbol, sig.strike, sig.option_type, sig.trigger_price)
-            _notify(f"*Activating*: {sig.action} {sig.symbol} {int(sig.strike)} {sig.option_type} ABOVE {sig.trigger_price}")
 
             result = execute_signal(sig)
             if result["placed"]:
@@ -499,14 +449,8 @@ async def start_listener() -> None:
                 log.warning("Signal not executed: %s", result["reason"])
             return
 
-        if action == "ignore":
-            if _pending:
-                removed = _pending.pop(0)
-                log.info("Signal IGNORED: %s %s %s", removed.symbol, removed.strike, removed.option_type)
-                _notify(f"Signal cancelled: {removed.symbol} {int(removed.strike)} {removed.option_type}")
-            else:
-                log.info("IGNORE message but no pending signals")
-            return
+        # --- Not a signal → check if it's an exit message ---
+        action, exit_price = _classify_followup(text)
 
         if action in ("book", "sl_hit"):
             price_str = f" @ {exit_price}" if exit_price else ""
@@ -538,7 +482,7 @@ async def start_listener() -> None:
                 log.info("Exit signal but no executed trades to match")
             return
 
-        log.info("Unrecognized message, skipping.")
+        log.info("Not a signal or exit message, skipping.")
 
     log.info("Listening for signals in channel %s ...", channel_id)
     print(f"Listening for signals in channel {channel_id} ... (Ctrl-C to stop)")
