@@ -1,11 +1,13 @@
 """Telegram channel signal listener — auto-executes option trades from signals.
 
 Listens to a private Telegram channel using Telethon (user account API).
-Parses incoming signal messages like:
-    BUY JSW ENERGY 550 CE ABOVE 25
-    SL 22.5 TARGET 28 31
-
-Then monitors the option premium and executes when the trigger is hit.
+Supports the admin's full workflow:
+  1. BUY signal posted → queued as PENDING
+  2. "WAIT TO ACTIVATE" → stays pending
+  3. "CAN ENTER" → executes the oldest pending signal
+  4. "NOT ACTIVATED IGNORE" → discards the oldest pending signal
+  5. "BOOK / TRAIL / CLOSE NEAR COST" → closes the most recent open trade
+  6. "SL" (alone) → marks most recent trade as stopped out
 
 Run:  python -m src.notify.channel_listener
 Env:  TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_PHONE, SIGNAL_CHANNEL_ID
@@ -15,7 +17,8 @@ from __future__ import annotations
 import asyncio
 import os
 import re
-from dataclasses import dataclass
+import time as _time
+from dataclasses import dataclass, field
 from typing import Any
 
 from dotenv import load_dotenv
@@ -27,6 +30,8 @@ from src.utils.logging import get_logger
 
 log = get_logger("channel_listener")
 
+PENDING_EXPIRY_SEC = 300  # discard pending signals older than 5 minutes
+
 
 @dataclass
 class ParsedSignal:
@@ -37,8 +42,68 @@ class ParsedSignal:
     trigger_price: float # premium must cross this to enter
     stop_loss: float
     targets: list[float]
+    queued_at: float = field(default_factory=_time.time)
 
 
+# ---------------------------------------------------------------------------
+# Signal flow state (module-level, lives for the process lifetime)
+# ---------------------------------------------------------------------------
+_pending: list[ParsedSignal] = []
+_executed: list[dict[str, Any]] = []
+
+# ---------------------------------------------------------------------------
+# Follow-up message classification
+# ---------------------------------------------------------------------------
+_RE_WAIT = re.compile(r'WAIT\s+TO\s+ACTIVATE', re.I)
+_RE_ACTIVATE = re.compile(r'CAN\s+ENTER', re.I)
+_RE_IGNORE = re.compile(r'NOT\s+ACTIVATED|(?:^|\s)IGNORE(?:\s|$)', re.I)
+_RE_SL_HIT = re.compile(r'^\s*SL\s*$', re.I)
+_RE_BOOK = re.compile(r'BOOK|TRAIL|CLOSE\s+NEAR\s+COST', re.I)
+_RE_PRICE_ACTION = re.compile(r'^\s*(\d+(?:\.\d+)?)\s*,\s*(.+)', re.I)
+
+
+def _classify_followup(text: str) -> tuple[str, float | None]:
+    """Classify a non-signal message.
+
+    Returns (action, exit_price | None).
+    Actions: "wait", "activate", "ignore", "sl_hit", "book", "unknown"
+    """
+    text = text.strip()
+
+    price_m = _RE_PRICE_ACTION.match(text)
+    if price_m:
+        price = float(price_m.group(1))
+        rest = price_m.group(2)
+        if _RE_BOOK.search(rest):
+            return "book", price
+        return "book", price
+
+    if _RE_WAIT.search(text):
+        return "wait", None
+    if _RE_IGNORE.search(text):
+        return "ignore", None
+    if _RE_ACTIVATE.search(text):
+        return "activate", None
+    if _RE_SL_HIT.match(text):
+        return "sl_hit", None
+    if _RE_BOOK.search(text):
+        return "book", None
+
+    return "unknown", None
+
+
+def _expire_stale_pending() -> None:
+    """Remove pending signals older than PENDING_EXPIRY_SEC."""
+    now = _time.time()
+    expired = [s for s in _pending if now - s.queued_at > PENDING_EXPIRY_SEC]
+    for s in expired:
+        _pending.remove(s)
+        log.info("Expired stale pending signal: %s %s %s", s.symbol, s.strike, s.option_type)
+
+
+# ---------------------------------------------------------------------------
+# LLM + regex signal parsing (unchanged)
+# ---------------------------------------------------------------------------
 _PARSE_SYSTEM = """You extract trading signals from Telegram messages.
 Return a JSON object with these fields (or null if the message is NOT a trading signal):
 {
@@ -171,6 +236,9 @@ def _notify(msg: str) -> None:
         log.warning("Could not send Telegram notification: %s", msg)
 
 
+# ---------------------------------------------------------------------------
+# Instrument resolution (searches Upstox master for ANY F&O stock)
+# ---------------------------------------------------------------------------
 def _resolve_channel_option(
     uc: Any, symbol: str, strike: float, option_type: str,
 ) -> tuple[dict[str, Any] | None, int]:
@@ -214,15 +282,11 @@ def _resolve_channel_option(
     return chosen, lot_size
 
 
+# ---------------------------------------------------------------------------
+# Trade execution
+# ---------------------------------------------------------------------------
 def execute_signal(sig: ParsedSignal) -> dict[str, Any]:
-    """Place an option order through the Upstox broker (paper/sandbox).
-
-    The signal gives us:
-      - symbol + strike + CE/PE  ->  resolve the option instrument
-      - trigger_price            ->  entry premium (market order when LTP >= trigger)
-      - stop_loss                ->  SL premium
-      - targets[0]               ->  target premium (use first target)
-    """
+    """Place an option order through the Upstox broker (paper/sandbox)."""
     from src.broker.upstox_client import UpstoxClient
     from src.storage import db
 
@@ -273,8 +337,7 @@ def execute_signal(sig: ParsedSignal) -> dict[str, Any]:
 
     try:
         if getattr(config, "UPSTOX_SIMULATE_ORDERS", False):
-            import time as _t
-            order_id = f"SIM-CHANNEL-{int(_t.time()*1000)}"
+            order_id = f"SIM-CHANNEL-{int(_time.time()*1000)}"
             log.info("CHANNEL SIGNAL simulated order id=%s", order_id)
         else:
             result = uc.place_order(
@@ -302,6 +365,49 @@ def execute_signal(sig: ParsedSignal) -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Trade exit (close an open trade in the DB)
+# ---------------------------------------------------------------------------
+def _close_trade(symbol: str, exit_price: float | None, reason: str) -> None:
+    """Close the most recent OPEN trade matching symbol prefix."""
+    try:
+        from src.storage import db
+        db.init_db()
+        with db.get_conn() as conn:
+            if symbol:
+                row = conn.execute(
+                    "SELECT rowid, price, qty FROM trades "
+                    "WHERE symbol LIKE ? AND status = 'OPEN' ORDER BY ts DESC LIMIT 1",
+                    (f"{symbol}%",)
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT rowid, price, qty FROM trades "
+                    "WHERE status = 'OPEN' ORDER BY ts DESC LIMIT 1",
+                ).fetchone()
+
+            if not row:
+                log.warning("No open trade found to close for %s", symbol or "any")
+                return
+
+            entry_price = row["price"]
+            ep = exit_price if exit_price else entry_price
+            pnl = (ep - entry_price) * row["qty"]
+            status = "CLOSED" if reason != "sl_hit" else "CLOSED_SL"
+
+            conn.execute(
+                "UPDATE trades SET status = ?, exit_price = ?, pnl = ? WHERE rowid = ?",
+                (status, ep, pnl, row["rowid"]),
+            )
+            log.info("Closed trade (rowid=%d): entry=%.2f exit=%.2f pnl=%.2f reason=%s",
+                     row["rowid"], entry_price, ep, pnl, reason)
+    except Exception as exc:  # noqa: BLE001
+        log.error("Failed to close trade: %s", exc)
+
+
+# ---------------------------------------------------------------------------
+# Telegram listener
+# ---------------------------------------------------------------------------
 async def start_listener() -> None:
     """Connect to Telegram as a user and listen for signals in the configured channel."""
     from telethon import TelegramClient, events
@@ -317,7 +423,6 @@ async def start_listener() -> None:
 
     try:
         raw_id = int(channel_id)
-        # Telethon needs -100 prefix for channels/supergroups
         if raw_id > 0:
             channel_id_int = int(f"-100{raw_id}")
         elif not str(raw_id).startswith("-100"):
@@ -333,7 +438,7 @@ async def start_listener() -> None:
     await client.start(phone=phone)
     me = await client.get_me()
     log.info("Logged in as %s (id=%s)", me.first_name, me.id)
-    _notify(f"📡 Channel listener started as {me.first_name}")
+    _notify(f"Channel listener started as {me.first_name}")
 
     @client.on(events.NewMessage(chats=channel_id_int or channel_id))
     async def on_signal(event):
@@ -341,39 +446,102 @@ async def start_listener() -> None:
         if not text.strip():
             return
 
-        log.info("Channel message: %s", text[:100])
+        log.info("Channel message: %s", text[:120])
+        _expire_stale_pending()
 
+        # --- Try parsing as a new entry signal ---
         sig = parse_signal(text)
-        if sig is None:
-            log.info("Not a valid signal, skipping.")
+
+        if sig is not None:
+            _pending.append(sig)
+            log.info("Signal QUEUED (pending): %s %s %s %s trigger=%.2f SL=%.2f targets=%s",
+                     sig.action, sig.symbol, sig.strike, sig.option_type,
+                     sig.trigger_price, sig.stop_loss, sig.targets)
+            _notify(
+                f"*Signal received (pending)*\n"
+                f"{sig.action} {sig.symbol} {int(sig.strike)} {sig.option_type}\n"
+                f"Entry ABOVE {sig.trigger_price} | SL: {sig.stop_loss} | "
+                f"Targets: {', '.join(str(t) for t in sig.targets)}\n"
+                f"Waiting for CAN ENTER..."
+            )
             return
 
-        log.info("Parsed signal: %s %s %s %s trigger=%.2f SL=%.2f targets=%s",
-                 sig.action, sig.symbol, sig.strike, sig.option_type,
-                 sig.trigger_price, sig.stop_loss, sig.targets)
+        # --- Not a signal → check if it's a follow-up ---
+        action, exit_price = _classify_followup(text)
 
-        _notify(
-            f"📩 *Signal received*\n"
-            f"{sig.action} {sig.symbol} {int(sig.strike)} {sig.option_type}\n"
-            f"Trigger: {sig.trigger_price} | SL: {sig.stop_loss} | "
-            f"Targets: {', '.join(str(t) for t in sig.targets)}"
-        )
+        if action == "wait":
+            n = len(_pending)
+            log.info("WAIT TO ACTIVATE — %d signal(s) pending", n)
+            return
 
-        result = execute_signal(sig)
+        if action == "activate":
+            if not _pending:
+                log.warning("CAN ENTER but no pending signals")
+                _notify("CAN ENTER received but no pending signals")
+                return
 
-        if result["placed"]:
-            _notify(
-                f"✅ *Order placed*\n"
-                f"{result['symbol']} x{result['qty']}\n"
-                f"Entry: {result['entry']} | SL: {result['sl']} | Target: {result['target']}"
-            )
-            log.info("Order placed: %s", result)
-        else:
-            _notify(f"⚠️ Signal not executed: {result['reason']}")
-            log.warning("Signal not executed: %s", result["reason"])
+            sig = _pending.pop(0)
+            log.info("ACTIVATING: %s %s %s %s @ %.2f",
+                     sig.action, sig.symbol, sig.strike, sig.option_type, sig.trigger_price)
+            _notify(f"*Activating*: {sig.action} {sig.symbol} {int(sig.strike)} {sig.option_type} ABOVE {sig.trigger_price}")
+
+            result = execute_signal(sig)
+            if result["placed"]:
+                _executed.append(result)
+                _notify(
+                    f"*Order placed*\n"
+                    f"{result['symbol']} x{result['qty']}\n"
+                    f"Entry: {result['entry']} | SL: {result['sl']} | Target: {result['target']}"
+                )
+                log.info("Order placed: %s", result)
+            else:
+                _notify(f"Signal not executed: {result['reason']}")
+                log.warning("Signal not executed: %s", result["reason"])
+            return
+
+        if action == "ignore":
+            if _pending:
+                removed = _pending.pop(0)
+                log.info("Signal IGNORED: %s %s %s", removed.symbol, removed.strike, removed.option_type)
+                _notify(f"Signal cancelled: {removed.symbol} {int(removed.strike)} {removed.option_type}")
+            else:
+                log.info("IGNORE message but no pending signals")
+            return
+
+        if action in ("book", "sl_hit"):
+            price_str = f" @ {exit_price}" if exit_price else ""
+            action_label = "BOOK/TRAIL" if action == "book" else "SL HIT"
+
+            if _executed:
+                last = _executed[-1]
+                symbol = last.get("symbol", "")
+                entry = last.get("entry", 0)
+
+                if exit_price and entry:
+                    pnl_unit = exit_price - entry
+                    qty = last.get("qty", 0)
+                    pnl_total = pnl_unit * qty
+                    _notify(
+                        f"*{action_label}*{price_str}\n"
+                        f"{symbol}\n"
+                        f"Entry: {entry} | Exit: {exit_price}\n"
+                        f"P&L: {pnl_unit:+.2f}/unit | Total: {pnl_total:+.0f}"
+                    )
+                else:
+                    _notify(f"*{action_label}*{price_str}\nTrade: {symbol}")
+
+                sym_prefix = symbol.split()[0] if symbol else ""
+                _close_trade(sym_prefix, exit_price, action)
+                _executed.pop()
+            else:
+                _notify(f"*{action_label}*{price_str} (no tracked trade to match)")
+                log.info("Exit signal but no executed trades to match")
+            return
+
+        log.info("Unrecognized message, skipping.")
 
     log.info("Listening for signals in channel %s ...", channel_id)
-    print(f"📡 Listening for signals in channel {channel_id} ... (Ctrl-C to stop)")
+    print(f"Listening for signals in channel {channel_id} ... (Ctrl-C to stop)")
     await client.run_until_disconnected()
 
 
