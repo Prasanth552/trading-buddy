@@ -282,11 +282,8 @@ def execute_signal(sig: ParsedSignal) -> dict[str, Any]:
     lot_key = sig.symbol.replace(" ", "").upper()
     lot_size = config.LOT_SIZES.get(lot_key, master_lot_size)
 
-    risk_per_lot = risk_per_unit * lot_size
-    lots = max(1, int(config.MAX_RISK_PER_TRADE / risk_per_lot))
-    max_lots = getattr(config, "MAX_LOTS_PER_TRADE", 0)
-    if max_lots > 0:
-        lots = min(lots, max_lots)
+    # Channel signals: fixed 2 lots (sandbox sizing)
+    lots = 2
     qty = lots * lot_size
 
     instrument_token = opt.get("instrument_key") or opt.get("instrument_token", "")
