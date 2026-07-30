@@ -135,6 +135,7 @@ def fetch_candles(instrument_key: str, trade_date: str, interval: str = "1minute
     if data.get("status") != "success":
         return None
     candles = data.get("data", {}).get("candles", [])
+    candles.sort(key=lambda c: c[0])
     return candles
 
 
