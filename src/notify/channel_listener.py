@@ -226,7 +226,7 @@ def _resolve_channel_option(
     IST = ZoneInfo(config.TIMEZONE)
     today = datetime.now(IST).date()
 
-    name = symbol.replace(" ", "").upper()
+    sym = symbol.replace(" ", "").upper()
     instruments = uc.load_instruments()
 
     candidates: list[tuple[date, dict[str, Any]]] = []
@@ -234,7 +234,7 @@ def _resolve_channel_option(
         seg = inst.get("segment", "")
         if seg not in ("NSE_FO", "BSE_FO"):
             continue
-        if inst.get("name", "").upper() != name:
+        if inst.get("asset_symbol", "").upper() != sym:
             continue
         if inst.get("instrument_type") != option_type:
             continue
