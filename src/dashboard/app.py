@@ -467,7 +467,7 @@ _PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
  .close-btn{padding:6px 12px;border:0;border-radius:8px;background:#3a2a13;color:#ffb454;
    font-size:13px;font-weight:600;cursor:pointer;flex:none;width:auto}
 </style></head><body>
-<h1>📈 Trading Buddy</h1><div class=sub id=sub>loading… · <a href="/chart" style="color:#4c9aff">📊 Chart Analyzer</a></div>
+<h1>📈 Trading Buddy</h1><div class=sub id=sub>loading… · <a href="/chart" style="color:#4c9aff">📊 Chart Analyzer</a> · <a href="http://34.127.111.138:8001" style="color:#4c9aff">📡 Channel Trades</a></div>
 <div class=grid id=cards></div>
 <div class=btns><button class=pause onclick="ctl('pause')">⏸ Pause</button>
  <button class=resume onclick="ctl('resume')">▶ Resume</button></div>
