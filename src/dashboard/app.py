@@ -467,7 +467,7 @@ _PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
  .close-btn{padding:6px 12px;border:0;border-radius:8px;background:#3a2a13;color:#ffb454;
    font-size:13px;font-weight:600;cursor:pointer;flex:none;width:auto}
 </style></head><body>
-<h1>📈 Trading Buddy</h1><div class=sub id=sub>loading… · <a href="/chart" style="color:#4c9aff">📊 Chart Analyzer</a> · <a href="http://34.127.111.138:8001" style="color:#4c9aff">📡 Channel Trades</a></div>
+<h1>📈 Trading Buddy</h1><div class=sub id=sub>loading… · <a href="/chart" style="color:#4c9aff">📊 Chart Analyzer</a> · <a href="/channel" style="color:#4c9aff">📡 Channel Trades</a></div>
 <div class=grid id=cards></div>
 <div class=btns><button class=pause onclick="ctl('pause')">⏸ Pause</button>
  <button class=resume onclick="ctl('resume')">▶ Resume</button></div>
@@ -558,3 +558,83 @@ async function load(){
 }
 load();setInterval(load,20000);
 </script></body></html>"""
+
+
+# --------------------------------------------------------------------------
+# Channel Trades Dashboard (mounted on same port)
+# --------------------------------------------------------------------------
+from src.dashboard.channel_app import _PAGE as _CHANNEL_PAGE, _CHANNEL_FILTER as _CH_FILTER
+
+
+@app.get("/api/channel/trades")
+def api_channel_trades(_: None = Depends(require_auth)) -> JSONResponse:
+    db.init_db()
+    rows = _rows(
+        f"SELECT id, ts, symbol, side, qty, price, exit_price, pnl, mode, status, "
+        f"stop_price, target_price, index_entry "
+        f"FROM trades WHERE {_CH_FILTER} ORDER BY id DESC LIMIT 100")
+    return JSONResponse(rows)
+
+
+@app.get("/api/channel/stats")
+def api_channel_stats(_: None = Depends(require_auth)) -> JSONResponse:
+    db.init_db()
+    with db.get_conn() as conn:
+        total = conn.execute(f"SELECT COUNT(*) FROM trades WHERE {_CH_FILTER}").fetchone()[0]
+        open_count = conn.execute(f"SELECT COUNT(*) FROM trades WHERE {_CH_FILTER} AND status='OPEN'").fetchone()[0]
+        closed = conn.execute(f"SELECT COUNT(*) FROM trades WHERE {_CH_FILTER} AND status LIKE 'CLOSED%'").fetchone()[0]
+        wins = conn.execute(f"SELECT COUNT(*) FROM trades WHERE {_CH_FILTER} AND pnl > 0").fetchone()[0]
+        losses = conn.execute(f"SELECT COUNT(*) FROM trades WHERE {_CH_FILTER} AND pnl IS NOT NULL AND pnl <= 0").fetchone()[0]
+        total_pnl = conn.execute(f"SELECT COALESCE(SUM(pnl),0) FROM trades WHERE {_CH_FILTER} AND pnl IS NOT NULL").fetchone()[0]
+        best = conn.execute(f"SELECT COALESCE(MAX(pnl),0) FROM trades WHERE {_CH_FILTER}").fetchone()[0]
+        worst = conn.execute(f"SELECT COALESCE(MIN(pnl),0) FROM trades WHERE {_CH_FILTER} AND pnl IS NOT NULL").fetchone()[0]
+        avg_pnl = conn.execute(f"SELECT COALESCE(AVG(pnl),0) FROM trades WHERE {_CH_FILTER} AND pnl IS NOT NULL").fetchone()[0]
+        today_iso = mc.now_ist().date().isoformat()
+        today_pnl = conn.execute(
+            f"SELECT COALESCE(SUM(pnl),0) FROM trades WHERE {_CH_FILTER} AND pnl IS NOT NULL AND ts >= ?",
+            (today_iso,)).fetchone()[0]
+        today_count = conn.execute(
+            f"SELECT COUNT(*) FROM trades WHERE {_CH_FILTER} AND ts >= ?", (today_iso,)).fetchone()[0]
+        pnl_series = [dict(r) for r in conn.execute(
+            f"SELECT ts, pnl FROM trades WHERE {_CH_FILTER} AND pnl IS NOT NULL ORDER BY id"
+        ).fetchall()]
+
+    win_rate = (wins / closed * 100) if closed > 0 else 0
+    cumulative, running = [], 0
+    for row in pnl_series:
+        running += row["pnl"]
+        cumulative.append({"ts": row["ts"], "pnl": row["pnl"], "cumulative": round(running, 2)})
+
+    return JSONResponse({
+        "total": total, "open": open_count, "closed": closed,
+        "wins": wins, "losses": losses, "win_rate": round(win_rate, 1),
+        "total_pnl": round(total_pnl, 2), "best_trade": round(best, 2),
+        "worst_trade": round(worst, 2), "avg_pnl": round(avg_pnl, 2),
+        "today_pnl": round(today_pnl, 2), "today_count": today_count,
+        "pnl_curve": cumulative,
+        "now": mc.now_ist().strftime("%Y-%m-%d %H:%M:%S IST"),
+    })
+
+
+@app.post("/api/channel/close/{trade_id}")
+def api_channel_close(trade_id: int, _: None = Depends(require_auth)) -> JSONResponse:
+    db.init_db()
+    with db.get_conn() as conn:
+        row = conn.execute(
+            "SELECT id, price, qty FROM trades WHERE id = ? AND status = 'OPEN'",
+            (trade_id,)).fetchone()
+        if not row:
+            return JSONResponse({"closed": False, "reason": "Not found or already closed"}, status_code=404)
+        conn.execute("UPDATE trades SET status='CLOSED', exit_price=price, pnl=0 WHERE id=?", (trade_id,))
+    return JSONResponse({"closed": True, "trade_id": trade_id, "pnl": 0})
+
+
+@app.get("/channel", response_class=HTMLResponse)
+def channel_page(_: None = Depends(require_auth)) -> str:
+    return _CHANNEL_PAGE.replace(
+        "fetch('/api/stats')", "fetch('/api/channel/stats')"
+    ).replace(
+        "fetch('/api/trades')", "fetch('/api/channel/trades')"
+    ).replace(
+        "fetch('/api/close/'", "fetch('/api/channel/close/'"
+    )
