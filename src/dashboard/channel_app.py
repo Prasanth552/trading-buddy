@@ -35,7 +35,7 @@ def api_trades() -> JSONResponse:
     db.init_db()
     rows = _rows(
         f"SELECT id, ts, symbol, side, qty, price, exit_price, pnl, mode, status, "
-        f"stop_price, target_price, index_entry "
+        f"stop_price, target_price, index_entry, broker_key "
         f"FROM trades WHERE {_CHANNEL_FILTER} ORDER BY id DESC LIMIT 100")
     return JSONResponse(rows)
 
@@ -89,6 +89,40 @@ def api_stats() -> JSONResponse:
         "pnl_curve": cumulative,
         "now": mc.now_ist().strftime("%Y-%m-%d %H:%M:%S IST"),
     })
+
+
+@app.get("/api/ltp")
+def api_ltp() -> JSONResponse:
+    """Fetch live LTP for all open channel trades that have a broker_key."""
+    db.init_db()
+    with db.get_conn() as conn:
+        rows = conn.execute(
+            f"SELECT id, broker_key FROM trades WHERE {_CHANNEL_FILTER} "
+            "AND status = 'OPEN' AND broker_key IS NOT NULL"
+        ).fetchall()
+    if not rows:
+        return JSONResponse({})
+    try:
+        import requests as _req
+        keys = {r["broker_key"]: r["id"] for r in rows}
+        url = "https://api.upstox.com/v2/market-quote/ltp"
+        from src.broker.upstox_data import load_cached_token
+        token = load_cached_token()
+        if not token:
+            return JSONResponse({"error": "no token"}, status_code=503)
+        resp = _req.get(url, params={"instrument_key": ",".join(keys.keys())},
+                        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+                        timeout=10)
+        data = resp.json().get("data", {})
+        result: dict[str, float] = {}
+        for item in data.values():
+            ikey = item.get("instrument_token", "")
+            tid = keys.get(ikey)
+            if tid is not None:
+                result[str(tid)] = item.get("last_price", 0)
+        return JSONResponse(result)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
 
 
 @app.post("/api/close/{trade_id}")
@@ -237,7 +271,7 @@ tr:hover td{background:var(--bld)}
 </div>
 <script>
 const $=id=>document.getElementById(id);
-let AT=[],CF='all';
+let AT=[],CF='all',LTP={};
 
 function inr(v){if(v==null||isNaN(v))return'-';return(v<0?'-':'')+'₹'+Math.abs(Math.round(v)).toLocaleString('en-IN')}
 function pc(v){return v>0?'pos':v<0?'neg':''}
@@ -286,8 +320,14 @@ function rC(curve){
 function rO(T){
   const O=T.filter(t=>t.status==='OPEN');$('oc').textContent=O.length;
   if(!O.length){$('ow').innerHTML='<div class=empty>No open positions</div>';return}
-  $('ow').innerHTML='<table><thead><tr><th>Symbol</th><th>Entry</th><th>SL</th><th>Target</th><th>Qty</th><th>Risk</th><th></th></tr></thead><tbody>'+
-    O.map(t=>{const rk=(t.price-t.stop_price)||0;return'<tr><td style="color:var(--tx);font-weight:600">'+t.symbol+'</td><td>'+t.price+'</td><td>'+t.stop_price+'</td><td>'+(t.target_price||'-')+'</td><td>'+t.qty+'</td><td class=neg>'+rk.toFixed(1)+' ('+inr(rk*t.qty)+')</td><td><button class=cb onclick="cp('+t.id+",'"+t.symbol.replace(/'/g,'')+"')\">Close</button></td></tr>"}).join('')+'</tbody></table>';
+  $('ow').innerHTML='<table><thead><tr><th>Symbol</th><th>Entry</th><th>CMP</th><th>P&L</th><th>SL</th><th>Target</th><th>Qty</th><th></th></tr></thead><tbody>'+
+    O.map(t=>{
+      const cmp=LTP[t.id];
+      const cmpStr=cmp!=null?cmp.toFixed(2):'—';
+      const upnl=cmp!=null?(cmp-t.price)*t.qty:null;
+      const upnlStr=upnl!=null?inr(upnl):'—';
+      const upnlCls=upnl!=null?pc(upnl):'';
+      return'<tr><td style="color:var(--tx);font-weight:600">'+t.symbol+'</td><td>'+t.price+'</td><td>'+cmpStr+'</td><td class="'+upnlCls+'" style="font-weight:700">'+upnlStr+'</td><td>'+t.stop_price+'</td><td>'+(t.target_price||'-')+'</td><td>'+t.qty+'</td><td><button class=cb onclick="cp('+t.id+",'"+t.symbol.replace(/'/g,'')+"')\">Close</button></td></tr>"}).join('')+'</tbody></table>';
 }
 
 function rH(T){
@@ -307,7 +347,9 @@ async function load(){
   try{
     const [s,t]=await Promise.all([fetch('/api/stats').then(r=>r.json()),fetch('/api/trades').then(r=>r.json())]);
     AT=t;$('ck').textContent=s.now;$('sd').className='dot on';$('st').textContent='Listener active';
-    rS(s);rC(s.pnl_curve);rO(t);rH(t);
+    rS(s);rC(s.pnl_curve);rH(t);
+    try{const ltp=await fetch('/api/ltp').then(r=>r.json());if(!ltp.error)LTP=ltp}catch(e){}
+    rO(t);
   }catch(e){$('sd').className='dot off';$('st').textContent='Error: '+e}
 }
 load();setInterval(load,15000);

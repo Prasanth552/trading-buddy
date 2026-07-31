@@ -296,6 +296,7 @@ def execute_signal(sig: ParsedSignal) -> dict[str, Any]:
         "price": sig.trigger_price,
         "stop_price": sig.stop_loss,
         "target_price": sig.targets[0],
+        "broker_key": instrument_token,
         "mode": config.MODE,
         "status": "OPEN",
         "is_hedge": False,

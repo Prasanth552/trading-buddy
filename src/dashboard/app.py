@@ -571,7 +571,7 @@ def api_channel_trades(_: None = Depends(require_auth)) -> JSONResponse:
     db.init_db()
     rows = _rows(
         f"SELECT id, ts, symbol, side, qty, price, exit_price, pnl, mode, status, "
-        f"stop_price, target_price, index_entry "
+        f"stop_price, target_price, index_entry, broker_key "
         f"FROM trades WHERE {_CH_FILTER} ORDER BY id DESC LIMIT 100")
     return JSONResponse(rows)
 
@@ -616,6 +616,39 @@ def api_channel_stats(_: None = Depends(require_auth)) -> JSONResponse:
     })
 
 
+@app.get("/api/channel/ltp")
+def api_channel_ltp(_: None = Depends(require_auth)) -> JSONResponse:
+    db.init_db()
+    with db.get_conn() as conn:
+        rows = conn.execute(
+            f"SELECT id, broker_key FROM trades WHERE {_CH_FILTER} "
+            "AND status = 'OPEN' AND broker_key IS NOT NULL"
+        ).fetchall()
+    if not rows:
+        return JSONResponse({})
+    try:
+        import requests as _req
+        keys = {r["broker_key"]: r["id"] for r in rows}
+        from src.broker.upstox_data import load_cached_token
+        token = load_cached_token()
+        if not token:
+            return JSONResponse({"error": "no token"}, status_code=503)
+        resp = _req.get("https://api.upstox.com/v2/market-quote/ltp",
+                        params={"instrument_key": ",".join(keys.keys())},
+                        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+                        timeout=10)
+        data = resp.json().get("data", {})
+        result: dict[str, float] = {}
+        for item in data.values():
+            ikey = item.get("instrument_token", "")
+            tid = keys.get(ikey)
+            if tid is not None:
+                result[str(tid)] = item.get("last_price", 0)
+        return JSONResponse(result)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
 @app.post("/api/channel/close/{trade_id}")
 def api_channel_close(trade_id: int, _: None = Depends(require_auth)) -> JSONResponse:
     db.init_db()
@@ -637,4 +670,6 @@ def channel_page(_: None = Depends(require_auth)) -> str:
         "fetch('/api/trades')", "fetch('/api/channel/trades')"
     ).replace(
         "fetch('/api/close/'", "fetch('/api/channel/close/'"
+    ).replace(
+        "fetch('/api/ltp')", "fetch('/api/channel/ltp')"
     )
