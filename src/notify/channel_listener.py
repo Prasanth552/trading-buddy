@@ -345,13 +345,13 @@ def _close_trade(symbol: str, exit_price: float | None, reason: str) -> None:
         with db.get_conn() as conn:
             if symbol:
                 row = conn.execute(
-                    "SELECT rowid, price, qty FROM trades "
+                    "SELECT id, price, qty FROM trades "
                     "WHERE symbol LIKE ? AND status = 'OPEN' ORDER BY ts DESC LIMIT 1",
                     (f"{symbol}%",)
                 ).fetchone()
             else:
                 row = conn.execute(
-                    "SELECT rowid, price, qty FROM trades "
+                    "SELECT id, price, qty FROM trades "
                     "WHERE status = 'OPEN' ORDER BY ts DESC LIMIT 1",
                 ).fetchone()
 
@@ -365,11 +365,11 @@ def _close_trade(symbol: str, exit_price: float | None, reason: str) -> None:
             status = "CLOSED" if reason != "sl_hit" else "CLOSED_SL"
 
             conn.execute(
-                "UPDATE trades SET status = ?, exit_price = ?, pnl = ? WHERE rowid = ?",
-                (status, ep, pnl, row["rowid"]),
+                "UPDATE trades SET status = ?, exit_price = ?, pnl = ? WHERE id = ?",
+                (status, ep, pnl, row["id"]),
             )
-            log.info("Closed trade (rowid=%d): entry=%.2f exit=%.2f pnl=%.2f reason=%s",
-                     row["rowid"], entry_price, ep, pnl, reason)
+            log.info("Closed trade (id=%d): entry=%.2f exit=%.2f pnl=%.2f reason=%s",
+                     row["id"], entry_price, ep, pnl, reason)
     except Exception as exc:  # noqa: BLE001
         log.error("Failed to close trade: %s", exc)
 
