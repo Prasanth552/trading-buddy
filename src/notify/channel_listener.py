@@ -44,6 +44,20 @@ class ParsedSignal:
 # ---------------------------------------------------------------------------
 _executed: list[dict[str, Any]] = []
 
+
+def _find_best_match(trades: list[dict[str, Any]], exit_price: float | None) -> dict[str, Any]:
+    """Find the open trade whose entry price is closest to exit_price.
+
+    Exit messages like "62, BOOK OR TRAIL" don't name the stock. Matching by
+    price proximity (|exit - entry|) is far more reliable than a blind stack pop.
+    Falls back to the most recent trade if exit_price is None.
+    """
+    if not trades:
+        return {}
+    if exit_price is None or exit_price <= 0:
+        return trades[-1]
+    return min(trades, key=lambda t: abs(t.get("entry", 0) - exit_price))
+
 # ---------------------------------------------------------------------------
 # Follow-up / exit message classification
 # ---------------------------------------------------------------------------
@@ -455,13 +469,13 @@ async def start_listener() -> None:
             action_label = "BOOK/TRAIL" if action == "book" else "SL HIT"
 
             if _executed:
-                last = _executed[-1]
-                symbol = last.get("symbol", "")
-                entry = last.get("entry", 0)
+                match = _find_best_match(_executed, exit_price)
+                symbol = match.get("symbol", "")
+                entry = match.get("entry", 0)
 
                 if exit_price and entry:
                     pnl_unit = exit_price - entry
-                    qty = last.get("qty", 0)
+                    qty = match.get("qty", 0)
                     pnl_total = pnl_unit * qty
                     _notify(
                         f"*{action_label}*{price_str}\n"
@@ -474,7 +488,7 @@ async def start_listener() -> None:
 
                 sym_prefix = symbol.split()[0] if symbol else ""
                 _close_trade(sym_prefix, exit_price, action)
-                _executed.pop()
+                _executed.remove(match)
             else:
                 _notify(f"*{action_label}*{price_str} (no tracked trade to match)")
                 log.info("Exit signal but no executed trades to match")
