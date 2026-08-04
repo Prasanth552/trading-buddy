@@ -64,6 +64,7 @@ def _find_best_match(trades: list[dict[str, Any]], exit_price: float | None) -> 
 _RE_SL_HIT = re.compile(r'^\s*SL\s*$', re.I)
 _RE_BOOK = re.compile(r'BOOK|TRAIL|CLOSE\s+NEAR\s+COST', re.I)
 _RE_PRICE_ACTION = re.compile(r'^\s*(\d+(?:\.\d+)?)\s*,\s*(.+)', re.I)
+_RE_CLOSE_PRICE = re.compile(r'^\s*CLOSE\s+(\d+(?:\.\d+)?)\s*$', re.I)
 
 
 def _classify_followup(text: str) -> tuple[str, float | None]:
@@ -78,6 +79,10 @@ def _classify_followup(text: str) -> tuple[str, float | None]:
     if price_m:
         price = float(price_m.group(1))
         return "book", price
+
+    close_m = _RE_CLOSE_PRICE.match(text)
+    if close_m:
+        return "book", float(close_m.group(1))
 
     if _RE_SL_HIT.match(text):
         return "sl_hit", None
@@ -94,7 +99,7 @@ _PARSE_SYSTEM = """You extract trading signals from Telegram messages.
 Return a JSON object with these fields (or null if the message is NOT a trading signal):
 {
   "action": "BUY" or "SELL",
-  "symbol": stock name (e.g. "COFORGE", "JSW ENERGY", "NIFTY", "BANKNIFTY"),
+  "symbol": stock ticker EXACTLY as written in the message (e.g. "COFORGE", "JSW ENERGY", "GODFRYPHLP") — do NOT correct spelling or substitute similar names,
   "strike": strike price as number,
   "option_type": "CE" or "PE",
   "trigger_price": entry price / premium to enter above/below,
@@ -243,6 +248,13 @@ def _resolve_channel_option(
     sym = symbol.replace(" ", "").upper()
     instruments = uc.load_instruments()
 
+    # Known channel→Upstox symbol aliases
+    _SYMBOL_ALIASES: dict[str, str] = {
+        "KALYANJIL": "KALYANKJIL",
+        "LIC": "LICI",
+    }
+    sym = _SYMBOL_ALIASES.get(sym, sym)
+
     candidates: list[tuple[date, dict[str, Any]]] = []
     for inst in instruments:
         seg = inst.get("segment", "")
@@ -260,6 +272,30 @@ def _resolve_channel_option(
         candidates.append((exp, inst))
 
     if not candidates:
+        # Fuzzy fallback: find asset_symbols that start with or contain sym
+        fuzzy: list[tuple[date, dict[str, Any]]] = []
+        for inst in instruments:
+            seg = inst.get("segment", "")
+            if seg not in ("NSE_FO", "BSE_FO"):
+                continue
+            asym = inst.get("asset_symbol", "").upper()
+            if not (asym.startswith(sym) or sym.startswith(asym)):
+                continue
+            if inst.get("instrument_type") != option_type:
+                continue
+            if abs(float(inst.get("strike_price", -1)) - strike) > 0.01:
+                continue
+            exp = _expiry_to_date(inst.get("expiry"))
+            if exp is None or exp < today:
+                continue
+            fuzzy.append((exp, inst))
+        if fuzzy:
+            fuzzy.sort(key=lambda x: x[0])
+            chosen = fuzzy[0][1]
+            actual_sym = chosen.get("asset_symbol", "")
+            log.info("Fuzzy match: %s → %s (asset_symbol=%s)", symbol, actual_sym, actual_sym)
+            lot_size = int(chosen.get("lot_size", 1)) or 1
+            return chosen, lot_size
         return None, 1
 
     candidates.sort(key=lambda x: x[0])
