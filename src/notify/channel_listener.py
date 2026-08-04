@@ -28,6 +28,42 @@ from src.utils.logging import get_logger
 
 log = get_logger("channel_listener")
 
+
+# ---------------------------------------------------------------------------
+# Brokerage & charges calculator (Upstox options, per round-trip)
+# ---------------------------------------------------------------------------
+def calc_charges(entry_price: float, exit_price: float, qty: int) -> dict[str, float]:
+    """Calculate all trading charges for an options round-trip on Upstox.
+
+    Returns a dict with individual components and the total.
+    Rates as of 2025 for equity F&O options.
+    """
+    buy_turnover = entry_price * qty
+    sell_turnover = exit_price * qty
+    total_turnover = buy_turnover + sell_turnover
+
+    brokerage_per_leg = 20.0
+    brokerage = brokerage_per_leg * 2  # buy + sell
+
+    stt = sell_turnover * 0.001  # 0.1% on sell side (options)
+    exchange_txn = total_turnover * 0.000495  # NSE ~0.0495%
+    sebi = total_turnover * 0.000001  # ₹10 per crore
+    stamp_duty = buy_turnover * 0.00003  # 0.003% on buy side
+
+    gst = (brokerage + exchange_txn) * 0.18  # 18% GST
+
+    total = brokerage + stt + exchange_txn + sebi + stamp_duty + gst
+
+    return {
+        "brokerage": round(brokerage, 2),
+        "stt": round(stt, 2),
+        "exchange_txn": round(exchange_txn, 2),
+        "gst": round(gst, 2),
+        "sebi": round(sebi, 2),
+        "stamp_duty": round(stamp_duty, 2),
+        "total": round(total, 2),
+    }
+
 @dataclass
 class ParsedSignal:
     action: str          # BUY / SELL
@@ -460,15 +496,22 @@ def _close_trade(symbol: str, exit_price: float | None, reason: str) -> None:
                 except Exception as exc:  # noqa: BLE001
                     log.warning("Exit LTP fetch failed, using signal price: %s", exc)
 
-            pnl = (ep - entry_price) * row["qty"]
+            gross_pnl = (ep - entry_price) * row["qty"]
+            charges = calc_charges(entry_price, ep, row["qty"])
+            net_pnl = gross_pnl - charges["total"]
             status = "CLOSED" if reason != "sl_hit" else "CLOSED_SL"
 
             conn.execute(
-                "UPDATE trades SET status = ?, exit_price = ?, pnl = ? WHERE id = ?",
-                (status, ep, pnl, row["id"]),
+                "UPDATE trades SET status = ?, exit_price = ?, pnl = ?, charges = ? WHERE id = ?",
+                (status, ep, net_pnl, charges["total"], row["id"]),
             )
-            log.info("Closed trade (id=%d): entry=%.2f exit=%.2f pnl=%.2f reason=%s",
-                     row["id"], entry_price, ep, pnl, reason)
+            log.info(
+                "Closed trade (id=%d): entry=%.2f exit=%.2f gross=%.2f "
+                "charges=%.2f (brk=%.0f stt=%.2f txn=%.2f gst=%.2f) net=%.2f reason=%s",
+                row["id"], entry_price, ep, gross_pnl,
+                charges["total"], charges["brokerage"], charges["stt"],
+                charges["exchange_txn"], charges["gst"], net_pnl, reason,
+            )
     except Exception as exc:  # noqa: BLE001
         log.error("Failed to close trade: %s", exc)
 
@@ -560,12 +603,15 @@ async def start_listener() -> None:
                 if exit_price and entry:
                     pnl_unit = exit_price - entry
                     qty = match.get("qty", 0)
-                    pnl_total = pnl_unit * qty
+                    gross_pnl = pnl_unit * qty
+                    charges = calc_charges(entry, exit_price, qty)
+                    net_pnl = gross_pnl - charges["total"]
                     _notify(
                         f"*{action_label}*{price_str}\n"
                         f"{symbol}\n"
                         f"Entry: {entry} | Exit: {exit_price}\n"
-                        f"P&L: {pnl_unit:+.2f}/unit | Total: {pnl_total:+.0f}"
+                        f"Gross: {gross_pnl:+.0f} | Charges: {charges['total']:.0f} | "
+                        f"Net: {net_pnl:+.0f}"
                     )
                 else:
                     _notify(f"*{action_label}*{price_str}\nTrade: {symbol}")

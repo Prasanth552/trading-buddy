@@ -35,7 +35,7 @@ def api_trades() -> JSONResponse:
     db.init_db()
     rows = _rows(
         f"SELECT id, ts, symbol, side, qty, price, exit_price, pnl, mode, status, "
-        f"stop_price, target_price, index_entry, broker_key "
+        f"stop_price, target_price, index_entry, broker_key, charges "
         f"FROM trades WHERE {_CHANNEL_FILTER} ORDER BY id DESC LIMIT 100")
     return JSONResponse(rows)
 
@@ -69,6 +69,12 @@ def api_stats() -> JSONResponse:
         today_count = conn.execute(
             f"SELECT COUNT(*) FROM trades WHERE {_CHANNEL_FILTER} AND ts >= ?",
             (today_iso,)).fetchone()[0]
+        total_charges = conn.execute(
+            f"SELECT COALESCE(SUM(charges),0) FROM trades WHERE {_CHANNEL_FILTER} "
+            f"AND charges IS NOT NULL").fetchone()[0]
+        today_charges = conn.execute(
+            f"SELECT COALESCE(SUM(charges),0) FROM trades WHERE {_CHANNEL_FILTER} "
+            f"AND charges IS NOT NULL AND ts >= ?", (today_iso,)).fetchone()[0]
         pnl_series = [dict(r) for r in conn.execute(
             f"SELECT ts, pnl FROM trades WHERE {_CHANNEL_FILTER} AND pnl IS NOT NULL ORDER BY id"
         ).fetchall()]
@@ -86,6 +92,7 @@ def api_stats() -> JSONResponse:
         "total_pnl": round(total_pnl, 2), "best_trade": round(best, 2),
         "worst_trade": round(worst, 2), "avg_pnl": round(avg_pnl, 2),
         "today_pnl": round(today_pnl, 2), "today_count": today_count,
+        "total_charges": round(total_charges, 2), "today_charges": round(today_charges, 2),
         "pnl_curve": cumulative,
         "now": mc.now_ist().strftime("%Y-%m-%d %H:%M:%S IST"),
     })
@@ -289,6 +296,7 @@ function rS(s){
     {l:'Best',v:inr(s.best_trade),c:'pos',d:'single max'},
     {l:'Worst',v:inr(s.worst_trade),c:'neg',d:'single min'},
     {l:'Open',v:String(s.open),c:'',d:'active now'},
+    {l:'Charges',v:inr(s.total_charges),c:'neg',d:'today '+inr(s.today_charges)},
     {l:'Signals',v:String(s.total),c:'',d:'all time'},
   ];
   $('ss').innerHTML=I.map(i=>'<div class=s><div class=l>'+i.l+'</div><div class="v '+i.c+'">'+i.v+'</div><div class=d>'+i.d+'</div></div>').join('');
@@ -337,8 +345,8 @@ function rH(T){
   $('hc').textContent=C.length;
   $('fb').innerHTML=[{k:'all',t:'All ('+C.length+')'},{k:'w',t:'Wins ('+w+')'},{k:'l',t:'Losses ('+l+')'}].map(f=>'<button class="'+(CF===f.k?'a':'')+'" onclick="sF(\''+f.k+'\')">'+f.t+'</button>').join('');
   if(!F.length){$('hw').innerHTML='<div class=empty>No trades</div>';return}
-  $('hw').innerHTML='<table><thead><tr><th>Time</th><th>Symbol</th><th>Qty</th><th>Entry</th><th>Exit</th><th>P&L</th><th>Status</th></tr></thead><tbody>'+
-    F.map(t=>'<tr><td style="color:var(--mt)">'+tf(t.ts)+'</td><td style="color:var(--tx);font-weight:600">'+t.symbol+'</td><td>'+t.qty+'</td><td>'+t.price+'</td><td>'+(t.exit_price||'-')+'</td><td class="'+pc(t.pnl)+'">'+inr(t.pnl)+'</td><td>'+sp(t.status)+'</td></tr>').join('')+'</tbody></table>';
+  $('hw').innerHTML='<table><thead><tr><th>Time</th><th>Symbol</th><th>Qty</th><th>Entry</th><th>Exit</th><th>Charges</th><th>Net P&L</th><th>Status</th></tr></thead><tbody>'+
+    F.map(t=>'<tr><td style="color:var(--mt)">'+tf(t.ts)+'</td><td style="color:var(--tx);font-weight:600">'+t.symbol+'</td><td>'+t.qty+'</td><td>'+t.price+'</td><td>'+(t.exit_price||'-')+'</td><td style="color:var(--mt)">'+(t.charges!=null?inr(t.charges):'-')+'</td><td class="'+pc(t.pnl)+'">'+inr(t.pnl)+'</td><td>'+sp(t.status)+'</td></tr>').join('')+'</tbody></table>';
 }
 
 function sF(f){CF=f;rH(AT)}

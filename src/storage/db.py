@@ -124,6 +124,8 @@ def init_db() -> None:
         # Index (spot) level at entry — shown in reports as the trade's entry point.
         if "index_entry" not in cols:
             conn.execute("ALTER TABLE trades ADD COLUMN index_entry REAL")
+        if "charges" not in cols:
+            conn.execute("ALTER TABLE trades ADD COLUMN charges REAL")
         # Trade-journal context (JSON) on the signal: the conditions at decision time.
         sig_cols = {r[1] for r in conn.execute("PRAGMA table_info(signals)")}
         if "context" not in sig_cols:
