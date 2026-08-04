@@ -332,8 +332,8 @@ def execute_signal(sig: ParsedSignal) -> dict[str, Any]:
     lot_key = sig.symbol.replace(" ", "").upper()
     lot_size = config.LOT_SIZES.get(lot_key, master_lot_size)
 
-    # Channel signals: fixed 2 lots (sandbox sizing)
-    lots = 2
+    # Channel signals: fixed 1 lot (1L capital)
+    lots = 1
     qty = lots * lot_size
 
     instrument_token = opt.get("instrument_key") or opt.get("instrument_token", "")
