@@ -314,6 +314,17 @@ def execute_signal(sig: ParsedSignal) -> dict[str, Any]:
 
     db.init_db()
 
+    # Dedup: skip if an OPEN trade with the same symbol already exists
+    trade_symbol = f"{sig.symbol} {int(sig.strike)} {sig.option_type}"
+    with db.get_conn() as conn:
+        dup = conn.execute(
+            "SELECT id FROM trades WHERE symbol = ? AND status = 'OPEN' LIMIT 1",
+            (trade_symbol,),
+        ).fetchone()
+    if dup:
+        log.info("Duplicate signal skipped — %s already OPEN (id=%d)", trade_symbol, dup["id"])
+        return {"placed": False, "reason": f"Duplicate: {trade_symbol} already open"}
+
     risk_per_unit = sig.trigger_price - sig.stop_loss
     if risk_per_unit <= 0:
         return {"placed": False, "reason": "SL >= trigger price"}
