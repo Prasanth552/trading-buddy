@@ -281,6 +281,16 @@ def automated_login() -> "UpstoxData":
     os.environ["UPSTOX_CLIENT_SECRET"] = api_secret
     os.environ["UPSTOX_REDIRECT_URI"] = redirect_uri
 
+    # Patch: Upstox API dropped 'poa' from response but the library's model
+    # still requires it — make it optional so validation doesn't crash.
+    try:
+        from upstox_totp._models.access_token import AccessTokenData
+        if "poa" in AccessTokenData.model_fields:
+            AccessTokenData.model_fields["poa"].default = None
+            AccessTokenData.model_rebuild()
+    except Exception:  # noqa: BLE001
+        pass
+
     with UpstoxTOTP() as upx:
         resp = upx.app_token.get_access_token()
 
