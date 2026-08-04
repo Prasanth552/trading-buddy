@@ -281,13 +281,15 @@ def automated_login() -> "UpstoxData":
     os.environ["UPSTOX_CLIENT_SECRET"] = api_secret
     os.environ["UPSTOX_REDIRECT_URI"] = redirect_uri
 
-    # Patch: Upstox API dropped 'poa' from response but the library's model
-    # still requires it — make it optional so validation doesn't crash.
+    # Upstox API dropped 'poa' from the token response but the library's
+    # Pydantic model still marks it required. Patch at the class level.
     try:
-        from upstox_totp._models.access_token import AccessTokenData
-        if "poa" in AccessTokenData.model_fields:
-            AccessTokenData.model_fields["poa"].default = None
-            AccessTokenData.model_rebuild()
+        from upstox_totp.models import AccessTokenData
+        f = AccessTokenData.model_fields.get("poa")
+        if f and f.default is ...:  # still required (PydanticUndefined)
+            f.default = False
+            f.is_required = lambda: False  # type: ignore[assignment]
+            AccessTokenData.model_rebuild(force=True)
     except Exception:  # noqa: BLE001
         pass
 
