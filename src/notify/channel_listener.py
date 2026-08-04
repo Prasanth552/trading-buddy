@@ -349,12 +349,29 @@ def execute_signal(sig: ParsedSignal) -> dict[str, Any]:
 
     instrument_token = opt.get("instrument_key") or opt.get("instrument_token", "")
 
+    # Fetch live LTP so entry reflects actual market price, not signal price
+    entry_price = sig.trigger_price
+    try:
+        from src.broker.upstox_data import UpstoxData
+        ud = UpstoxData()
+        ltp_data = ud._get("/v2/market-quote/ltp",
+                           params={"instrument_key": instrument_token}).get("data", {})
+        for item in ltp_data.values():
+            lp = item.get("last_price")
+            if lp and lp > 0:
+                entry_price = float(lp)
+                log.info("Live LTP for %s: %.2f (signal price: %.2f)",
+                         instrument_token, entry_price, sig.trigger_price)
+                break
+    except Exception as exc:  # noqa: BLE001
+        log.warning("LTP fetch failed, using signal price: %s", exc)
+
     trade_row = {
         "ts": __import__("src.utils.market_calendar", fromlist=["now_ist"]).now_ist().isoformat(timespec="seconds"),
         "symbol": f"{sig.symbol} {int(sig.strike)} {sig.option_type}",
         "side": "BUY",
         "qty": qty,
-        "price": sig.trigger_price,
+        "price": entry_price,
         "stop_price": sig.stop_loss,
         "target_price": sig.targets[0],
         "broker_key": instrument_token,
@@ -390,9 +407,10 @@ def execute_signal(sig: ParsedSignal) -> dict[str, Any]:
         "order_id": order_id,
         "symbol": trade_row["symbol"],
         "qty": qty,
-        "entry": sig.trigger_price,
+        "entry": entry_price,
         "sl": sig.stop_loss,
         "target": sig.targets[0],
+        "broker_key": instrument_token,
     }
 
 
@@ -407,13 +425,13 @@ def _close_trade(symbol: str, exit_price: float | None, reason: str) -> None:
         with db.get_conn() as conn:
             if symbol:
                 row = conn.execute(
-                    "SELECT id, price, qty FROM trades "
+                    "SELECT id, price, qty, broker_key FROM trades "
                     "WHERE symbol LIKE ? AND status = 'OPEN' ORDER BY ts DESC LIMIT 1",
                     (f"{symbol}%",)
                 ).fetchone()
             else:
                 row = conn.execute(
-                    "SELECT id, price, qty FROM trades "
+                    "SELECT id, price, qty, broker_key FROM trades "
                     "WHERE status = 'OPEN' ORDER BY ts DESC LIMIT 1",
                 ).fetchone()
 
@@ -422,7 +440,26 @@ def _close_trade(symbol: str, exit_price: float | None, reason: str) -> None:
                 return
 
             entry_price = row["price"]
+
+            # Fetch live LTP for actual exit price
             ep = exit_price if exit_price else entry_price
+            broker_key = row["broker_key"]
+            if broker_key:
+                try:
+                    from src.broker.upstox_data import UpstoxData
+                    ud = UpstoxData()
+                    ltp_data = ud._get("/v2/market-quote/ltp",
+                                       params={"instrument_key": broker_key}).get("data", {})
+                    for item in ltp_data.values():
+                        lp = item.get("last_price")
+                        if lp and lp > 0:
+                            ep = float(lp)
+                            log.info("Live exit LTP for %s: %.2f (signal price: %s)",
+                                     broker_key, ep, exit_price)
+                            break
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("Exit LTP fetch failed, using signal price: %s", exc)
+
             pnl = (ep - entry_price) * row["qty"]
             status = "CLOSED" if reason != "sl_hit" else "CLOSED_SL"
 
