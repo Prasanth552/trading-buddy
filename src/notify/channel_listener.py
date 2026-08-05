@@ -76,23 +76,9 @@ class ParsedSignal:
 
 
 # ---------------------------------------------------------------------------
-# State: recently executed trades (for matching exit messages)
+# Config: profit target per trade
 # ---------------------------------------------------------------------------
-_executed: list[dict[str, Any]] = []
-
-
-def _find_best_match(trades: list[dict[str, Any]], exit_price: float | None) -> dict[str, Any]:
-    """Find the open trade whose entry price is closest to exit_price.
-
-    Exit messages like "62, BOOK OR TRAIL" don't name the stock. Matching by
-    price proximity (|exit - entry|) is far more reliable than a blind stack pop.
-    Falls back to the most recent trade if exit_price is None.
-    """
-    if not trades:
-        return {}
-    if exit_price is None or exit_price <= 0:
-        return trades[-1]
-    return min(trades, key=lambda t: abs(t.get("entry", 0) - exit_price))
+PROFIT_TARGET = 2000  # ₹2,000 net profit per trade → auto-close
 
 # ---------------------------------------------------------------------------
 # Follow-up / exit message classification
@@ -453,67 +439,44 @@ def execute_signal(sig: ParsedSignal) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Trade exit (close an open trade in the DB)
 # ---------------------------------------------------------------------------
-def _close_trade(symbol: str, exit_price: float | None, reason: str) -> None:
-    """Close the most recent OPEN trade matching symbol prefix."""
+def _close_trade_by_id(trade_id: int, exit_price: float, reason: str) -> None:
+    """Close a specific trade by its DB id."""
     try:
         from src.storage import db
         db.init_db()
         with db.get_conn() as conn:
-            if symbol:
-                row = conn.execute(
-                    "SELECT id, price, qty, broker_key FROM trades "
-                    "WHERE symbol LIKE ? AND status = 'OPEN' ORDER BY ts DESC LIMIT 1",
-                    (f"{symbol}%",)
-                ).fetchone()
-            else:
-                row = conn.execute(
-                    "SELECT id, price, qty, broker_key FROM trades "
-                    "WHERE status = 'OPEN' ORDER BY ts DESC LIMIT 1",
-                ).fetchone()
-
+            row = conn.execute(
+                "SELECT id, price, qty, symbol FROM trades WHERE id = ? AND status = 'OPEN'",
+                (trade_id,),
+            ).fetchone()
             if not row:
-                log.warning("No open trade found to close for %s", symbol or "any")
                 return
 
             entry_price = row["price"]
-
-            # Fetch live LTP for actual exit price
-            ep = exit_price if exit_price else entry_price
-            broker_key = row["broker_key"]
-            if broker_key:
-                try:
-                    from src.broker.upstox_data import UpstoxData
-                    ud = UpstoxData()
-                    ltp_data = ud._get("/v2/market-quote/ltp",
-                                       params={"instrument_key": broker_key}).get("data", {})
-                    for item in ltp_data.values():
-                        lp = item.get("last_price")
-                        if lp and lp > 0:
-                            ep = float(lp)
-                            log.info("Live exit LTP for %s: %.2f (signal price: %s)",
-                                     broker_key, ep, exit_price)
-                            break
-                except Exception as exc:  # noqa: BLE001
-                    log.warning("Exit LTP fetch failed, using signal price: %s", exc)
-
-            gross_pnl = (ep - entry_price) * row["qty"]
-            charges = calc_charges(entry_price, ep, row["qty"])
+            gross_pnl = (exit_price - entry_price) * row["qty"]
+            charges = calc_charges(entry_price, exit_price, row["qty"])
             net_pnl = gross_pnl - charges["total"]
             status = "CLOSED" if reason != "sl_hit" else "CLOSED_SL"
 
             conn.execute(
                 "UPDATE trades SET status = ?, exit_price = ?, pnl = ?, charges = ? WHERE id = ?",
-                (status, ep, net_pnl, charges["total"], row["id"]),
+                (status, exit_price, net_pnl, charges["total"], row["id"]),
             )
             log.info(
-                "Closed trade (id=%d): entry=%.2f exit=%.2f gross=%.2f "
-                "charges=%.2f (brk=%.0f stt=%.2f txn=%.2f gst=%.2f) net=%.2f reason=%s",
-                row["id"], entry_price, ep, gross_pnl,
-                charges["total"], charges["brokerage"], charges["stt"],
-                charges["exchange_txn"], charges["gst"], net_pnl, reason,
+                "AUTO-CLOSE (id=%d) %s: entry=%.2f exit=%.2f gross=%.2f "
+                "charges=%.2f net=%.2f reason=%s",
+                row["id"], row["symbol"], entry_price, exit_price, gross_pnl,
+                charges["total"], net_pnl, reason,
+            )
+            _notify(
+                f"*Auto-close: {reason}*\n"
+                f"{row['symbol']}\n"
+                f"Entry: {entry_price} | Exit: {exit_price}\n"
+                f"Gross: {gross_pnl:+.0f} | Charges: {charges['total']:.0f} | "
+                f"Net: {net_pnl:+.0f}"
             )
     except Exception as exc:  # noqa: BLE001
-        log.error("Failed to close trade: %s", exc)
+        log.error("Failed to close trade %d: %s", trade_id, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -551,6 +514,54 @@ async def start_listener() -> None:
     log.info("Logged in as %s (id=%s)", me.first_name, me.id)
     _notify(f"Channel listener started as {me.first_name}")
 
+    # --- Background position monitor: checks LTP every 5s, auto-closes ---
+    async def _monitor_positions():
+        """Periodically check open positions and auto-close at ₹2K profit or SL."""
+        from src.storage import db
+        while True:
+            await asyncio.sleep(5)
+            try:
+                db.init_db()
+                with db.get_conn() as conn:
+                    rows = conn.execute(
+                        "SELECT id, symbol, price, qty, stop_price, broker_key "
+                        "FROM trades WHERE status = 'OPEN' AND broker_key IS NOT NULL"
+                    ).fetchall()
+                if not rows:
+                    continue
+
+                keys = {r["broker_key"]: r for r in rows}
+                from src.broker.upstox_data import UpstoxData
+                ud = UpstoxData()
+                ltp_data = ud._get("/v2/market-quote/ltp",
+                                   params={"instrument_key": ",".join(keys)}).get("data", {})
+
+                for item in ltp_data.values():
+                    ikey = item.get("instrument_token", "")
+                    ltp = item.get("last_price")
+                    if not ltp or ikey not in keys:
+                        continue
+                    trade = keys[ikey]
+                    entry = trade["price"]
+                    qty = trade["qty"]
+                    gross_pnl = (ltp - entry) * qty
+                    charges_est = calc_charges(entry, ltp, qty)["total"]
+                    net_pnl = gross_pnl - charges_est
+
+                    if net_pnl >= PROFIT_TARGET:
+                        log.info("PROFIT TARGET hit for %s: LTP=%.2f net=%.2f",
+                                 trade["symbol"], ltp, net_pnl)
+                        _close_trade_by_id(trade["id"], ltp, "profit_target")
+                    elif trade["stop_price"] and ltp <= trade["stop_price"]:
+                        log.info("SL HIT for %s: LTP=%.2f <= SL=%.2f",
+                                 trade["symbol"], ltp, trade["stop_price"])
+                        _close_trade_by_id(trade["id"], ltp, "sl_hit")
+            except Exception as exc:  # noqa: BLE001
+                log.debug("Monitor tick error: %s", exc)
+
+    asyncio.get_event_loop().create_task(_monitor_positions())
+    log.info("Position monitor started (target=₹%d, check every 5s)", PROFIT_TARGET)
+
     @client.on(events.NewMessage(chats=channel_id_int or channel_id))
     async def on_signal(event):
         text = event.message.text or ""
@@ -559,7 +570,7 @@ async def start_listener() -> None:
 
         log.info("Channel message: %s", text[:120])
 
-        # --- Try parsing as a new entry signal ---
+        # Only process entry signals — ignore all follow-up/exit messages
         sig = parse_signal(text)
 
         if sig is not None:
@@ -576,11 +587,11 @@ async def start_listener() -> None:
 
             result = execute_signal(sig)
             if result["placed"]:
-                _executed.append(result)
                 _notify(
                     f"*Order placed*\n"
                     f"{result['symbol']} x{result['qty']}\n"
-                    f"Entry: {result['entry']} | SL: {result['sl']} | Target: {result['target']}"
+                    f"Entry: {result['entry']} | SL: {result['sl']} | "
+                    f"Target: ₹{PROFIT_TARGET} profit"
                 )
                 log.info("Order placed: %s", result)
             else:
@@ -588,43 +599,7 @@ async def start_listener() -> None:
                 log.warning("Signal not executed: %s", result["reason"])
             return
 
-        # --- Not a signal → check if it's an exit message ---
-        action, exit_price = _classify_followup(text)
-
-        if action in ("book", "sl_hit"):
-            price_str = f" @ {exit_price}" if exit_price else ""
-            action_label = "BOOK/TRAIL" if action == "book" else "SL HIT"
-
-            if _executed:
-                match = _find_best_match(_executed, exit_price)
-                symbol = match.get("symbol", "")
-                entry = match.get("entry", 0)
-
-                if exit_price and entry:
-                    pnl_unit = exit_price - entry
-                    qty = match.get("qty", 0)
-                    gross_pnl = pnl_unit * qty
-                    charges = calc_charges(entry, exit_price, qty)
-                    net_pnl = gross_pnl - charges["total"]
-                    _notify(
-                        f"*{action_label}*{price_str}\n"
-                        f"{symbol}\n"
-                        f"Entry: {entry} | Exit: {exit_price}\n"
-                        f"Gross: {gross_pnl:+.0f} | Charges: {charges['total']:.0f} | "
-                        f"Net: {net_pnl:+.0f}"
-                    )
-                else:
-                    _notify(f"*{action_label}*{price_str}\nTrade: {symbol}")
-
-                sym_prefix = symbol.split()[0] if symbol else ""
-                _close_trade(sym_prefix, exit_price, action)
-                _executed.remove(match)
-            else:
-                _notify(f"*{action_label}*{price_str} (no tracked trade to match)")
-                log.info("Exit signal but no executed trades to match")
-            return
-
-        log.info("Not a signal or exit message, skipping.")
+        log.info("Not an entry signal, skipping.")
 
     log.info("Listening for signals in channel %s ...", channel_id)
     print(f"Listening for signals in channel {channel_id} ... (Ctrl-C to stop)")
