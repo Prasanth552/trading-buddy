@@ -515,8 +515,16 @@ async def start_listener() -> None:
     _notify(f"Channel listener started as {me.first_name}")
 
     # --- Background position monitor: checks LTP every 5s, auto-closes ---
+    _peak_net: dict[int, float] = {}  # track peak net P&L per trade id
+
     async def _monitor_positions():
-        """Periodically check open positions and auto-close at ₹2K profit or SL."""
+        """Periodically check open positions.
+
+        Exit rules:
+        - LTP >= channel target → exit (target hit)
+        - LTP <= SL → exit (SL hit)
+        - Net P&L crossed ₹2K then fell back to ₹2K → exit (floor protection)
+        """
         from src.storage import db
         while True:
             await asyncio.sleep(5)
@@ -524,7 +532,7 @@ async def start_listener() -> None:
                 db.init_db()
                 with db.get_conn() as conn:
                     rows = conn.execute(
-                        "SELECT id, symbol, price, qty, stop_price, broker_key "
+                        "SELECT id, symbol, price, qty, stop_price, target_price, broker_key "
                         "FROM trades WHERE status = 'OPEN' AND broker_key IS NOT NULL"
                     ).fetchall()
                 if not rows:
@@ -542,20 +550,34 @@ async def start_listener() -> None:
                     if not ltp or ikey not in keys:
                         continue
                     trade = keys[ikey]
+                    tid = trade["id"]
                     entry = trade["price"]
                     qty = trade["qty"]
                     gross_pnl = (ltp - entry) * qty
                     charges_est = calc_charges(entry, ltp, qty)["total"]
                     net_pnl = gross_pnl - charges_est
 
-                    if net_pnl >= PROFIT_TARGET:
-                        log.info("PROFIT TARGET hit for %s: LTP=%.2f net=%.2f",
-                                 trade["symbol"], ltp, net_pnl)
-                        _close_trade_by_id(trade["id"], ltp, "profit_target")
+                    prev_peak = _peak_net.get(tid, 0)
+                    _peak_net[tid] = max(prev_peak, net_pnl)
+
+                    # 1. Channel target hit
+                    if trade["target_price"] and ltp >= trade["target_price"]:
+                        log.info("CHANNEL TARGET hit for %s: LTP=%.2f >= target=%.2f net=%.2f",
+                                 trade["symbol"], ltp, trade["target_price"], net_pnl)
+                        _close_trade_by_id(tid, ltp, "target_hit")
+                        _peak_net.pop(tid, None)
+                    # 2. SL hit
                     elif trade["stop_price"] and ltp <= trade["stop_price"]:
                         log.info("SL HIT for %s: LTP=%.2f <= SL=%.2f",
                                  trade["symbol"], ltp, trade["stop_price"])
-                        _close_trade_by_id(trade["id"], ltp, "sl_hit")
+                        _close_trade_by_id(tid, ltp, "sl_hit")
+                        _peak_net.pop(tid, None)
+                    # 3. Floor protection: was above ₹2K, fell back to ₹2K
+                    elif _peak_net[tid] >= PROFIT_TARGET and net_pnl <= PROFIT_TARGET:
+                        log.info("FLOOR EXIT for %s: peak_net=%.2f now=%.2f (fell back to ₹%d floor)",
+                                 trade["symbol"], _peak_net[tid], net_pnl, PROFIT_TARGET)
+                        _close_trade_by_id(tid, ltp, "profit_floor")
+                        _peak_net.pop(tid, None)
             except Exception as exc:  # noqa: BLE001
                 log.debug("Monitor tick error: %s", exc)
 
@@ -591,7 +613,7 @@ async def start_listener() -> None:
                     f"*Order placed*\n"
                     f"{result['symbol']} x{result['qty']}\n"
                     f"Entry: {result['entry']} | SL: {result['sl']} | "
-                    f"Target: ₹{PROFIT_TARGET} profit"
+                    f"Target: {result['target']} | Floor: ₹{PROFIT_TARGET}"
                 )
                 log.info("Order placed: %s", result)
             else:

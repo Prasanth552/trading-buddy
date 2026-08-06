@@ -78,7 +78,11 @@ def api_stats() -> JSONResponse:
         pnl_series = [dict(r) for r in conn.execute(
             f"SELECT ts, pnl FROM trades WHERE {_CHANNEL_FILTER} AND pnl IS NOT NULL ORDER BY id"
         ).fetchall()]
+        utilized = conn.execute(
+            f"SELECT COALESCE(SUM(price * qty), 0) FROM trades WHERE {_CHANNEL_FILTER} AND status = 'OPEN'"
+        ).fetchone()[0]
 
+    capital = 100000
     win_rate = (wins / closed * 100) if closed > 0 else 0
     cumulative = []
     running = 0
@@ -93,6 +97,7 @@ def api_stats() -> JSONResponse:
         "worst_trade": round(worst, 2), "avg_pnl": round(avg_pnl, 2),
         "today_pnl": round(today_pnl, 2), "today_count": today_count,
         "total_charges": round(total_charges, 2), "today_charges": round(today_charges, 2),
+        "capital": capital, "utilized": round(utilized, 2),
         "pnl_curve": cumulative,
         "now": mc.now_ist().strftime("%Y-%m-%d %H:%M:%S IST"),
     })
@@ -288,16 +293,18 @@ function tf(t){if(!t)return'-';const d=new Date(t),mm=['Jan','Feb','Mar','Apr','
 async function cp(id,sym){if(!confirm('Close '+sym+' at cost?'))return;await fetch('/api/close/'+id,{method:'POST'});load()}
 
 function rS(s){
+  const avail=s.capital-s.utilized;
   const I=[
+    {l:'Capital',v:inr(s.capital),c:'',d:'available '+inr(avail)},
+    {l:'Utilized',v:inr(s.utilized),c:s.utilized>0?'neg':'',d:Math.round(s.utilized/s.capital*100)+'% deployed'},
     {l:'Today P&L',v:inr(s.today_pnl),c:pc(s.today_pnl),d:s.today_count+' trades'},
     {l:'Total P&L',v:inr(s.total_pnl),c:pc(s.total_pnl),d:s.closed+' closed'},
     {l:'Win Rate',v:s.closed?s.win_rate+'%':'—',c:s.win_rate>=50?'pos':'neg',d:s.wins+'W '+s.losses+'L'},
     {l:'Avg Trade',v:inr(s.avg_pnl),c:pc(s.avg_pnl),d:'per closed'},
     {l:'Best',v:inr(s.best_trade),c:'pos',d:'single max'},
     {l:'Worst',v:inr(s.worst_trade),c:'neg',d:'single min'},
-    {l:'Open',v:String(s.open),c:'',d:'active now'},
     {l:'Charges',v:inr(s.total_charges),c:'neg',d:'today '+inr(s.today_charges)},
-    {l:'Signals',v:String(s.total),c:'',d:'all time'},
+    {l:'Open',v:String(s.open),c:'',d:'active now'},
   ];
   $('ss').innerHTML=I.map(i=>'<div class=s><div class=l>'+i.l+'</div><div class="v '+i.c+'">'+i.v+'</div><div class=d>'+i.d+'</div></div>').join('');
 }
