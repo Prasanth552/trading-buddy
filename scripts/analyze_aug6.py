@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Aug 6 analysis: ₹2K target vs no limit (SL only) vs no SL (target only)."""
+"""Aug 6: ₹2K target vs channel's actual SL+target."""
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from dotenv import load_dotenv
@@ -13,15 +13,15 @@ PROFIT_TARGET = 2000
 
 trades = [
     {"name": "GVT&D 4200 CE", "key": "NSE_FO|97233",
-     "entry_time": "09:22", "entry_ltp": 215.0, "sl": 180.0, "lot": 125},
+     "entry_time": "09:22", "entry_ltp": 215.0, "sl": 180.0, "target": 225.0, "lot": 125},
     {"name": "POWERGRID 290 PE", "key": "NSE_FO|138983",
-     "entry_time": "09:25", "entry_ltp": 17.30, "sl": 15.4, "lot": 1900},
+     "entry_time": "09:25", "entry_ltp": 17.30, "sl": 15.4, "target": 19.0, "lot": 1900},
     {"name": "HAL 4600 CE #1", "key": "NSE_FO|97469",
-     "entry_time": "09:32", "entry_ltp": 315.0, "sl": 280.0, "lot": 150},
+     "entry_time": "09:32", "entry_ltp": 315.0, "sl": 280.0, "target": 325.0, "lot": 150},
     {"name": "HAL 4600 CE #2", "key": "NSE_FO|97469",
-     "entry_time": "09:33", "entry_ltp": 324.6, "sl": 300.0, "lot": 150},
+     "entry_time": "09:33", "entry_ltp": 324.6, "sl": 300.0, "target": 345.0, "lot": 150},
     {"name": "CHOLAFIN 1880 CE", "key": "NSE_FO|82650",
-     "entry_time": "09:47", "entry_ltp": 69.15, "sl": 62.0, "lot": 625},
+     "entry_time": "09:47", "entry_ltp": 69.15, "sl": 62.0, "target": 73.0, "lot": 625},
 ]
 
 candle_cache = {}
@@ -38,7 +38,7 @@ for t in trades:
             print(f"Failed to fetch {k}: {e}")
             candle_cache[k] = []
 
-def calc_target_exit(entry, qty):
+def calc_2k_target(entry, qty):
     target_exit = entry + 0.05
     for _ in range(10000):
         gross = (target_exit - entry) * qty
@@ -48,8 +48,7 @@ def calc_target_exit(entry, qty):
         target_exit += 0.05
     return round(target_exit, 2)
 
-def simulate(candles, entry, sl, qty, entry_time, use_sl, use_target):
-    target_exit = calc_target_exit(entry, qty) if use_target else None
+def simulate(candles, entry, sl, target_price, qty, entry_time):
     exit_price = None
     exit_time = None
     result = None
@@ -64,13 +63,13 @@ def simulate(candles, entry, sl, qty, entry_time, use_sl, use_target):
         high_seen = max(high_seen, h)
         low_seen = min(low_seen, l)
 
-        if use_sl and l <= sl:
+        if sl is not None and l <= sl:
             exit_price = sl
             exit_time = time_part
             result = "SL HIT"
             break
-        if use_target and h >= target_exit:
-            exit_price = target_exit
+        if target_price is not None and h >= target_price:
+            exit_price = target_price
             exit_time = time_part
             result = "TARGET HIT"
             break
@@ -89,53 +88,56 @@ def simulate(candles, entry, sl, qty, entry_time, use_sl, use_target):
         gross = (exit_price - entry) * qty
         ch = calc_charges(entry, exit_price, qty)
         net = gross - ch["total"]
-        return result, exit_price, exit_time, gross, ch["total"], net, high_seen, low_seen, target_exit
-    return None, None, None, 0, 0, 0, high_seen, low_seen, target_exit
+        return result, exit_price, exit_time, gross, ch["total"], net, high_seen, low_seen
+    return None, None, None, 0, 0, 0, high_seen, low_seen
 
 
 print("\n" + "=" * 90)
-print("AUG 6 — THREE SCENARIOS COMPARED")
+print("AUG 6 — ₹2K AUTO-TARGET vs CHANNEL'S SL + TARGET")
 print("=" * 90)
 
-totals = {"2k_target": 0, "no_limit": 0, "target_only": 0}
-total_ch = {"2k_target": 0, "no_limit": 0, "target_only": 0}
+total_bot = 0
+total_channel = 0
+total_ch_bot = 0
+total_ch_channel = 0
 
 for t in trades:
     candles = candle_cache.get(t["key"], [])
     entry = t["entry_ltp"]
     sl = t["sl"]
+    ch_target = t["target"]
     qty = t["lot"]
     et = t["entry_time"]
+    auto_target = calc_2k_target(entry, qty)
 
-    # Scenario 1: ₹2K target + SL (current bot)
-    r1, ep1, et1, g1, c1, n1, h1, l1, tgt = simulate(candles, entry, sl, qty, et, use_sl=True, use_target=True)
-    # Scenario 2: No limit — SL only, no profit target
-    r2, ep2, et2, g2, c2, n2, h2, l2, _ = simulate(candles, entry, sl, qty, et, use_sl=True, use_target=False)
-    # Scenario 3: Target only, no SL
-    r3, ep3, et3, g3, c3, n3, h3, l3, _ = simulate(candles, entry, sl, qty, et, use_sl=False, use_target=True)
+    # Bot: ₹2K target + SL
+    r1, ep1, et1, g1, c1, n1, h1, l1 = simulate(candles, entry, sl, auto_target, qty, et)
+    # Channel: channel SL + channel target
+    r2, ep2, et2, g2, c2, n2, h2, l2 = simulate(candles, entry, sl, ch_target, qty, et)
 
-    totals["2k_target"] += n1
-    totals["no_limit"] += n2
-    totals["target_only"] += n3
-    total_ch["2k_target"] += c1
-    total_ch["no_limit"] += c2
-    total_ch["target_only"] += c3
+    total_bot += n1
+    total_channel += n2
+    total_ch_bot += c1
+    total_ch_channel += c2
+
+    ch_gross = (ch_target - entry) * qty
 
     print(f"\n{'─' * 90}")
     print(f"  {t['name']}")
-    print(f"  Entry: {entry} @ {et} | SL: {sl} | ₹2K target: {tgt} | Qty: {qty}")
+    print(f"  Entry: {entry} @ {et} | SL: {sl} | Qty: {qty}")
+    print(f"  Channel target: {ch_target} (gross: +{ch_gross:,.0f}) | ₹2K auto-target: {auto_target}")
     print(f"  Day range after entry: Low {l2} → High {h2}")
     print()
-    for label, r, ep, etm, n in [
-        ("₹2K + SL (bot)", r1, ep1, et1, n1),
-        ("SL only (no cap)", r2, ep2, et2, n2),
-        ("Target only (no SL)", r3, ep3, et3, n3),
-    ]:
-        sign = "+" if n >= 0 else ""
-        print(f"  {label:>22}: {r:>14} @ {ep} at {etm}  |  Net: {sign}{n:,.0f}")
+    sign1 = "+" if n1 >= 0 else ""
+    sign2 = "+" if n2 >= 0 else ""
+    print(f"  ₹2K + SL (bot):       {r1:>14} @ {ep1} at {et1}  |  Net: {sign1}{n1:,.0f}")
+    print(f"  Channel SL + Target:  {r2:>14} @ {ep2} at {et2}  |  Net: {sign2}{n2:,.0f}")
+    diff = n2 - n1
+    sdiff = "+" if diff >= 0 else ""
+    print(f"  Difference: {sdiff}{diff:,.0f}")
 
 print(f"\n{'=' * 90}")
-print(f"  ₹2K + SL (current bot):  {totals['2k_target']:+,.0f}  (charges: {total_ch['2k_target']:,.0f})")
-print(f"  SL only (no profit cap): {totals['no_limit']:+,.0f}  (charges: {total_ch['no_limit']:,.0f})")
-print(f"  Target only (no SL):     {totals['target_only']:+,.0f}  (charges: {total_ch['target_only']:,.0f})")
+print(f"  ₹2K + SL (bot):       {total_bot:+,.0f}  (charges: {total_ch_bot:,.0f})")
+print(f"  Channel SL + Target:  {total_channel:+,.0f}  (charges: {total_ch_channel:,.0f})")
+print(f"  Channel is:           {total_channel - total_bot:+,.0f} vs bot")
 print(f"{'=' * 90}")
