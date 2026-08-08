@@ -73,6 +73,8 @@ def parse_ch2_signal(text: str) -> dict | None:
 
     # Clean up for parsing
     parse_text = re.sub(r'[^\w\s.&/-]', ' ', clean).strip()
+    # Rejoin split thousands: "24 500" → "24500"
+    parse_text = re.sub(r'(\d)\s+(\d{3})(?=\s)', r'\1\2', parse_text)
     parse_text = re.sub(r'\s+', ' ', parse_text).upper()
 
     # Remove leading # or similar
