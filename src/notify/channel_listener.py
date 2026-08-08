@@ -329,7 +329,7 @@ def _resolve_channel_option(
 # ---------------------------------------------------------------------------
 # Trade execution
 # ---------------------------------------------------------------------------
-def execute_signal(sig: ParsedSignal) -> dict[str, Any]:
+def execute_signal(sig: ParsedSignal, *, channel: str = "ch1") -> dict[str, Any]:
     """Place an option order through the Upstox broker (paper/sandbox)."""
     from src.broker.upstox_client import UpstoxClient
     from src.storage import db
@@ -365,8 +365,7 @@ def execute_signal(sig: ParsedSignal) -> dict[str, Any]:
     lot_key = sig.symbol.replace(" ", "").upper()
     lot_size = config.LOT_SIZES.get(lot_key, master_lot_size)
 
-    # Channel signals: fixed 1 lot (1L capital)
-    lots = 1
+    lots = 3 if channel == "ch2" else 1
     qty = lots * lot_size
 
     instrument_token = opt.get("instrument_key") or opt.get("instrument_token", "")
@@ -403,6 +402,7 @@ def execute_signal(sig: ParsedSignal) -> dict[str, Any]:
         "index_entry": sig.strike,
         "pnl": None,
         "exit_price": None,
+        "channel": channel,
     }
 
     try:
@@ -480,31 +480,125 @@ def _close_trade_by_id(trade_id: int, exit_price: float, reason: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Telegram listener
+# Channel 2 signal parser (NIFTY/SENSEX index options + stock options)
 # ---------------------------------------------------------------------------
+def parse_signal_ch2(text: str) -> ParsedSignal | None:
+    """Parse Channel 2 signal format (no LLM — pure regex)."""
+    text = text.strip()
+    clean = text.replace("**", "")
+    clean = re.sub(r'[^\x00-\x7F]+', ' ', clean).strip()
+    clean = re.sub(r'\s+', ' ', clean)
+
+    if len(clean) < 10:
+        return None
+
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    if len(lines) < 2:
+        return None
+
+    upper = clean.upper()
+    if " CE" not in upper and " PE" not in upper:
+        return None
+
+    parse_text = re.sub(r'[^\w\s.&/-]', ' ', clean).strip()
+    parse_text = re.sub(r'(\d)\s+(\d{3})(?=\s)', r'\1\2', parse_text)
+    parse_text = re.sub(r'\s+', ' ', parse_text).upper()
+    parse_text = re.sub(r'^[#\s]+', '', parse_text)
+
+    action = "BUY"
+    if "SELL" in parse_text:
+        action = "SELL"
+
+    m_opt = re.search(r'(\d[\d,]*(?:\.\d+)?)\s+(CE|PE)', parse_text)
+    if not m_opt:
+        return None
+
+    strike = float(m_opt.group(1).replace(",", ""))
+    option_type = m_opt.group(2)
+
+    before_strike = parse_text[:m_opt.start()].strip()
+    before_strike = re.sub(r'^(BUY|SELL)\s+', '', before_strike).strip()
+    before_strike = re.sub(r'^(ZERO\s+TO\s+HERO|STOCK\s+OPTION\s+TRADE|SWING\s+TRADE)\s*', '', before_strike).strip()
+    symbol = before_strike.strip()
+    if not symbol:
+        return None
+
+    trigger = 0.0
+    for line in lines:
+        m_above = re.search(r'(?:ABOVE|BUY\s*@)\s*[:\-]?\s*(\d+(?:\.\d+)?)', line, re.I)
+        if m_above:
+            trigger = float(m_above.group(1))
+            break
+
+    sl = 0.0
+    for line in lines:
+        m_sl = re.search(r'SL\s*[:\-]?\s*(\d+(?:\.\d+)?)', line, re.I)
+        if m_sl:
+            sl = float(m_sl.group(1))
+            break
+
+    targets: list[float] = []
+    for line in lines:
+        m_tgt = re.search(r'(?:TARGET|TGT)\s*[:\-]?\s*([\d\s,/.+]+)', line, re.I)
+        if m_tgt:
+            raw = m_tgt.group(1)
+            nums = re.findall(r'\d+(?:\.\d+)?', raw)
+            targets = [float(n) for n in nums]
+            break
+
+    if sl <= 0 or not targets:
+        return None
+
+    is_swing = "SWING" in text.upper() or "HOLD WITH PATIENCE" in text.upper() or "HOLDING TRADE" in text.upper()
+    if is_swing:
+        return None
+
+    return ParsedSignal(
+        action=action,
+        symbol=symbol,
+        strike=strike,
+        option_type=option_type,
+        trigger_price=trigger,
+        stop_loss=sl,
+        targets=targets,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Telegram listener — dual-channel
+# ---------------------------------------------------------------------------
+def _normalize_channel_id(raw: str) -> int | None:
+    """Convert a channel ID string to Telethon's -100-prefixed int format."""
+    try:
+        raw_id = int(raw)
+        if raw_id > 0:
+            return int(f"-100{raw_id}")
+        elif not str(raw_id).startswith("-100"):
+            return int(f"-100{abs(raw_id)}")
+        return raw_id
+    except ValueError:
+        return None
+
+
 async def start_listener() -> None:
-    """Connect to Telegram as a user and listen for signals in the configured channel."""
+    """Connect to Telegram and listen for signals in both channels."""
     from telethon import TelegramClient, events
 
     api_id = int(os.getenv("TELEGRAM_API_ID", "0"))
     api_hash = os.getenv("TELEGRAM_API_HASH", "")
     phone = os.getenv("TELEGRAM_PHONE", "")
-    channel_id = os.getenv("SIGNAL_CHANNEL_ID", "")
+    ch1_id = os.getenv("SIGNAL_CHANNEL_ID", "")
+    ch2_id = os.getenv("SIGNAL_CHANNEL2_ID", "")
 
-    if not all([api_id, api_hash, phone, channel_id]):
+    if not all([api_id, api_hash, phone, ch1_id]):
         log.error("Missing env vars: TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_PHONE, SIGNAL_CHANNEL_ID")
         return
 
-    try:
-        raw_id = int(channel_id)
-        if raw_id > 0:
-            channel_id_int = int(f"-100{raw_id}")
-        elif not str(raw_id).startswith("-100"):
-            channel_id_int = int(f"-100{abs(raw_id)}")
-        else:
-            channel_id_int = raw_id
-    except ValueError:
-        channel_id_int = None
+    ch1_int = _normalize_channel_id(ch1_id)
+    ch2_int = _normalize_channel_id(ch2_id) if ch2_id else None
+
+    listen_channels = [c for c in [ch1_int or ch1_id, ch2_int] if c]
+    ch2_ids = {ch2_int} if ch2_int else set()
 
     session_path = os.path.join(os.path.dirname(__file__), "..", "..", "data", "telegram_user.session")
     client = TelegramClient(session_path, api_id, api_hash)
@@ -512,19 +606,13 @@ async def start_listener() -> None:
     await client.start(phone=phone)
     me = await client.get_me()
     log.info("Logged in as %s (id=%s)", me.first_name, me.id)
-    _notify(f"Channel listener started as {me.first_name}")
+    _notify(f"Channel listener started as {me.first_name} (ch1 + ch2)")
 
     # --- Background position monitor: checks LTP every 5s, auto-closes ---
-    _peak_net: dict[int, float] = {}  # track peak net P&L per trade id
+    _peak_net: dict[int, float] = {}
 
     async def _monitor_positions():
-        """Periodically check open positions.
-
-        Exit rules:
-        - LTP >= channel target → exit (target hit)
-        - LTP <= SL → exit (SL hit)
-        - Net P&L crossed ₹2K then fell back to ₹2K → exit (floor protection)
-        """
+        """Periodically check open positions and auto-close on target/SL/floor."""
         from src.storage import db
         while True:
             await asyncio.sleep(5)
@@ -560,19 +648,16 @@ async def start_listener() -> None:
                     prev_peak = _peak_net.get(tid, 0)
                     _peak_net[tid] = max(prev_peak, net_pnl)
 
-                    # 1. Channel target hit
                     if trade["target_price"] and ltp >= trade["target_price"]:
                         log.info("CHANNEL TARGET hit for %s: LTP=%.2f >= target=%.2f net=%.2f",
                                  trade["symbol"], ltp, trade["target_price"], net_pnl)
                         _close_trade_by_id(tid, ltp, "target_hit")
                         _peak_net.pop(tid, None)
-                    # 2. SL hit
                     elif trade["stop_price"] and ltp <= trade["stop_price"]:
                         log.info("SL HIT for %s: LTP=%.2f <= SL=%.2f",
                                  trade["symbol"], ltp, trade["stop_price"])
                         _close_trade_by_id(tid, ltp, "sl_hit")
                         _peak_net.pop(tid, None)
-                    # 3. Floor protection: was above ₹2K, fell back to ₹2K
                     elif _peak_net[tid] >= PROFIT_TARGET and net_pnl <= PROFIT_TARGET:
                         log.info("FLOOR EXIT for %s: peak_net=%.2f now=%.2f (fell back to ₹%d floor)",
                                  trade["symbol"], _peak_net[tid], net_pnl, PROFIT_TARGET)
@@ -584,47 +669,57 @@ async def start_listener() -> None:
     asyncio.get_event_loop().create_task(_monitor_positions())
     log.info("Position monitor started (target=₹%d, check every 5s)", PROFIT_TARGET)
 
-    @client.on(events.NewMessage(chats=channel_id_int or channel_id))
+    @client.on(events.NewMessage(chats=listen_channels))
     async def on_signal(event):
         text = event.message.text or ""
         if not text.strip():
             return
 
-        log.info("Channel message: %s", text[:120])
+        chat_id = event.chat_id
+        is_ch2 = chat_id in ch2_ids
+        channel = "ch2" if is_ch2 else "ch1"
+        ch_label = "CH2" if is_ch2 else "CH1"
 
-        # Only process entry signals — ignore all follow-up/exit messages
-        sig = parse_signal(text)
+        log.info("[%s] Channel message: %s", ch_label, text[:120])
+
+        if is_ch2:
+            sig = parse_signal_ch2(text)
+        else:
+            sig = parse_signal(text)
 
         if sig is not None:
-            log.info("Parsed signal: %s %s %s %s trigger=%.2f SL=%.2f targets=%s",
-                     sig.action, sig.symbol, sig.strike, sig.option_type,
+            log.info("[%s] Parsed signal: %s %s %s %s trigger=%.2f SL=%.2f targets=%s",
+                     ch_label, sig.action, sig.symbol, sig.strike, sig.option_type,
                      sig.trigger_price, sig.stop_loss, sig.targets)
 
             _notify(
-                f"*Signal received — executing*\n"
+                f"*[{ch_label}] Signal received — executing*\n"
                 f"{sig.action} {sig.symbol} {int(sig.strike)} {sig.option_type}\n"
                 f"Entry ABOVE {sig.trigger_price} | SL: {sig.stop_loss} | "
                 f"Targets: {', '.join(str(t) for t in sig.targets)}"
             )
 
-            result = execute_signal(sig)
+            result = execute_signal(sig, channel=channel)
             if result["placed"]:
                 _notify(
-                    f"*Order placed*\n"
+                    f"*[{ch_label}] Order placed*\n"
                     f"{result['symbol']} x{result['qty']}\n"
                     f"Entry: {result['entry']} | SL: {result['sl']} | "
                     f"Target: {result['target']} | Floor: ₹{PROFIT_TARGET}"
                 )
-                log.info("Order placed: %s", result)
+                log.info("[%s] Order placed: %s", ch_label, result)
             else:
-                _notify(f"Signal not executed: {result['reason']}")
-                log.warning("Signal not executed: %s", result["reason"])
+                _notify(f"[{ch_label}] Signal not executed: {result['reason']}")
+                log.warning("[%s] Signal not executed: %s", ch_label, result["reason"])
             return
 
-        log.info("Not an entry signal, skipping.")
+        log.info("[%s] Not an entry signal, skipping.", ch_label)
 
-    log.info("Listening for signals in channel %s ...", channel_id)
-    print(f"Listening for signals in channel {channel_id} ... (Ctrl-C to stop)")
+    channels_str = f"ch1={ch1_id}"
+    if ch2_id:
+        channels_str += f", ch2={ch2_id}"
+    log.info("Listening for signals: %s ...", channels_str)
+    print(f"Listening for signals: {channels_str} ... (Ctrl-C to stop)")
     await client.run_until_disconnected()
 
 

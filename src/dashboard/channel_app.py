@@ -22,7 +22,17 @@ from src.utils import market_calendar as mc
 load_dotenv()
 app = FastAPI(title="Channel Trades", docs_url=None, redoc_url=None)
 
-_CHANNEL_FILTER = "(symbol LIKE '% % CE' OR symbol LIKE '% % PE')"
+_CHANNEL_FILTER_BASE = "(symbol LIKE '% % CE' OR symbol LIKE '% % PE')"
+
+# Channel 1 = old trades (channel IS NULL or 'ch1'), Channel 2 = 'ch2'
+_CH_FILTERS = {
+    "ch1": f"({_CHANNEL_FILTER_BASE} AND (channel IS NULL OR channel = 'ch1'))",
+    "ch2": f"({_CHANNEL_FILTER_BASE} AND channel = 'ch2')",
+}
+
+
+def _ch_filter(channel: str) -> str:
+    return _CH_FILTERS.get(channel, _CH_FILTERS["ch1"])
 
 
 def _rows(query: str, params: tuple = ()) -> list[dict[str, Any]]:
@@ -31,55 +41,46 @@ def _rows(query: str, params: tuple = ()) -> list[dict[str, Any]]:
 
 
 @app.get("/api/trades")
-def api_trades() -> JSONResponse:
+def api_trades(channel: str = "ch1") -> JSONResponse:
     db.init_db()
+    cf = _ch_filter(channel)
     rows = _rows(
         f"SELECT id, ts, symbol, side, qty, price, exit_price, pnl, mode, status, "
         f"stop_price, target_price, index_entry, broker_key, charges "
-        f"FROM trades WHERE {_CHANNEL_FILTER} ORDER BY id DESC LIMIT 100")
+        f"FROM trades WHERE {cf} ORDER BY id DESC LIMIT 100")
     return JSONResponse(rows)
 
 
 @app.get("/api/stats")
-def api_stats() -> JSONResponse:
+def api_stats(channel: str = "ch1") -> JSONResponse:
     db.init_db()
+    cf = _ch_filter(channel)
     with db.get_conn() as conn:
-        total = conn.execute(
-            f"SELECT COUNT(*) FROM trades WHERE {_CHANNEL_FILTER}").fetchone()[0]
-        open_count = conn.execute(
-            f"SELECT COUNT(*) FROM trades WHERE {_CHANNEL_FILTER} AND status='OPEN'").fetchone()[0]
-        closed = conn.execute(
-            f"SELECT COUNT(*) FROM trades WHERE {_CHANNEL_FILTER} AND status LIKE 'CLOSED%'").fetchone()[0]
-        wins = conn.execute(
-            f"SELECT COUNT(*) FROM trades WHERE {_CHANNEL_FILTER} AND pnl > 0").fetchone()[0]
-        losses = conn.execute(
-            f"SELECT COUNT(*) FROM trades WHERE {_CHANNEL_FILTER} AND pnl IS NOT NULL AND pnl <= 0").fetchone()[0]
-        total_pnl = conn.execute(
-            f"SELECT COALESCE(SUM(pnl),0) FROM trades WHERE {_CHANNEL_FILTER} AND pnl IS NOT NULL").fetchone()[0]
-        best = conn.execute(
-            f"SELECT COALESCE(MAX(pnl),0) FROM trades WHERE {_CHANNEL_FILTER}").fetchone()[0]
-        worst = conn.execute(
-            f"SELECT COALESCE(MIN(pnl),0) FROM trades WHERE {_CHANNEL_FILTER} AND pnl IS NOT NULL").fetchone()[0]
-        avg_pnl = conn.execute(
-            f"SELECT COALESCE(AVG(pnl),0) FROM trades WHERE {_CHANNEL_FILTER} AND pnl IS NOT NULL").fetchone()[0]
+        total = conn.execute(f"SELECT COUNT(*) FROM trades WHERE {cf}").fetchone()[0]
+        open_count = conn.execute(f"SELECT COUNT(*) FROM trades WHERE {cf} AND status='OPEN'").fetchone()[0]
+        closed = conn.execute(f"SELECT COUNT(*) FROM trades WHERE {cf} AND status LIKE 'CLOSED%'").fetchone()[0]
+        wins = conn.execute(f"SELECT COUNT(*) FROM trades WHERE {cf} AND pnl > 0").fetchone()[0]
+        losses = conn.execute(f"SELECT COUNT(*) FROM trades WHERE {cf} AND pnl IS NOT NULL AND pnl <= 0").fetchone()[0]
+        total_pnl = conn.execute(f"SELECT COALESCE(SUM(pnl),0) FROM trades WHERE {cf} AND pnl IS NOT NULL").fetchone()[0]
+        best = conn.execute(f"SELECT COALESCE(MAX(pnl),0) FROM trades WHERE {cf}").fetchone()[0]
+        worst = conn.execute(f"SELECT COALESCE(MIN(pnl),0) FROM trades WHERE {cf} AND pnl IS NOT NULL").fetchone()[0]
+        avg_pnl = conn.execute(f"SELECT COALESCE(AVG(pnl),0) FROM trades WHERE {cf} AND pnl IS NOT NULL").fetchone()[0]
         today_iso = mc.now_ist().date().isoformat()
         today_pnl = conn.execute(
-            f"SELECT COALESCE(SUM(pnl),0) FROM trades WHERE {_CHANNEL_FILTER} "
-            f"AND pnl IS NOT NULL AND ts >= ?", (today_iso,)).fetchone()[0]
-        today_count = conn.execute(
-            f"SELECT COUNT(*) FROM trades WHERE {_CHANNEL_FILTER} AND ts >= ?",
+            f"SELECT COALESCE(SUM(pnl),0) FROM trades WHERE {cf} AND pnl IS NOT NULL AND ts >= ?",
             (today_iso,)).fetchone()[0]
+        today_count = conn.execute(
+            f"SELECT COUNT(*) FROM trades WHERE {cf} AND ts >= ?", (today_iso,)).fetchone()[0]
         total_charges = conn.execute(
-            f"SELECT COALESCE(SUM(charges),0) FROM trades WHERE {_CHANNEL_FILTER} "
-            f"AND charges IS NOT NULL").fetchone()[0]
+            f"SELECT COALESCE(SUM(charges),0) FROM trades WHERE {cf} AND charges IS NOT NULL").fetchone()[0]
         today_charges = conn.execute(
-            f"SELECT COALESCE(SUM(charges),0) FROM trades WHERE {_CHANNEL_FILTER} "
-            f"AND charges IS NOT NULL AND ts >= ?", (today_iso,)).fetchone()[0]
+            f"SELECT COALESCE(SUM(charges),0) FROM trades WHERE {cf} AND charges IS NOT NULL AND ts >= ?",
+            (today_iso,)).fetchone()[0]
         pnl_series = [dict(r) for r in conn.execute(
-            f"SELECT ts, pnl FROM trades WHERE {_CHANNEL_FILTER} AND pnl IS NOT NULL ORDER BY id"
+            f"SELECT ts, pnl FROM trades WHERE {cf} AND pnl IS NOT NULL ORDER BY id"
         ).fetchall()]
         utilized = conn.execute(
-            f"SELECT COALESCE(SUM(price * qty), 0) FROM trades WHERE {_CHANNEL_FILTER} AND status = 'OPEN'"
+            f"SELECT COALESCE(SUM(price * qty), 0) FROM trades WHERE {cf} AND status = 'OPEN'"
         ).fetchone()[0]
 
     capital = 100000
@@ -104,12 +105,13 @@ def api_stats() -> JSONResponse:
 
 
 @app.get("/api/ltp")
-def api_ltp() -> JSONResponse:
+def api_ltp(channel: str = "ch1") -> JSONResponse:
     """Fetch live LTP for all open channel trades that have a broker_key."""
     db.init_db()
+    cf = _ch_filter(channel)
     with db.get_conn() as conn:
         rows = conn.execute(
-            f"SELECT id, broker_key FROM trades WHERE {_CHANNEL_FILTER} "
+            f"SELECT id, broker_key FROM trades WHERE {cf} "
             "AND status = 'OPEN' AND broker_key IS NOT NULL"
         ).fetchall()
     if not rows:
@@ -160,6 +162,15 @@ def index() -> str:
 _PAGE = r"""<!doctype html><html lang=en><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <title>Channel Trades — Trading Buddy</title>
+<style>
+.tabs{display:flex;gap:0;margin-bottom:16px;border-bottom:2px solid var(--bd)}
+.tab{padding:8px 20px;font-size:13px;font-weight:600;cursor:pointer;border:none;
+  background:none;color:var(--mt);border-bottom:2px solid transparent;margin-bottom:-2px;
+  font-family:var(--sn);transition:all .15s}
+.tab:hover{color:var(--tx)}
+.tab.active{color:var(--bl);border-bottom-color:var(--bl)}
+.ch-label{font-size:11px;color:var(--mt);font-weight:400;margin-left:4px}
+</style>
 <style>
 :root{
   --bg:#0b0f14;--sf:#121820;--el:#1a2230;--bd:#232d3d;
@@ -262,6 +273,11 @@ tr:hover td{background:var(--bld)}
   <span class=ts id=ck></span>
 </div>
 
+<div class=tabs>
+  <button class="tab active" onclick="switchCh('ch1')" id="tab-ch1">Channel 1<span class=ch-label>Stock Options</span></button>
+  <button class="tab" onclick="switchCh('ch2')" id="tab-ch2">Channel 2<span class=ch-label>Index Options (3 lots)</span></button>
+</div>
+
 <div class=stats id=ss></div>
 
 <div class=sec>
@@ -283,7 +299,7 @@ tr:hover td{background:var(--bld)}
 </div>
 <script>
 const $=id=>document.getElementById(id);
-let AT=[],CF='all',LTP={};
+let AT=[],CF='all',LTP={},CH='ch1';
 
 function inr(v){if(v==null||isNaN(v))return'-';return(v<0?'-':'')+'₹'+Math.abs(Math.round(v)).toLocaleString('en-IN')}
 function pc(v){return v>0?'pos':v<0?'neg':''}
@@ -358,12 +374,20 @@ function rH(T){
 
 function sF(f){CF=f;rH(AT)}
 
+function switchCh(ch){
+  CH=ch;CF='all';
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  $('tab-'+ch).classList.add('active');
+  load();
+}
+
 async function load(){
   try{
-    const [s,t]=await Promise.all([fetch('/api/stats').then(r=>r.json()),fetch('/api/trades').then(r=>r.json())]);
+    const q='?channel='+CH;
+    const [s,t]=await Promise.all([fetch('/api/stats'+q).then(r=>r.json()),fetch('/api/trades'+q).then(r=>r.json())]);
     AT=t;$('ck').textContent=s.now;$('sd').className='dot on';$('st').textContent='Listener active';
     rS(s);rC(s.pnl_curve);rH(t);
-    try{const ltp=await fetch('/api/ltp').then(r=>r.json());if(!ltp.error)LTP=ltp}catch(e){}
+    try{const ltp=await fetch('/api/ltp'+q).then(r=>r.json());if(!ltp.error)LTP=ltp}catch(e){}
     rO(t);
   }catch(e){$('sd').className='dot off';$('st').textContent='Error: '+e}
 }
