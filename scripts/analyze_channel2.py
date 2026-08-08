@@ -59,9 +59,7 @@ def parse_ch2_signal(text: str) -> dict | None:
 
     upper = clean.upper()
 
-    # Must have BUY/SELL and CE/PE
-    if "BUY" not in upper and "SELL" not in upper:
-        return None
+    # Must have CE/PE (BUY/SELL optional — default BUY)
     if " CE" not in upper and " PE" not in upper:
         return None
 
@@ -95,15 +93,17 @@ def parse_ch2_signal(text: str) -> dict | None:
 
     # Extract symbol: everything between BUY/action and strike
     before_strike = parse_text[:m_opt.start()].strip()
+    # Remove noise prefixes
     before_strike = re.sub(r'^(BUY|SELL)\s+', '', before_strike).strip()
+    before_strike = re.sub(r'^(ZERO\s+TO\s+HERO|STOCK\s+OPTION\s+TRADE|SWING\s+TRADE)\s*', '', before_strike).strip()
     symbol = before_strike.strip()
     if not symbol:
         return None
 
-    # Extract ABOVE/entry price
+    # Extract ABOVE/entry price (also handle "Buy @price" and ranges like "145-150")
     trigger = 0.0
     for line in lines:
-        m_above = re.search(r'ABOVE\s*[:\-]?\s*(\d+(?:\.\d+)?)', line, re.I)
+        m_above = re.search(r'(?:ABOVE|BUY\s*@)\s*[:\-]?\s*(\d+(?:\.\d+)?)', line, re.I)
         if m_above:
             trigger = float(m_above.group(1))
             break
