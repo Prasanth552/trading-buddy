@@ -18,6 +18,7 @@ from src.notify.channel_listener import calc_charges
 IST = ZoneInfo("Asia/Kolkata")
 CHANNEL_ID = -1001547107686
 PROFIT_TARGET = 2000
+LOT_MULTIPLIER = 3
 
 # --- Step 1: Fetch messages from channel ---
 async def fetch_signals():
@@ -267,7 +268,7 @@ async def main():
     ud = UpstoxData()
 
     print("\n" + "=" * 90)
-    print("CHANNEL 2 — INTRADAY SIGNALS (1 lot, ₹2K floor, channel SL+target)")
+    print(f"CHANNEL 2 — INTRADAY SIGNALS ({LOT_MULTIPLIER} lots, ₹2K floor, channel SL+target)")
     print("=" * 90)
 
     total_net = 0
@@ -293,7 +294,7 @@ async def main():
         if entry <= 0:
             continue
 
-        qty = lot_size  # 1 lot
+        qty = lot_size * LOT_MULTIPLIER
         sl = sig["sl"]
         target = sig["targets"][0]
 
