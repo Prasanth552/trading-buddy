@@ -122,7 +122,7 @@ def parse_ch2_signal(text: str) -> dict | None:
     # Extract targets
     targets = []
     for line in lines:
-        m_tgt = re.search(r'(?:TARGET|TGT)\s*[:\-]?\s*([\d\s,/.+]+)', line, re.I)
+        m_tgt = re.search(r'(?:TARGET|TGT)\s*[:\-]?\s*([\d\s,/.+\-]+)', line, re.I)
         if m_tgt:
             raw = m_tgt.group(1)
             nums = re.findall(r'\d+(?:\.\d+)?', raw)

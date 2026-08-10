@@ -539,7 +539,7 @@ def parse_signal_ch2(text: str) -> ParsedSignal | None:
 
     targets: list[float] = []
     for line in lines:
-        m_tgt = re.search(r'(?:TARGET|TGT)\s*[:\-]?\s*([\d\s,/.+]+)', line, re.I)
+        m_tgt = re.search(r'(?:TARGET|TGT)\s*[:\-]?\s*([\d\s,/.+\-]+)', line, re.I)
         if m_tgt:
             raw = m_tgt.group(1)
             nums = re.findall(r'\d+(?:\.\d+)?', raw)
