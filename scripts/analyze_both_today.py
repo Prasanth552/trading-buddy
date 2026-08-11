@@ -19,6 +19,8 @@ CH2_ID = -1001547107686
 async def fetch_signals(client, channel_id, parser, today):
     if channel_id > 0:
         channel_id = int(f"-100{channel_id}")
+    elif not str(channel_id).startswith("-100"):
+        channel_id = int(f"-100{abs(channel_id)}")
     entity = await client.get_entity(channel_id)
     msgs = await client.get_messages(entity, limit=100)
     signals = []
