@@ -350,7 +350,7 @@ def execute_signal(sig: ParsedSignal, *, channel: str = "ch1") -> dict[str, Any]
     lot_key = sig.symbol.replace(" ", "").upper()
     lot_size = config.LOT_SIZES.get(lot_key, master_lot_size)
 
-    lots = 3 if channel == "ch2" else 1
+    lots = 3 if channel in ("ch2", "ch3") else 1
     qty = lots * lot_size
 
     instrument_token = opt.get("instrument_key") or opt.get("instrument_token", "")
@@ -620,7 +620,83 @@ def parse_signal_ch2(text: str) -> ParsedSignal | None:
 
 
 # ---------------------------------------------------------------------------
-# Telegram listener — dual-channel
+# Channel 3 signal parser (free channel — no SL/TGT provided)
+# ---------------------------------------------------------------------------
+def parse_signal_ch3(text: str) -> ParsedSignal | None:
+    """Parse Channel 3 format: SYMBOL STRIKE CE/PE, BUY ABOVE/NEAR price, TGT paid, SL paid.
+
+    No SL or targets from the channel — we set a 30% SL and no target (rely on floor + market close).
+    """
+    text = text.strip()
+    clean = text.replace("**", "")
+    clean = re.sub(r'[^\x00-\x7F]+', ' ', clean).strip()
+    clean = re.sub(r'\s+', ' ', clean)
+
+    if len(clean) < 10:
+        return None
+
+    upper = clean.upper()
+    if "CE" not in upper and "PE" not in upper:
+        return None
+    if "BUY" not in upper:
+        return None
+    if "ABOVE" not in upper and "NEAR" not in upper:
+        return None
+    if "PAID" not in upper:
+        return None
+
+    # Skip CRUDEOIL — different segment/hours
+    if "CRUDEOIL" in upper or "CRUDE" in upper:
+        return None
+
+    parse_text = re.sub(r'[^\w\s.&/-]', ' ', clean).strip()
+    parse_text = re.sub(r'(\d)\s+(\d{3})(?=\s)', r'\1\2', parse_text)
+    parse_text = re.sub(r'\s+', ' ', parse_text).upper()
+    parse_text = re.sub(r'^[#\s]+', '', parse_text)
+
+    m_opt = re.search(r'(\d[\d,]*(?:\.\d+)?)\s+(CE|PE)', parse_text)
+    if not m_opt:
+        return None
+
+    strike = float(m_opt.group(1).replace(",", ""))
+    option_type = m_opt.group(2)
+
+    before_strike = parse_text[:m_opt.start()].strip()
+    before_strike = re.sub(r'^(BUY|SELL)\s+', '', before_strike).strip()
+    symbol = before_strike.strip()
+    if not symbol:
+        return None
+
+    # Extract entry price
+    trigger = 0.0
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    for line in lines:
+        m_entry = re.search(r'(?:ABOVE|NEAR)\s*[:\-]?\s*0?(\d+(?:\.\d+)?)', line, re.I)
+        if m_entry:
+            trigger = float(m_entry.group(1))
+            break
+
+    if trigger <= 0:
+        return None
+
+    # No SL from channel — set 30% below entry as safety net
+    sl = round(trigger * 0.70, 2)
+    # No target — rely on floor + market close exit
+    target = round(trigger * 2.0, 2)
+
+    return ParsedSignal(
+        action="BUY",
+        symbol=symbol,
+        strike=strike,
+        option_type=option_type,
+        trigger_price=trigger,
+        stop_loss=sl,
+        targets=[target],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Telegram listener — tri-channel
 # ---------------------------------------------------------------------------
 def _normalize_channel_id(raw: str) -> int | None:
     """Convert a channel ID string to Telethon's -100-prefixed int format."""
@@ -644,6 +720,7 @@ async def start_listener() -> None:
     phone = os.getenv("TELEGRAM_PHONE", "")
     ch1_id = os.getenv("SIGNAL_CHANNEL_ID", "")
     ch2_id = os.getenv("SIGNAL_CHANNEL2_ID", "")
+    ch3_id = os.getenv("SIGNAL_CHANNEL3_ID", "")
 
     if not all([api_id, api_hash, phone, ch1_id]):
         log.error("Missing env vars: TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_PHONE, SIGNAL_CHANNEL_ID")
@@ -651,9 +728,11 @@ async def start_listener() -> None:
 
     ch1_int = _normalize_channel_id(ch1_id)
     ch2_int = _normalize_channel_id(ch2_id) if ch2_id else None
+    ch3_int = _normalize_channel_id(ch3_id) if ch3_id else None
 
-    listen_channels = [c for c in [ch1_int or ch1_id, ch2_int] if c]
+    listen_channels = [c for c in [ch1_int or ch1_id, ch2_int, ch3_int] if c]
     ch2_ids = {ch2_int} if ch2_int else set()
+    ch3_ids = {ch3_int} if ch3_int else set()
 
     session_path = os.path.join(os.path.dirname(__file__), "..", "..", "data", "telegram_user.session")
     client = TelegramClient(session_path, api_id, api_hash)
@@ -661,7 +740,12 @@ async def start_listener() -> None:
     await client.start(phone=phone)
     me = await client.get_me()
     log.info("Logged in as %s (id=%s)", me.first_name, me.id)
-    _notify(f"Channel listener started as {me.first_name} (ch1 + ch2)")
+    ch_list = "ch1"
+    if ch2_int:
+        ch_list += " + ch2"
+    if ch3_int:
+        ch_list += " + ch3"
+    _notify(f"Channel listener started as {me.first_name} ({ch_list})")
 
     # --- Background position monitor: checks LTP every 5s, auto-closes ---
     _peak_net: dict[int, float] = {}
@@ -731,13 +815,18 @@ async def start_listener() -> None:
             return
 
         chat_id = event.chat_id
-        is_ch2 = chat_id in ch2_ids
-        channel = "ch2" if is_ch2 else "ch1"
-        ch_label = "CH2" if is_ch2 else "CH1"
+        if chat_id in ch3_ids:
+            channel, ch_label = "ch3", "CH3"
+        elif chat_id in ch2_ids:
+            channel, ch_label = "ch2", "CH2"
+        else:
+            channel, ch_label = "ch1", "CH1"
 
         log.info("[%s] Channel message: %s", ch_label, text[:120])
 
-        if is_ch2:
+        if channel == "ch3":
+            sig = parse_signal_ch3(text)
+        elif channel == "ch2":
             sig = parse_signal_ch2(text)
         else:
             sig = parse_signal(text)
@@ -777,7 +866,9 @@ async def start_listener() -> None:
                 try:
                     orig_msg = await client.get_messages(event.chat_id, ids=event.message.reply_to.reply_to_msg_id)
                     if orig_msg and orig_msg.text:
-                        if is_ch2:
+                        if channel == "ch3":
+                            original_sig = parse_signal_ch3(orig_msg.text)
+                        elif channel == "ch2":
                             original_sig = parse_signal_ch2(orig_msg.text)
                         else:
                             original_sig = parse_signal(orig_msg.text)
@@ -796,6 +887,8 @@ async def start_listener() -> None:
     channels_str = f"ch1={ch1_id}"
     if ch2_id:
         channels_str += f", ch2={ch2_id}"
+    if ch3_id:
+        channels_str += f", ch3={ch3_id}"
     log.info("Listening for signals: %s ...", channels_str)
     print(f"Listening for signals: {channels_str} ... (Ctrl-C to stop)")
     await client.run_until_disconnected()

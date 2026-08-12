@@ -28,6 +28,7 @@ _CHANNEL_FILTER_BASE = "(symbol LIKE '% % CE' OR symbol LIKE '% % PE')"
 _CH_FILTERS = {
     "ch1": f"({_CHANNEL_FILTER_BASE} AND (channel IS NULL OR channel = 'ch1'))",
     "ch2": f"({_CHANNEL_FILTER_BASE} AND channel = 'ch2')",
+    "ch3": f"({_CHANNEL_FILTER_BASE} AND channel = 'ch3')",
 }
 
 
@@ -276,6 +277,7 @@ tr:hover td{background:var(--bld)}
 <div class=tabs>
   <button class="tab active" onclick="switchCh('ch1')" id="tab-ch1">Channel 1<span class=ch-label>Stock Options</span></button>
   <button class="tab" onclick="switchCh('ch2')" id="tab-ch2">Channel 2<span class=ch-label>Index Options (3 lots)</span></button>
+  <button class="tab" onclick="switchCh('ch3')" id="tab-ch3">Channel 3<span class=ch-label>Free Signals (3 lots)</span></button>
 </div>
 
 <div class=stats id=ss></div>
