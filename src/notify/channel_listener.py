@@ -83,34 +83,19 @@ PROFIT_TARGET = 2000  # ₹2,000 net profit per trade → auto-close
 # ---------------------------------------------------------------------------
 # Follow-up / exit message classification
 # ---------------------------------------------------------------------------
-_RE_SL_HIT = re.compile(r'^\s*SL\s*$', re.I)
-_RE_BOOK = re.compile(r'BOOK|TRAIL|CLOSE\s+NEAR\s+COST', re.I)
-_RE_PRICE_ACTION = re.compile(r'^\s*(\d+(?:\.\d+)?)\s*,\s*(.+)', re.I)
-_RE_CLOSE_PRICE = re.compile(r'^\s*CLOSE\s+(\d+(?:\.\d+)?)\s*$', re.I)
+_RE_CLOSE_NEAR_COST = re.compile(r'(?:CLOSE|CUT|EXIT)\s+(?:NEAR|AT)\s+COST|COST\s+TO\s+COST', re.I)
 
 
 def _classify_followup(text: str) -> tuple[str, float | None]:
     """Classify exit/follow-up messages.
 
+    Only acts on 'close near cost' type instructions.
     Returns (action, exit_price | None).
-    Actions: "sl_hit", "book", "unknown"
+    Actions: "book" (close near cost), "unknown"
     """
     text = text.strip()
-
-    price_m = _RE_PRICE_ACTION.match(text)
-    if price_m:
-        price = float(price_m.group(1))
-        return "book", price
-
-    close_m = _RE_CLOSE_PRICE.match(text)
-    if close_m:
-        return "book", float(close_m.group(1))
-
-    if _RE_SL_HIT.match(text):
-        return "sl_hit", None
-    if _RE_BOOK.search(text):
+    if _RE_CLOSE_NEAR_COST.search(text):
         return "book", None
-
     return "unknown", None
 
 
@@ -479,6 +464,76 @@ def _close_trade_by_id(trade_id: int, exit_price: float, reason: str) -> None:
         log.error("Failed to close trade %d: %s", trade_id, exc)
 
 
+def _handle_followup(action: str, exit_price: float | None, channel: str, ch_label: str,
+                     original_sig: ParsedSignal | None = None) -> None:
+    """Act on 'close near cost': close the matching open trade at current LTP.
+
+    If original_sig is provided (from a reply-to message), match by symbol.
+    Otherwise fall back to closing the most recent open trade for the channel.
+    """
+    from src.storage import db
+    from src.broker.upstox_data import UpstoxData
+    db.init_db()
+    with db.get_conn() as conn:
+        ch_filter = "(channel IS NULL OR channel = 'ch1')" if channel == "ch1" else "channel = 'ch2'"
+        rows = conn.execute(
+            f"SELECT id, symbol, price, qty, broker_key FROM trades "
+            f"WHERE status = 'OPEN' AND ({ch_filter}) ORDER BY id DESC"
+        ).fetchall()
+
+    if not rows:
+        log.info("[%s] Close-near-cost but no open trades.", ch_label)
+        _notify(f"[{ch_label}] Received close-near-cost but no open trades found.")
+        return
+
+    # Match the specific trade if we parsed the replied-to signal
+    target_trade = None
+    if original_sig:
+        match_sym = f"{original_sig.symbol} {int(original_sig.strike)} {original_sig.option_type}"
+        for trade in rows:
+            if trade["symbol"].upper() == match_sym.upper():
+                target_trade = trade
+                break
+        if not target_trade:
+            log.warning("[%s] Reply-to signal '%s' didn't match any open trade. "
+                        "Open trades: %s", ch_label, match_sym,
+                        [r["symbol"] for r in rows])
+
+    # Fall back to most recent open trade if no match
+    if not target_trade:
+        target_trade = rows[0]
+        log.info("[%s] No reply match, closing most recent open: %s", ch_label, target_trade["symbol"])
+
+    # Get current LTP
+    if exit_price:
+        ltp = exit_price
+    elif target_trade["broker_key"]:
+        try:
+            ud = UpstoxData()
+            ltp_data = ud._get("/v2/market-quote/ltp",
+                               params={"instrument_key": target_trade["broker_key"]}).get("data", {})
+            ltp = None
+            for item in ltp_data.values():
+                ltp = item.get("last_price")
+                break
+            if not ltp:
+                log.warning("[%s] Could not get LTP for %s.", ch_label, target_trade["symbol"])
+                _notify(f"[{ch_label}] Close-near-cost failed: could not get LTP for {target_trade['symbol']}")
+                return
+        except Exception as exc:
+            log.warning("[%s] LTP fetch failed for %s: %s", ch_label, target_trade["symbol"], exc)
+            _notify(f"[{ch_label}] Close-near-cost failed: LTP fetch error")
+            return
+    else:
+        log.warning("[%s] No broker_key for trade %d.", ch_label, target_trade["id"])
+        _notify(f"[{ch_label}] Close-near-cost failed: no broker key for {target_trade['symbol']}")
+        return
+
+    _close_trade_by_id(target_trade["id"], ltp, "channel_exit")
+    log.info("[%s] Close-near-cost: %s at %.2f", ch_label, target_trade["symbol"], ltp)
+    _notify(f"[{ch_label}] Close-near-cost executed: {target_trade['symbol']} at {ltp}")
+
+
 # ---------------------------------------------------------------------------
 # Channel 2 signal parser (NIFTY/SENSEX index options + stock options)
 # ---------------------------------------------------------------------------
@@ -713,7 +768,30 @@ async def start_listener() -> None:
                 log.warning("[%s] Signal not executed: %s", ch_label, result["reason"])
             return
 
-        log.info("[%s] Not an entry signal, skipping.", ch_label)
+        # --- Follow-up: "close near cost" → exit the tagged trade at current LTP ---
+        action, exit_price = _classify_followup(text)
+        if action == "book":
+            # Try to identify which trade by parsing the replied-to message
+            original_sig = None
+            if event.message.reply_to and event.message.reply_to.reply_to_msg_id:
+                try:
+                    orig_msg = await client.get_messages(event.chat_id, ids=event.message.reply_to.reply_to_msg_id)
+                    if orig_msg and orig_msg.text:
+                        if is_ch2:
+                            original_sig = parse_signal_ch2(orig_msg.text)
+                        else:
+                            original_sig = parse_signal(orig_msg.text)
+                        log.info("[%s] Reply-to signal: %s %s %s",
+                                 ch_label, original_sig.symbol if original_sig else "?",
+                                 original_sig.strike if original_sig else "?",
+                                 original_sig.option_type if original_sig else "?")
+                except Exception as exc:
+                    log.warning("[%s] Could not fetch replied-to message: %s", ch_label, exc)
+            log.info("[%s] Close-near-cost instruction detected", ch_label)
+            _handle_followup(action, exit_price, channel, ch_label, original_sig)
+            return
+
+        log.info("[%s] Not an entry signal or follow-up, skipping.", ch_label)
 
     channels_str = f"ch1={ch1_id}"
     if ch2_id:
