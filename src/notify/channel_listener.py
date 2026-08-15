@@ -719,6 +719,7 @@ async def start_listener() -> None:
     api_hash = os.getenv("TELEGRAM_API_HASH", "")
     phone = os.getenv("TELEGRAM_PHONE", "")
     ch1_id = os.getenv("SIGNAL_CHANNEL_ID", "")
+    ch1b_id = os.getenv("SIGNAL_CHANNEL1B_ID", "")
     ch2_id = os.getenv("SIGNAL_CHANNEL2_ID", "")
     ch3_id = os.getenv("SIGNAL_CHANNEL3_ID", "")
 
@@ -727,10 +728,12 @@ async def start_listener() -> None:
         return
 
     ch1_int = _normalize_channel_id(ch1_id)
+    ch1b_int = _normalize_channel_id(ch1b_id) if ch1b_id else None
     ch2_int = _normalize_channel_id(ch2_id) if ch2_id else None
     ch3_int = _normalize_channel_id(ch3_id) if ch3_id else None
 
-    listen_channels = [c for c in [ch1_int or ch1_id, ch2_int, ch3_int] if c]
+    listen_channels = [c for c in [ch1_int or ch1_id, ch1b_int, ch2_int, ch3_int] if c]
+    ch1b_ids = {ch1b_int} if ch1b_int else set()
     ch2_ids = {ch2_int} if ch2_int else set()
     ch3_ids = {ch3_int} if ch3_int else set()
 
@@ -741,6 +744,8 @@ async def start_listener() -> None:
     me = await client.get_me()
     log.info("Logged in as %s (id=%s)", me.first_name, me.id)
     ch_list = "ch1"
+    if ch1b_int:
+        ch_list += " + ch1b"
     if ch2_int:
         ch_list += " + ch2"
     if ch3_int:
@@ -819,6 +824,8 @@ async def start_listener() -> None:
             channel, ch_label = "ch3", "CH3"
         elif chat_id in ch2_ids:
             channel, ch_label = "ch2", "CH2"
+        elif chat_id in ch1b_ids:
+            channel, ch_label = "ch1b", "CH1B"
         else:
             channel, ch_label = "ch1", "CH1"
 
@@ -885,6 +892,8 @@ async def start_listener() -> None:
         log.info("[%s] Not an entry signal or follow-up, skipping.", ch_label)
 
     channels_str = f"ch1={ch1_id}"
+    if ch1b_id:
+        channels_str += f", ch1b={ch1b_id}"
     if ch2_id:
         channels_str += f", ch2={ch2_id}"
     if ch3_id:
