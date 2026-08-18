@@ -258,18 +258,18 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
 .tab .ico{margin-right:3px}
 
 /* Hero P&L card */
-.hero{padding:16px;display:flex;gap:12px;align-items:center}
-.hero-pnl{flex:1}
+.hero{padding:14px 16px;display:flex;gap:10px;align-items:center;overflow:hidden}
+.hero-pnl{flex:1;min-width:0}
 .hero-pnl .label{font-size:10px;color:var(--mt);text-transform:uppercase;letter-spacing:.08em;font-weight:600}
-.hero-pnl .val{font-size:32px;font-weight:800;font-family:var(--mn);font-variant-numeric:tabular-nums;
-  letter-spacing:-.02em;line-height:1.1;margin:2px 0}
-.hero-pnl .sub{font-size:11px;color:var(--mt)}
-.hero-ring{width:72px;height:72px;position:relative;flex-shrink:0}
-.hero-ring canvas{width:100%;height:100%}
+.hero-pnl .val{font-size:28px;font-weight:800;font-family:var(--mn);font-variant-numeric:tabular-nums;
+  letter-spacing:-.02em;line-height:1.1;margin:2px 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hero-pnl .sub{font-size:10px;color:var(--mt);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hero-ring{width:64px;height:64px;position:relative;flex-shrink:0}
+.hero-ring canvas{width:64px;height:64px;display:block}
 .hero-ring .ring-txt{position:absolute;inset:0;display:flex;flex-direction:column;
   align-items:center;justify-content:center;font-family:var(--mn)}
-.hero-ring .ring-pct{font-size:18px;font-weight:800}
-.hero-ring .ring-sub{font-size:8px;color:var(--mt);text-transform:uppercase;letter-spacing:.05em}
+.hero-ring .ring-pct{font-size:16px;font-weight:800}
+.hero-ring .ring-sub{font-size:7px;color:var(--mt);text-transform:uppercase;letter-spacing:.05em}
 
 /* Stat chips row — swipeable */
 .chips{display:flex;gap:8px;padding:0 16px 12px;overflow-x:auto;scrollbar-width:none}
@@ -394,7 +394,7 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
     <div class=sub id=hs></div>
   </div>
   <div class=hero-ring>
-    <canvas id=ring width=144 height=144></canvas>
+    <canvas id=ring width=128 height=128></canvas>
     <div class=ring-txt>
       <div class=ring-pct id=rp>-</div>
       <div class=ring-sub>Win Rate</div>
@@ -467,12 +467,12 @@ function rHero(s){
 
 function rRing(s){
   const c=$('ring'),x=c.getContext('2d'),dp=devicePixelRatio||1;
-  c.width=144*dp;c.height=144*dp;x.scale(dp,dp);
+  c.width=128*dp;c.height=128*dp;x.scale(dp,dp);
   const cs=getComputedStyle(document.documentElement);
   const gn=cs.getPropertyValue('--gn').trim(),rd=cs.getPropertyValue('--rd').trim();
   const bd=cs.getPropertyValue('--bd').trim();
   const wr=s.closed>0?s.wins/s.closed:0;
-  const cx=72,cy=72,r=30,lw=8;
+  const cx=64,cy=64,r=26,lw=7;
   x.beginPath();x.arc(cx,cy,r,0,Math.PI*2);x.strokeStyle=bd;x.lineWidth=lw;x.stroke();
   if(s.closed>0){
     const start=-Math.PI/2,wEnd=start+wr*Math.PI*2;
