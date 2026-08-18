@@ -378,7 +378,6 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
 
 <div class=tabs id=tabbar>
   <button class="tab active" onclick="switchCh('ch1')" id="tab-ch1"><span class=ico>1</span> Paid</button>
-  <button class="tab" onclick="switchCh('ch1b')" id="tab-ch1b"><span class=ico>1B</span> Free</button>
   <button class="tab" onclick="switchCh('ch2')" id="tab-ch2"><span class=ico>2</span> Index</button>
   <button class="tab" onclick="switchCh('ch3')" id="tab-ch3"><span class=ico>3</span> Signals</button>
   <button class="tab" onclick="switchCh('ch5')" id="tab-ch5"><span class=ico>5</span> Scanner</button>
