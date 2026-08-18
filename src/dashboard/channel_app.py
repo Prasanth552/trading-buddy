@@ -30,6 +30,7 @@ _CH_FILTERS = {
     "ch1b": f"({_CHANNEL_FILTER_BASE} AND channel = 'ch1b')",
     "ch2": f"({_CHANNEL_FILTER_BASE} AND channel = 'ch2')",
     "ch3": f"({_CHANNEL_FILTER_BASE} AND channel = 'ch3')",
+    "ch5": f"({_CHANNEL_FILTER_BASE} AND channel = 'ch5')",
 }
 
 
@@ -299,6 +300,7 @@ tr:hover td{background:var(--bld)}
   <button class="tab" onclick="switchCh('ch1b')" id="tab-ch1b">Channel 1B<span class=ch-label>Stock Options (Free)</span></button>
   <button class="tab" onclick="switchCh('ch2')" id="tab-ch2">Channel 2<span class=ch-label>Index Options (3 lots)</span></button>
   <button class="tab" onclick="switchCh('ch3')" id="tab-ch3">Channel 3<span class=ch-label>Free Signals (3 lots)</span></button>
+  <button class="tab" onclick="switchCh('ch5')" id="tab-ch5">Scanner<span class=ch-label>Auto Bot (1 lot)</span></button>
 </div>
 
 <div class=stats id=ss></div>

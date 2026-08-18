@@ -81,6 +81,16 @@ class ParsedSignal:
 PROFIT_TARGET = 2000  # ₹2,000 net profit per trade → auto-close
 
 # ---------------------------------------------------------------------------
+# Scanner (ch5) — auto-execute config
+# ---------------------------------------------------------------------------
+SCANNER_ENABLED = True
+SCANNER_RUN_TIME = "09:20"       # IST — run once after ORB range forms
+SCANNER_MIN_CONFIDENCE = 65      # only execute signals scoring >= this
+SCANNER_MAX_TRADES = 3           # max trades per scanner run
+SCANNER_SL_PCT = 0.30            # 30% of premium as stop-loss
+SCANNER_TARGET_MULT = 2.0        # target = 2x entry premium
+
+# ---------------------------------------------------------------------------
 # Follow-up / exit message classification
 # ---------------------------------------------------------------------------
 _RE_CLOSE_NEAR_COST = re.compile(r'(?:CLOSE|CUT|EXIT)\s+(?:NEAR|AT)\s+COST|COST\s+TO\s+COST', re.I)
@@ -698,6 +708,142 @@ def parse_signal_ch3(text: str) -> ParsedSignal | None:
 
 
 # ---------------------------------------------------------------------------
+# Scanner (ch5) — resolve ATM strike and execute
+# ---------------------------------------------------------------------------
+def _resolve_atm_strike(symbol: str, option_type: str) -> ParsedSignal | None:
+    """Get the stock LTP, find nearest ATM strike, fetch option premium."""
+    from src.broker.upstox_client import UpstoxClient
+    from src.broker.upstox_data import UpstoxData
+
+    try:
+        ud = UpstoxData()
+        uc = UpstoxClient()
+
+        # Step 1: get stock LTP
+        sym_upper = symbol.replace(" ", "").upper()
+        upstox_key = config.UPSTOX_INDEX_KEYS.get(f"NSE:{sym_upper}")
+        if not upstox_key:
+            upstox_key = f"NSE_EQ|{sym_upper}"
+            instruments = uc.load_instruments()
+            for inst in instruments:
+                if inst.get("segment") == "NSE_EQ" and inst.get("trading_symbol", "").upper() == sym_upper:
+                    upstox_key = inst.get("instrument_key", upstox_key)
+                    break
+
+        ltp_data = ud._get("/v2/market-quote/ltp",
+                           params={"instrument_key": upstox_key}).get("data", {})
+        stock_ltp = None
+        for item in ltp_data.values():
+            stock_ltp = item.get("last_price")
+            break
+        if not stock_ltp or stock_ltp <= 0:
+            log.warning("[CH5] Could not get LTP for %s", symbol)
+            return None
+
+        # Step 2: find ATM strike (round to nearest strike step)
+        strike_step = config.OPTION_SPECS.get(f"NSE:{sym_upper}", {}).get("strike_step", 50)
+        atm_strike = round(stock_ltp / strike_step) * strike_step
+
+        # Step 3: resolve the option contract and get its premium
+        opt, lot_size = _resolve_channel_option(uc, symbol, atm_strike, option_type)
+        if opt is None:
+            log.warning("[CH5] Could not resolve %s %s %s", symbol, atm_strike, option_type)
+            return None
+
+        opt_key = opt.get("instrument_key") or opt.get("instrument_token", "")
+        opt_ltp_data = ud._get("/v2/market-quote/ltp",
+                               params={"instrument_key": opt_key}).get("data", {})
+        premium = None
+        for item in opt_ltp_data.values():
+            premium = item.get("last_price")
+            break
+        if not premium or premium <= 0:
+            log.warning("[CH5] Could not get premium for %s %s %s", symbol, atm_strike, option_type)
+            return None
+
+        sl = round(premium * (1 - SCANNER_SL_PCT), 2)
+        target = round(premium * SCANNER_TARGET_MULT, 2)
+
+        log.info("[CH5] ATM resolved: %s LTP=%.2f → strike=%d %s premium=%.2f SL=%.2f TGT=%.2f",
+                 symbol, stock_ltp, atm_strike, option_type, premium, sl, target)
+
+        return ParsedSignal(
+            action="BUY",
+            symbol=symbol,
+            strike=atm_strike,
+            option_type=option_type,
+            trigger_price=premium,
+            stop_loss=sl,
+            targets=[target],
+        )
+    except Exception as exc:
+        log.error("[CH5] ATM resolution failed for %s: %s", symbol, exc)
+        return None
+
+
+async def _run_scanner_once():
+    """Run the market scanner and auto-execute top signals as ch5."""
+    from src.signals.market_scanner import MarketScanner
+
+    log.info("[CH5] Scanner starting...")
+    _notify("*[CH5] Scanner running — scanning for signals...*")
+
+    try:
+        scanner = MarketScanner()
+        signals = scanner.scan()
+    except Exception as exc:
+        log.error("[CH5] Scanner failed: %s", exc)
+        _notify(f"[CH5] Scanner error: {exc}")
+        return
+
+    if not signals:
+        log.info("[CH5] No signals found")
+        _notify("[CH5] No signals found today")
+        return
+
+    qualified = [s for s in signals if s.confidence >= SCANNER_MIN_CONFIDENCE]
+    if not qualified:
+        log.info("[CH5] No signals above confidence threshold (%d)", SCANNER_MIN_CONFIDENCE)
+        _notify(f"[CH5] {len(signals)} signals found but none above {SCANNER_MIN_CONFIDENCE} confidence")
+        return
+
+    top = qualified[:SCANNER_MAX_TRADES]
+    summary_lines = []
+    executed = 0
+
+    for scan_sig in top:
+        log.info("[CH5] Processing: %s %s (confidence=%d, strategy=%s)",
+                 scan_sig.symbol, scan_sig.option_type, scan_sig.confidence, scan_sig.strategy)
+
+        parsed = _resolve_atm_strike(scan_sig.symbol, scan_sig.option_type)
+        if parsed is None:
+            summary_lines.append(f"SKIP {scan_sig.symbol} {scan_sig.option_type} — could not resolve ATM")
+            continue
+
+        result = execute_signal(parsed, channel="ch5", max_lots=1)
+        if result["placed"]:
+            executed += 1
+            reasons_str = "; ".join(scan_sig.reasons[:3])
+            summary_lines.append(
+                f"BUY {result['symbol']} x{result['qty']} @ {result['entry']:.2f} "
+                f"(confidence {scan_sig.confidence}, {scan_sig.strategy})"
+            )
+            _notify(
+                f"*[CH5] Auto-trade placed*\n"
+                f"{result['symbol']} x{result['qty']}\n"
+                f"Entry: {result['entry']} | SL: {result['sl']} | Target: {result['target']}\n"
+                f"Confidence: {scan_sig.confidence}/100 | Strategy: {scan_sig.strategy}\n"
+                f"Reasons: {reasons_str}"
+            )
+        else:
+            summary_lines.append(f"FAIL {scan_sig.symbol} {scan_sig.option_type} — {result['reason']}")
+
+    summary = "\n".join(summary_lines)
+    log.info("[CH5] Scanner done: %d/%d executed\n%s", executed, len(top), summary)
+    _notify(f"*[CH5] Scanner complete: {executed}/{len(top)} trades placed*\n{summary}")
+
+
+# ---------------------------------------------------------------------------
 # Telegram listener — tri-channel
 # ---------------------------------------------------------------------------
 def _normalize_channel_id(raw: str) -> int | None:
@@ -814,6 +960,39 @@ async def start_listener() -> None:
 
     asyncio.get_event_loop().create_task(_monitor_positions())
     log.info("Position monitor started (target=₹%d, check every 5s)", PROFIT_TARGET)
+
+    # --- Scanner (ch5): run once daily at SCANNER_RUN_TIME ---
+    async def _scanner_scheduler():
+        """Wait until SCANNER_RUN_TIME IST each day, then run the scanner."""
+        from zoneinfo import ZoneInfo
+        from datetime import datetime, timedelta
+        IST = ZoneInfo(config.TIMEZONE)
+
+        while True:
+            if not SCANNER_ENABLED:
+                await asyncio.sleep(60)
+                continue
+
+            now = datetime.now(IST)
+            h, m = map(int, SCANNER_RUN_TIME.split(":"))
+            target = now.replace(hour=h, minute=m, second=0, microsecond=0)
+            if now >= target:
+                target += timedelta(days=1)
+
+            wait_secs = (target - now).total_seconds()
+            log.info("[CH5] Next scanner run at %s IST (in %.0f min)",
+                     target.strftime("%Y-%m-%d %H:%M"), wait_secs / 60)
+            await asyncio.sleep(wait_secs)
+
+            # Check if it's a trading day
+            if not mc.is_market_day():
+                log.info("[CH5] Not a trading day, skipping scanner")
+                continue
+
+            await _run_scanner_once()
+
+    asyncio.get_event_loop().create_task(_scanner_scheduler())
+    log.info("Scanner (ch5) scheduler started — runs daily at %s IST", SCANNER_RUN_TIME)
 
     @client.on(events.NewMessage(chats=listen_channels))
     async def on_signal(event):
