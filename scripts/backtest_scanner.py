@@ -30,9 +30,9 @@ import numpy as np
 # Config
 # ---------------------------------------------------------------------------
 BACKTEST_DAYS = 365
-INITIAL_CAPITAL = 100_000
-MAX_TRADES_PER_DAY = 3
-LOTS = 1
+INITIAL_CAPITAL = 200_000
+MAX_TRADES_PER_DAY = 0  # 0 = unlimited
+LOTS = 2
 
 ATM_DELTA = 0.50
 AVG_PREMIUM_PCT = 0.015
@@ -436,7 +436,9 @@ def merge_signals(trades: list[BacktestTrade]) -> list[BacktestTrade]:
         merged.append(best)
 
     merged.sort(key=lambda t: abs(t.move_pct), reverse=True)
-    return merged[:MAX_TRADES_PER_DAY]
+    if MAX_TRADES_PER_DAY > 0:
+        return merged[:MAX_TRADES_PER_DAY]
+    return merged
 
 
 # ---------------------------------------------------------------------------
@@ -446,7 +448,8 @@ def run_backtest():
     print("=" * 70)
     print("SCANNER STRATEGY BACKTESTER — 1 Year")
     print("=" * 70)
-    print(f"Capital: ₹{INITIAL_CAPITAL:,} | Max {MAX_TRADES_PER_DAY} trades/day | "
+    limit_str = "Unlimited" if MAX_TRADES_PER_DAY == 0 else f"Max {MAX_TRADES_PER_DAY}"
+    print(f"Capital: ₹{INITIAL_CAPITAL:,} | {limit_str} trades/day | "
           f"{LOTS} lot(s) | SL: {SL_PCT:.0%} | Target: {TARGET_MULT}x")
     print()
 
