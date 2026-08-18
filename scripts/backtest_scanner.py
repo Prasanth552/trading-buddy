@@ -110,15 +110,16 @@ class DailyResult:
 
 
 # ---------------------------------------------------------------------------
-# Data fetching
+# Data fetching with CSV cache
 # ---------------------------------------------------------------------------
+CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backtest_cache")
+
+
 def build_date_index(df: pd.DataFrame) -> dict[date, int]:
-    """Map each trading date to its integer position in the DataFrame."""
     return {d.date(): i for i, d in enumerate(df.index)}
 
 
 def _yf_fetch(fn, retries=3, delay=5):
-    """Call a yfinance function with retry on rate limits."""
     for attempt in range(retries):
         try:
             return fn()
@@ -132,10 +133,37 @@ def _yf_fetch(fn, retries=3, delay=5):
     return fn()
 
 
+def save_cache(data: dict[str, pd.DataFrame]):
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    for sym, df in data.items():
+        df.to_csv(os.path.join(CACHE_DIR, f"{sym}.csv"))
+    print(f"  Cache saved to {CACHE_DIR}/ ({len(data)} files)")
+
+
+def load_cache() -> dict[str, pd.DataFrame] | None:
+    if not os.path.isdir(CACHE_DIR):
+        return None
+    files = [f for f in os.listdir(CACHE_DIR) if f.endswith(".csv")]
+    if len(files) < 10:
+        return None
+    data = {}
+    for f in files:
+        sym = f.replace(".csv", "")
+        df = pd.read_csv(os.path.join(CACHE_DIR, f), index_col=0, parse_dates=True)
+        if not df.empty:
+            data[sym] = df
+    return data if len(data) > 10 else None
+
+
 def fetch_all_data(days: int) -> tuple[dict[str, pd.DataFrame], dict[str, dict[date, int]]]:
-    """Download historical data and build per-symbol date→index maps."""
+    cached = load_cache()
+    if cached is not None:
+        print(f"Loaded {len(cached)} datasets from cache ({CACHE_DIR}/)")
+        date_maps = {sym: build_date_index(df) for sym, df in cached.items()}
+        return cached, date_maps
+
     period_str = f"{days + 30}d"
-    print(f"Fetching {len(STOCKS)} stocks + Nifty + Brent crude...")
+    print(f"Fetching {len(STOCKS)} stocks + Nifty + Brent crude from Yahoo Finance...")
     data: dict[str, pd.DataFrame] = {}
     date_maps: dict[str, dict[date, int]] = {}
 
@@ -189,7 +217,8 @@ def fetch_all_data(days: int) -> tuple[dict[str, pd.DataFrame], dict[str, dict[d
         except Exception as e:
             print(f"FAILED: {e}")
 
-    print(f"\nTotal: {len(data)} datasets loaded\n")
+    print(f"\nTotal: {len(data)} datasets loaded")
+    save_cache(data)
     return data, date_maps
 
 
