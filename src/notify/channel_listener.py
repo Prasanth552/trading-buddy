@@ -314,7 +314,7 @@ def _resolve_channel_option(
 # ---------------------------------------------------------------------------
 # Trade execution
 # ---------------------------------------------------------------------------
-def execute_signal(sig: ParsedSignal, *, channel: str = "ch1") -> dict[str, Any]:
+def execute_signal(sig: ParsedSignal, *, channel: str = "ch1", max_lots: int | None = None) -> dict[str, Any]:
     """Place an option order through the Upstox broker (paper/sandbox)."""
     from src.broker.upstox_client import UpstoxClient
     from src.storage import db
@@ -351,6 +351,8 @@ def execute_signal(sig: ParsedSignal, *, channel: str = "ch1") -> dict[str, Any]
     lot_size = config.LOT_SIZES.get(lot_key, master_lot_size)
 
     lots = 3 if channel in ("ch2", "ch3") else 1
+    if max_lots is not None:
+        lots = min(lots, max_lots)
     qty = lots * lot_size
 
     instrument_token = opt.get("instrument_key") or opt.get("instrument_token", "")
@@ -843,20 +845,49 @@ async def start_listener() -> None:
                      ch_label, sig.action, sig.symbol, sig.strike, sig.option_type,
                      sig.trigger_price, sig.stop_loss, sig.targets)
 
+            # --- Smart Filter: score the signal before execution ---
+            try:
+                from src.signals.smart_filter import evaluate_signal
+                filt = evaluate_signal(sig.symbol, sig.option_type, channel, sig.trigger_price)
+                log.info("[%s] FILTER: score=%d action=%s reasons=%s",
+                         ch_label, filt.score, filt.action, filt.reasons)
+
+                filter_line = f"Filter: {filt.action} (score {filt.score}/100)"
+                reason_lines = "\n".join(f"  • {r}" for r in filt.reasons[:5])
+
+                if filt.action == "SKIP":
+                    _notify(
+                        f"*[{ch_label}] Signal SKIPPED by smart filter*\n"
+                        f"{sig.action} {sig.symbol} {int(sig.strike)} {sig.option_type}\n"
+                        f"{filter_line}\n{reason_lines}"
+                    )
+                    log.info("[%s] Signal SKIPPED: %s %s (score=%d)",
+                             ch_label, sig.symbol, sig.option_type, filt.score)
+                    return
+            except Exception as exc:
+                log.warning("Smart filter failed, proceeding without filter: %s", exc)
+                filt = None
+                filter_line = "Filter: unavailable"
+                reason_lines = ""
+
             _notify(
                 f"*[{ch_label}] Signal received — executing*\n"
                 f"{sig.action} {sig.symbol} {int(sig.strike)} {sig.option_type}\n"
                 f"Entry ABOVE {sig.trigger_price} | SL: {sig.stop_loss} | "
-                f"Targets: {', '.join(str(t) for t in sig.targets)}"
+                f"Targets: {', '.join(str(t) for t in sig.targets)}\n"
+                f"{filter_line}"
             )
 
-            result = execute_signal(sig, channel=channel)
+            filter_lots = filt.adjusted_lots if filt else None
+            result = execute_signal(sig, channel=channel, max_lots=filter_lots)
             if result["placed"]:
+                size_note = " (reduced)" if filter_lots else ""
                 _notify(
-                    f"*[{ch_label}] Order placed*\n"
+                    f"*[{ch_label}] Order placed{size_note}*\n"
                     f"{result['symbol']} x{result['qty']}\n"
                     f"Entry: {result['entry']} | SL: {result['sl']} | "
-                    f"Target: {result['target']} | Floor: ₹{PROFIT_TARGET}"
+                    f"Target: {result['target']} | Floor: ₹{PROFIT_TARGET}\n"
+                    f"{filter_line}"
                 )
                 log.info("[%s] Order placed: %s", ch_label, result)
             else:

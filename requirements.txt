@@ -21,6 +21,8 @@ pyotp==2.9.0
 fastapi==0.137.2
 uvicorn[standard]==0.49.0
 python-multipart==0.0.20
+# Market data (smart filter + scanner)
+yfinance==0.2.54
 # Config / secrets
 python-dotenv==1.0.1
 # Timezone (stdlib zoneinfo used; tzdata needed on Windows)

@@ -141,6 +141,25 @@ def api_ltp(channel: str = "ch1") -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+@app.get("/api/scan")
+def api_scan() -> JSONResponse:
+    """Run the market scanner and return today's top signals."""
+    try:
+        from src.signals.market_scanner import MarketScanner
+        scanner = MarketScanner()
+        signals = scanner.scan()
+        return JSONResponse([{
+            "symbol": s.symbol,
+            "option_type": s.option_type,
+            "confidence": s.confidence,
+            "strategy": s.strategy,
+            "reasons": s.reasons,
+            "entry_window": s.entry_window,
+        } for s in signals])
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
 @app.post("/api/close/{trade_id}")
 def api_close_trade(trade_id: int) -> JSONResponse:
     db.init_db()
