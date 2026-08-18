@@ -21,6 +21,7 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import time
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -116,6 +117,21 @@ def build_date_index(df: pd.DataFrame) -> dict[date, int]:
     return {d.date(): i for i, d in enumerate(df.index)}
 
 
+def _yf_fetch(fn, retries=3, delay=5):
+    """Call a yfinance function with retry on rate limits."""
+    for attempt in range(retries):
+        try:
+            return fn()
+        except Exception as e:
+            if "RateLimit" in type(e).__name__ or "Too Many Requests" in str(e):
+                wait = delay * (attempt + 1)
+                print(f"  [rate limited, waiting {wait}s]", end=" ", flush=True)
+                time.sleep(wait)
+            else:
+                raise
+    return fn()
+
+
 def fetch_all_data(days: int) -> tuple[dict[str, pd.DataFrame], dict[str, dict[date, int]]]:
     """Download historical data and build per-symbol date→index maps."""
     period_str = f"{days + 30}d"
@@ -124,31 +140,38 @@ def fetch_all_data(days: int) -> tuple[dict[str, pd.DataFrame], dict[str, dict[d
     date_maps: dict[str, dict[date, int]] = {}
 
     print("  Nifty 50...", end=" ", flush=True)
-    nifty = yf.Ticker("^NSEI").history(period=period_str)
-    if not nifty.empty:
+    nifty = _yf_fetch(lambda: yf.Ticker("^NSEI").history(period=period_str))
+    if nifty is not None and not nifty.empty:
         data["NIFTY"] = nifty
         date_maps["NIFTY"] = build_date_index(nifty)
         print(f"{len(nifty)} days")
     else:
         print("FAILED")
 
+    time.sleep(2)
+
     print("  Brent Crude...", end=" ", flush=True)
-    crude = yf.Ticker("BZ=F").history(period=period_str)
-    if not crude.empty:
+    crude = _yf_fetch(lambda: yf.Ticker("BZ=F").history(period=period_str))
+    if crude is not None and not crude.empty:
         data["CRUDE"] = crude
         date_maps["CRUDE"] = build_date_index(crude)
         print(f"{len(crude)} days")
     else:
         print("FAILED")
 
-    batch_size = 10
+    batch_size = 5
     for i in range(0, len(STOCKS), batch_size):
         batch = STOCKS[i:i + batch_size]
         tickers_str = " ".join(s + YFINANCE_SUFFIX for s in batch)
         print(f"  Batch {i // batch_size + 1}: {', '.join(batch)}...", end=" ", flush=True)
+        time.sleep(3)
         try:
-            batch_data = yf.download(tickers_str, period=period_str, group_by="ticker",
-                                     progress=False, threads=True)
+            batch_data = _yf_fetch(lambda: yf.download(
+                tickers_str, period=period_str, group_by="ticker",
+                progress=False, threads=True))
+            if batch_data is None or batch_data.empty:
+                print("EMPTY")
+                continue
             for sym in batch:
                 ticker = sym + YFINANCE_SUFFIX
                 try:
