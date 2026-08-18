@@ -30,9 +30,9 @@ import numpy as np
 # Config
 # ---------------------------------------------------------------------------
 BACKTEST_DAYS = 365
-INITIAL_CAPITAL = 200_000
-MAX_TRADES_PER_DAY = 0  # 0 = unlimited
-LOTS = 2
+INITIAL_CAPITAL = 100_000
+MAX_TRADES_PER_DAY = 3
+LOTS = 1
 
 ATM_DELTA = 0.50
 AVG_PREMIUM_PCT = 0.015
