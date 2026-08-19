@@ -93,6 +93,7 @@ class MarketScanner:
         signals.extend(self._sector_rotation())
         signals.extend(self._fii_flow_momentum())
         signals.extend(self._pre_market_movers())
+        signals.extend(self._intraday_momentum())
 
         # Deduplicate: if multiple strategies pick the same stock, merge and boost
         merged = self._merge_signals(signals)
@@ -287,6 +288,121 @@ class MarketScanner:
 
         except ImportError:
             log.warning("yfinance not installed — gap scan skipped")
+
+        return signals
+
+    # ------------------------------------------------------------------
+    # Strategy 5: Intraday Momentum (early movers)
+    # ------------------------------------------------------------------
+    def _intraday_momentum(self) -> list[ScanSignal]:
+        """Find F&O stocks with strong directional moves in the first 5-15 minutes.
+
+        Checks today's intraday data: stocks moving >1% from open with
+        volume confirmation get flagged. Fires most trading days.
+        """
+        signals = []
+        try:
+            import yfinance as yf
+        except ImportError:
+            log.warning("yfinance not installed — intraday momentum skipped")
+            return signals
+
+        nifty = self._get_nifty_trend()
+        market_bias = nifty.get("change_pct", 0)
+
+        # Scan a focused list of liquid F&O stocks
+        scan_list = [
+            "RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK", "SBIN",
+            "AXISBANK", "KOTAKBANK", "BAJFINANCE", "LT", "BHARTIARTL",
+            "TATAMOTORS", "MARUTI", "M&M", "HINDALCO", "TATASTEEL",
+            "SUNPHARMA", "DRREDDY", "WIPRO", "HCLTECH", "TECHM",
+            "ITC", "HINDUNILVR", "ADANIENT", "NTPC", "TATAPOWER",
+            "DLF", "INDIGO", "CIPLA", "JSWSTEEL",
+        ]
+
+        movers = []
+        for sym in scan_list:
+            try:
+                ticker = yf.Ticker(f"{sym}.NS")
+                hist = ticker.history(period="1d", interval="5m")
+                if hist.empty or len(hist) < 2:
+                    continue
+
+                open_price = hist["Open"].iloc[0]
+                current = hist["Close"].iloc[-1]
+                move_pct = ((current - open_price) / open_price) * 100
+
+                # Volume check: compare first candles' volume to recent average
+                today_vol = hist["Volume"].sum()
+                try:
+                    daily = ticker.history(period="5d", interval="1d")
+                    avg_vol = daily["Volume"].iloc[:-1].mean() if len(daily) > 1 else 0
+                    # Scale: today's partial volume vs full-day average
+                    candles_so_far = len(hist)
+                    expected_candles = 75  # ~6.25 hrs of 5-min candles
+                    vol_ratio = (today_vol / (avg_vol * candles_so_far / expected_candles)) if avg_vol > 0 else 1.0
+                except Exception:
+                    vol_ratio = 1.0
+
+                if abs(move_pct) >= 1.0:
+                    movers.append({
+                        "symbol": sym,
+                        "move_pct": move_pct,
+                        "vol_ratio": vol_ratio,
+                        "current": current,
+                        "open": open_price,
+                    })
+            except Exception:
+                continue
+
+        # Sort by absolute move * volume ratio — strongest movers first
+        movers.sort(key=lambda m: abs(m["move_pct"]) * m["vol_ratio"], reverse=True)
+
+        for m in movers[:5]:
+            move = m["move_pct"]
+            vol_r = m["vol_ratio"]
+            sym = m["symbol"]
+
+            # Direction: ride the momentum
+            opt_type = "CE" if move > 0 else "PE"
+
+            # Confidence scoring — a 1%+ move is already meaningful
+            conf = 55
+            # Move size: +5 per 0.5% beyond 1%
+            conf += min(20, int((abs(move) - 1.0) / 0.5) * 5)
+            # Volume confirmation: high volume = institutional
+            if vol_r > 1.5:
+                conf += 15
+            elif vol_r > 1.2:
+                conf += 10
+            elif vol_r > 0.8:
+                conf += 5
+            # Market alignment: momentum in same direction as market
+            if (move > 0 and market_bias > 0) or (move < 0 and market_bias < 0):
+                conf += 5
+            # Penalize if momentum fights the market hard
+            if (move > 0 and market_bias < -0.5) or (move < 0 and market_bias > 0.5):
+                conf -= 5
+
+            conf = max(30, min(85, conf))
+
+            reasons = [
+                f"{sym} {'surging' if move > 0 else 'dumping'} {move:+.1f}% from open",
+                f"Volume ratio: {vol_r:.1f}x vs average",
+            ]
+            if vol_r > 1.5:
+                reasons.append("High volume — institutional activity")
+            if (move > 0 and market_bias > 0) or (move < 0 and market_bias < 0):
+                reasons.append(f"Aligned with market ({market_bias:+.1f}%)")
+
+            signals.append(ScanSignal(
+                symbol=sym,
+                option_type=opt_type,
+                strategy="intraday_momentum",
+                confidence=conf,
+                reasons=reasons,
+                entry_window="9:20-10:00",
+            ))
 
         return signals
 
