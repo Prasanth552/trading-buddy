@@ -386,18 +386,16 @@ def strategy_fii_momentum(data, date_maps, td):
 
 
 def strategy_intraday_momentum(data, date_maps, td):
-    """Backtest proxy for intraday momentum.
+    """Backtest proxy for strict intraday momentum.
 
-    Realistic simulation: use previous day's open-to-close direction to
-    predict today's early move (yesterday's momentum carries into today).
-    Then evaluate using today's actual OHLC — the trade outcome is based
-    on today's move, not the signal day. This avoids hindsight bias.
+    STRICT: requires >1.5% previous-day signal AND >1.5x volume ratio.
+    Both must be met — matches the tightened live scanner.
     """
     trades = []
     scan_list = [
         "RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK", "SBIN",
         "AXISBANK", "KOTAKBANK", "BAJFINANCE", "LT", "BHARTIARTL",
-        "TATAMOTORS", "MARUTI", "M&M", "HINDALCO", "TATASTEEL",
+        "MARUTI", "M&M", "HINDALCO", "TATASTEEL",
         "SUNPHARMA", "DRREDDY", "WIPRO", "HCLTECH", "TECHM",
         "ITC", "HINDUNILVR", "ADANIENT", "NTPC", "TATAPOWER",
         "INDIGO", "CIPLA", "JSWSTEEL", "VEDL",
@@ -424,28 +422,20 @@ def strategy_intraday_momentum(data, date_maps, td):
         df = data[sym]
         today_open = float(df["Open"].iloc[idx])
         today_close = float(df["Close"].iloc[idx])
-        today_high = float(df["High"].iloc[idx])
-        today_low = float(df["Low"].iloc[idx])
         today_vol = float(df["Volume"].iloc[idx])
 
         if today_open <= 0:
             continue
 
-        # Signal: use previous day's move as the "early momentum" signal
-        # (in live trading, scanner sees first 5-min candle direction)
         prev_open = float(df["Open"].iloc[idx - 1])
         prev_close = float(df["Close"].iloc[idx - 1])
         if prev_open <= 0:
             continue
         prev_move = ((prev_close - prev_open) / prev_open) * 100
-
-        # Also check gap: today's open vs yesterday's close
         gap_pct = ((today_open - prev_close) / prev_close) * 100
-
-        # Combined early signal: previous day momentum + today's gap
         early_signal = prev_move * 0.5 + gap_pct * 0.5
 
-        if abs(early_signal) < 0.8:
+        if abs(early_signal) < 1.0:
             continue
 
         # Volume ratio vs 5-day average
@@ -454,43 +444,32 @@ def strategy_intraday_momentum(data, date_maps, td):
         avg_vol = np.mean(recent_vols) if recent_vols else today_vol
         vol_ratio = today_vol / avg_vol if avg_vol > 0 else 1.0
 
+        if vol_ratio < 1.2:
+            continue
+
         movers.append({
             "symbol": sym,
             "early_signal": early_signal,
             "vol_ratio": vol_ratio,
             "open": today_open,
             "close": today_close,
-            "high": today_high,
-            "low": today_low,
         })
 
     movers.sort(key=lambda m: abs(m["early_signal"]) * m["vol_ratio"], reverse=True)
 
-    for m in movers[:3]:
+    for m in movers[:2]:
         sym = m["symbol"]
         signal = m["early_signal"]
         vol_r = m["vol_ratio"]
         opt_type = "CE" if signal > 0 else "PE"
 
-        # Confidence scoring (mirrors live scanner)
-        conf = 55
-        conf += min(20, int((abs(signal) - 0.8) / 0.5) * 5)
-        if vol_r > 1.5:
-            conf += 15
-        elif vol_r > 1.2:
-            conf += 10
-        elif vol_r > 0.8:
-            conf += 5
+        conf = 65
+        conf += min(15, int((abs(signal) - 1.0) / 0.5) * 5)
+        conf += min(10, int((vol_r - 1.2) / 0.3) * 5)
         if (signal > 0 and market_bias > 0) or (signal < 0 and market_bias < 0):
             conf += 5
-        if (signal > 0 and market_bias < -0.5) or (signal < 0 and market_bias > 0.5):
-            conf -= 5
-        conf = max(30, min(85, conf))
+        conf = min(85, conf)
 
-        if conf < 65:
-            continue
-
-        # Outcome: use today's actual open-to-close move
         actual_move = ((m["close"] - m["open"]) / m["open"]) * 100
 
         premium, exit_prem, pnl, won = simulate_option_trade(
@@ -521,7 +500,7 @@ def strategy_gap_play(data, date_maps, td):
             continue
 
         gap_pct = ((today_open - prev_close) / prev_close) * 100
-        if abs(gap_pct) < 1.5:
+        if abs(gap_pct) < 2.0:
             continue
 
         option_type = "CE" if gap_pct > 0 else "PE"
@@ -548,8 +527,7 @@ def merge_signals(trades: list[BacktestTrade]) -> list[BacktestTrade]:
         by_sym.setdefault(key, []).append(t)
 
     merged = []
-    priority = {"earnings_momentum": 0, "intraday_momentum": 1,
-                "sector_rotation": 2, "fii_momentum": 3, "gap_play": 4}
+    priority = {"earnings_momentum": 0, "gap_play": 1, "intraday_momentum": 2}
     for key, group in by_sym.items():
         group.sort(key=lambda t: priority.get(t.strategy, 99))
         best = group[0]
@@ -595,8 +573,6 @@ def run_backtest():
 
         day_trades: list[BacktestTrade] = []
         day_trades.extend(strategy_earnings_momentum(data, date_maps, td))
-        day_trades.extend(strategy_sector_rotation(data, date_maps, td))
-        day_trades.extend(strategy_fii_momentum(data, date_maps, td))
         day_trades.extend(strategy_gap_play(data, date_maps, td))
         day_trades.extend(strategy_intraday_momentum(data, date_maps, td))
 
