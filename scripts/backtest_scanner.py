@@ -1,4 +1,4 @@
-"""Backtest the scanner strategies over 1 year of historical data.
+"""Backtest the scanner strategies over historical data.
 
 Uses yfinance for stock prices, Nifty, and Brent crude.
 Approximates option P&L using ATM delta (~0.5) on stock moves.
@@ -8,6 +8,7 @@ Strategies:
   2. Sector Rotation — crude oil drives airline/energy/metal plays
   3. FII Flow Momentum — Nifty trend as proxy for FII flow
   4. Pre-market Gap — stocks gapping >1.5%
+  5. Intraday Momentum — stocks moving >1% from open with volume
 
 Run:  python scripts/backtest_scanner.py
 """
@@ -29,7 +30,7 @@ import numpy as np
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-BACKTEST_DAYS = 365
+BACKTEST_DAYS = 90
 INITIAL_CAPITAL = 100_000
 MAX_TRADES_PER_DAY = 3
 LOTS = 1
@@ -384,6 +385,127 @@ def strategy_fii_momentum(data, date_maps, td):
     return trades
 
 
+def strategy_intraday_momentum(data, date_maps, td):
+    """Backtest proxy for intraday momentum.
+
+    Realistic simulation: use previous day's open-to-close direction to
+    predict today's early move (yesterday's momentum carries into today).
+    Then evaluate using today's actual OHLC — the trade outcome is based
+    on today's move, not the signal day. This avoids hindsight bias.
+    """
+    trades = []
+    scan_list = [
+        "RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK", "SBIN",
+        "AXISBANK", "KOTAKBANK", "BAJFINANCE", "LT", "BHARTIARTL",
+        "TATAMOTORS", "MARUTI", "M&M", "HINDALCO", "TATASTEEL",
+        "SUNPHARMA", "DRREDDY", "WIPRO", "HCLTECH", "TECHM",
+        "ITC", "HINDUNILVR", "ADANIENT", "NTPC", "TATAPOWER",
+        "INDIGO", "CIPLA", "JSWSTEEL", "VEDL",
+    ]
+
+    nifty_ohlc = _get_ohlc(data, date_maps, "NIFTY", td)
+    market_bias = 0.0
+    if nifty_ohlc:
+        _, n_open, n_close = nifty_ohlc
+        if n_open > 0:
+            market_bias = ((n_close - n_open) / n_open) * 100
+
+    movers = []
+    for sym in scan_list:
+        if sym not in data:
+            continue
+        dm = date_maps.get(sym)
+        if dm is None:
+            continue
+        idx = dm.get(td)
+        if idx is None or idx < 5:
+            continue
+
+        df = data[sym]
+        today_open = float(df["Open"].iloc[idx])
+        today_close = float(df["Close"].iloc[idx])
+        today_high = float(df["High"].iloc[idx])
+        today_low = float(df["Low"].iloc[idx])
+        today_vol = float(df["Volume"].iloc[idx])
+
+        if today_open <= 0:
+            continue
+
+        # Signal: use previous day's move as the "early momentum" signal
+        # (in live trading, scanner sees first 5-min candle direction)
+        prev_open = float(df["Open"].iloc[idx - 1])
+        prev_close = float(df["Close"].iloc[idx - 1])
+        if prev_open <= 0:
+            continue
+        prev_move = ((prev_close - prev_open) / prev_open) * 100
+
+        # Also check gap: today's open vs yesterday's close
+        gap_pct = ((today_open - prev_close) / prev_close) * 100
+
+        # Combined early signal: previous day momentum + today's gap
+        early_signal = prev_move * 0.5 + gap_pct * 0.5
+
+        if abs(early_signal) < 0.8:
+            continue
+
+        # Volume ratio vs 5-day average
+        recent_vols = [float(df["Volume"].iloc[idx - i]) for i in range(1, 6)
+                       if idx - i >= 0]
+        avg_vol = np.mean(recent_vols) if recent_vols else today_vol
+        vol_ratio = today_vol / avg_vol if avg_vol > 0 else 1.0
+
+        movers.append({
+            "symbol": sym,
+            "early_signal": early_signal,
+            "vol_ratio": vol_ratio,
+            "open": today_open,
+            "close": today_close,
+            "high": today_high,
+            "low": today_low,
+        })
+
+    movers.sort(key=lambda m: abs(m["early_signal"]) * m["vol_ratio"], reverse=True)
+
+    for m in movers[:3]:
+        sym = m["symbol"]
+        signal = m["early_signal"]
+        vol_r = m["vol_ratio"]
+        opt_type = "CE" if signal > 0 else "PE"
+
+        # Confidence scoring (mirrors live scanner)
+        conf = 55
+        conf += min(20, int((abs(signal) - 0.8) / 0.5) * 5)
+        if vol_r > 1.5:
+            conf += 15
+        elif vol_r > 1.2:
+            conf += 10
+        elif vol_r > 0.8:
+            conf += 5
+        if (signal > 0 and market_bias > 0) or (signal < 0 and market_bias < 0):
+            conf += 5
+        if (signal > 0 and market_bias < -0.5) or (signal < 0 and market_bias > 0.5):
+            conf -= 5
+        conf = max(30, min(85, conf))
+
+        if conf < 65:
+            continue
+
+        # Outcome: use today's actual open-to-close move
+        actual_move = ((m["close"] - m["open"]) / m["open"]) * 100
+
+        premium, exit_prem, pnl, won = simulate_option_trade(
+            m["open"], actual_move, opt_type, sym)
+        trades.append(BacktestTrade(
+            date=str(td), symbol=sym, option_type=opt_type,
+            strategy="intraday_momentum", entry_price=round(m["open"], 2),
+            premium=round(premium, 2), exit_premium=round(exit_prem, 2),
+            pnl=round(pnl, 2), lot_size=LOT_SIZES.get(sym, 500),
+            lots=LOTS, won=won, move_pct=round(actual_move, 2),
+        ))
+
+    return trades
+
+
 def strategy_gap_play(data, date_maps, td):
     trades = []
     check_list = ["RELIANCE", "TCS", "INFY", "HDFCBANK", "SBIN",
@@ -426,8 +548,8 @@ def merge_signals(trades: list[BacktestTrade]) -> list[BacktestTrade]:
         by_sym.setdefault(key, []).append(t)
 
     merged = []
-    priority = {"earnings_momentum": 0, "sector_rotation": 1,
-                "fii_momentum": 2, "gap_play": 3}
+    priority = {"earnings_momentum": 0, "intraday_momentum": 1,
+                "sector_rotation": 2, "fii_momentum": 3, "gap_play": 4}
     for key, group in by_sym.items():
         group.sort(key=lambda t: priority.get(t.strategy, 99))
         best = group[0]
@@ -446,7 +568,7 @@ def merge_signals(trades: list[BacktestTrade]) -> list[BacktestTrade]:
 # ---------------------------------------------------------------------------
 def run_backtest():
     print("=" * 70)
-    print("SCANNER STRATEGY BACKTESTER — 1 Year")
+    print(f"SCANNER STRATEGY BACKTESTER — {BACKTEST_DAYS} Days")
     print("=" * 70)
     limit_str = "Unlimited" if MAX_TRADES_PER_DAY == 0 else f"Max {MAX_TRADES_PER_DAY}"
     print(f"Capital: ₹{INITIAL_CAPITAL:,} | {limit_str} trades/day | "
@@ -476,6 +598,7 @@ def run_backtest():
         day_trades.extend(strategy_sector_rotation(data, date_maps, td))
         day_trades.extend(strategy_fii_momentum(data, date_maps, td))
         day_trades.extend(strategy_gap_play(data, date_maps, td))
+        day_trades.extend(strategy_intraday_momentum(data, date_maps, td))
 
         if not day_trades:
             continue
