@@ -79,6 +79,7 @@ class ParsedSignal:
 # Config: profit target per trade
 # ---------------------------------------------------------------------------
 PROFIT_TARGET = 2000  # ₹2,000 net profit per trade → auto-close
+MAX_LOSS_PER_TRADE = 8000  # ₹8,000 hard cap — no trade can lose more than this
 
 # ---------------------------------------------------------------------------
 # Scanner (ch5) — auto-execute config
@@ -983,6 +984,16 @@ async def start_listener() -> None:
                                  trade["symbol"], ltp, trade["stop_price"])
                         _close_trade_by_id(tid, ltp, "sl_hit")
                         _peak_net.pop(tid, None)
+                    elif net_pnl <= -MAX_LOSS_PER_TRADE:
+                        log.warning("MAX LOSS CAP for %s: net_pnl=₹%.0f hit -₹%d cap. Force closing.",
+                                    trade["symbol"], net_pnl, MAX_LOSS_PER_TRADE)
+                        _close_trade_by_id(tid, ltp, "max_loss_cap")
+                        _peak_net.pop(tid, None)
+                        _notify(
+                            f"🛑 *MAX LOSS CAP* — {trade['symbol']}\n"
+                            f"Loss hit ₹{abs(net_pnl):,.0f} (cap: ₹{MAX_LOSS_PER_TRADE:,})\n"
+                            f"Auto-closed to protect capital."
+                        )
                     elif _peak_net[tid] >= PROFIT_TARGET and net_pnl <= PROFIT_TARGET:
                         log.info("FLOOR EXIT for %s: peak_net=%.2f now=%.2f (fell back to ₹%d floor)",
                                  trade["symbol"], _peak_net[tid], net_pnl, PROFIT_TARGET)
@@ -996,7 +1007,8 @@ async def start_listener() -> None:
                     log.warning("Monitor tick error: %s", exc)
 
     asyncio.get_event_loop().create_task(_monitor_positions())
-    log.info("Position monitor started (target=₹%d, check every 5s)", PROFIT_TARGET)
+    log.info("Position monitor started (target=₹%d, max_loss=₹%d, check every 5s)",
+             PROFIT_TARGET, MAX_LOSS_PER_TRADE)
 
     # --- Scanner (ch5): run once daily at SCANNER_RUN_TIME ---
     async def _scanner_scheduler():
