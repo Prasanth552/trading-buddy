@@ -80,6 +80,7 @@ class ParsedSignal:
 # ---------------------------------------------------------------------------
 PROFIT_TARGET = 2000  # ₹2,000 net profit per trade → auto-close
 MAX_LOSS_PER_TRADE = 8000  # ₹8,000 hard cap — no trade can lose more than this
+MAX_DAILY_LOSS = 10000  # ₹10,000 daily loss limit — stop trading after this
 
 # ---------------------------------------------------------------------------
 # Scanner (ch5) — auto-execute config
@@ -325,12 +326,38 @@ def _resolve_channel_option(
 # ---------------------------------------------------------------------------
 # Trade execution
 # ---------------------------------------------------------------------------
+def _todays_realised_pnl() -> float:
+    """Sum of P&L from all closed trades today."""
+    from src.storage import db
+    today = __import__("src.utils.market_calendar", fromlist=["now_ist"]).now_ist().strftime("%Y-%m-%d")
+    with db.get_conn() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(pnl), 0) as total FROM trades "
+            "WHERE status LIKE 'CLOSED%' AND pnl IS NOT NULL AND ts LIKE ?",
+            (f"{today}%",),
+        ).fetchone()
+    return row["total"] if row else 0
+
+
 def execute_signal(sig: ParsedSignal, *, channel: str = "ch1", max_lots: int | None = None, filter_score: int | None = None) -> dict[str, Any]:
     """Place an option order through the Upstox broker (paper/sandbox)."""
     from src.broker.upstox_client import UpstoxClient
     from src.storage import db
 
     db.init_db()
+
+    # Daily loss limit — stop taking new trades if today's losses exceeded cap
+    day_pnl = _todays_realised_pnl()
+    if day_pnl <= -MAX_DAILY_LOSS:
+        log.warning("DAILY LOSS LIMIT: today's P&L is ₹%.0f (limit -₹%d). Skipping new trade.",
+                    day_pnl, MAX_DAILY_LOSS)
+        _notify(
+            f"⛔ *DAILY LOSS LIMIT HIT*\n"
+            f"Today's P&L: ₹{day_pnl:+,.0f} (limit: -₹{MAX_DAILY_LOSS:,})\n"
+            f"Skipping: {sig.symbol} {int(sig.strike)} {sig.option_type}\n"
+            f"No more trades today — protecting capital."
+        )
+        return {"placed": False, "reason": f"Daily loss limit hit: ₹{day_pnl:+,.0f}"}
 
     # Dedup: skip if an OPEN trade with the same symbol already exists
     trade_symbol = f"{sig.symbol} {int(sig.strike)} {sig.option_type}"

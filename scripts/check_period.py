@@ -16,6 +16,7 @@ db.init_db()
 
 days = int(sys.argv[1]) if len(sys.argv) > 1 else 14
 MAX_CAP = 8000
+MAX_DAILY_LOSS = 10000
 
 cutoff = (datetime.now(IST) - timedelta(days=days)).strftime("%Y-%m-%d")
 
@@ -41,57 +42,89 @@ print(f"LAST {days} DAYS — CH1 TRADES (since {cutoff})")
 print(f"{'=' * 70}")
 print()
 
-daily = defaultdict(lambda: {"trades": [], "pnl": 0, "capped_pnl": 0, "count": 0, "wins": 0})
+daily = defaultdict(lambda: {"pnl": 0, "capped_pnl": 0, "protected_pnl": 0,
+                              "count": 0, "wins": 0, "stopped": False})
 total_pnl = 0
 total_capped = 0
+total_protected = 0
 total_wins = 0
 total_count = 0
 capped_count = 0
+daily_stopped_count = 0
 
+# Group trades by date first to simulate daily loss limit
+by_date = defaultdict(list)
 for r in rows:
-    pnl = r["pnl"]
-    won = pnl > 0
-    date = r["ts"][:10]
+    by_date[r["ts"][:10]].append(r)
 
-    capped_pnl = max(pnl, -MAX_CAP)
-    saved = capped_pnl - pnl if pnl < -MAX_CAP else 0
+for date in sorted(by_date.keys()):
+    day_rows = by_date[date]
+    running_day_pnl = 0
+    stopped = False
 
-    total_pnl += pnl
-    total_capped += capped_pnl
-    total_count += 1
-    if won:
-        total_wins += 1
-    if pnl < -MAX_CAP:
-        capped_count += 1
+    for r in day_rows:
+        pnl = r["pnl"]
+        won = pnl > 0
 
-    d = daily[date]
-    d["pnl"] += pnl
-    d["capped_pnl"] += capped_pnl
-    d["count"] += 1
-    if won:
-        d["wins"] += 1
+        capped_pnl = max(pnl, -MAX_CAP)
 
-    icon = "W" if won else "L"
-    cap_tag = f"  ← capped (saved ₹{saved:,.0f})" if saved > 0 else ""
-    print(f"  #{r['id']:<4} {r['symbol']:<28} [{icon}] ₹{pnl:>+8,.0f}{cap_tag}")
+        total_pnl += pnl
+        total_capped += capped_pnl
+        total_count += 1
+        if won:
+            total_wins += 1
+        if pnl < -MAX_CAP:
+            capped_count += 1
+
+        d = daily[date]
+        d["pnl"] += pnl
+        d["capped_pnl"] += capped_pnl
+        d["count"] += 1
+        if won:
+            d["wins"] += 1
+
+        # Simulate daily loss limit
+        if not stopped:
+            d["protected_pnl"] += capped_pnl
+            total_protected += capped_pnl
+            running_day_pnl += capped_pnl
+            if running_day_pnl <= -MAX_DAILY_LOSS:
+                stopped = True
+                d["stopped"] = True
+                daily_stopped_count += 1
+        # else: trade would not have been taken
+
+        icon = "W" if won else "L"
+        tags = []
+        if pnl < -MAX_CAP:
+            tags.append(f"capped (saved ₹{capped_pnl - pnl:,.0f})")
+        if stopped and d["protected_pnl"] != d["capped_pnl"]:
+            pass  # will show STOPPED in daily summary
+        cap_tag = f"  ← {', '.join(tags)}" if tags else ""
+        skip_tag = "  ← WOULD SKIP (daily limit)" if stopped and capped_pnl == pnl and d["protected_pnl"] + pnl != d["protected_pnl"] else ""
+        print(f"  #{r['id']:<4} {r['symbol']:<28} [{icon}] ₹{pnl:>+8,.0f}{cap_tag}")
 
 print()
 print(f"{'─' * 70}")
 print(f"DAILY SUMMARY")
 print(f"{'─' * 70}")
 print()
-print(f"  {'Date':<12} {'Trades':>7} {'WR':>5} {'Actual P&L':>12} {'With ₹8K cap':>12} {'Saved':>10}")
-print(f"  {'─'*12} {'─'*7} {'─'*5} {'─'*12} {'─'*12} {'─'*10}")
+print(f"  {'Date':<12} {'Trades':>7} {'WR':>5} {'Actual':>10} {'Capped':>10} {'Protected':>10} {'Note':>10}")
+print(f"  {'─'*12} {'─'*7} {'─'*5} {'─'*10} {'─'*10} {'─'*10} {'─'*10}")
 
 for date in sorted(daily.keys()):
     d = daily[date]
     wr = d["wins"] / d["count"] * 100 if d["count"] else 0
-    saved = d["capped_pnl"] - d["pnl"]
-    saved_str = f"₹{saved:+,.0f}" if saved != 0 else "—"
+    note = "STOPPED" if d["stopped"] else ""
     print(f"  {date:<12} {d['count']:>7} {wr:>4.0f}% "
-          f"{'₹{:+,}'.format(int(d['pnl'])):>12} "
-          f"{'₹{:+,}'.format(int(d['capped_pnl'])):>12} "
-          f"{saved_str:>10}")
+          f"{'₹{:+,}'.format(int(d['pnl'])):>10} "
+          f"{'₹{:+,}'.format(int(d['capped_pnl'])):>10} "
+          f"{'₹{:+,}'.format(int(d['protected_pnl'])):>10} "
+          f"{note:>10}")
+
+print()
+print(f"  Protected = with ₹{MAX_CAP:,} trade cap + ₹{MAX_DAILY_LOSS:,} daily limit")
+print(f"  STOPPED = daily loss limit would have kicked in")
 
 print()
 print(f"{'=' * 70}")
@@ -103,12 +136,16 @@ print(f"  Trades:          {total_count}")
 print(f"  Win Rate:        {wr:.0f}%")
 print(f"  Actual P&L:      ₹{total_pnl:+,.0f}")
 print(f"  With ₹8K cap:    ₹{total_capped:+,.0f}")
-saved = total_capped - total_pnl
-print(f"  Cap would save:  ₹{saved:+,.0f} ({capped_count} trades capped)")
+print(f"  With cap + daily ₹{MAX_DAILY_LOSS//1000}K limit:  ₹{total_protected:+,.0f}")
 print()
 
-avg_day = total_pnl / len(daily) if daily else 0
-avg_day_capped = total_capped / len(daily) if daily else 0
-print(f"  Avg P&L/day (actual):    ₹{avg_day:+,.0f}")
-print(f"  Avg P&L/day (with cap):  ₹{avg_day_capped:+,.0f}")
+cap_saved = total_capped - total_pnl
+full_saved = total_protected - total_pnl
+print(f"  Trade cap saves:         ₹{cap_saved:+,.0f} ({capped_count} trades capped)")
+print(f"  + Daily limit saves:     ₹{full_saved:+,.0f} ({daily_stopped_count} days stopped)")
+print()
+
+n_days = len(daily) if daily else 1
+print(f"  Avg P&L/day (actual):      ₹{total_pnl / n_days:+,.0f}")
+print(f"  Avg P&L/day (protected):   ₹{total_protected / n_days:+,.0f}")
 print(f"{'=' * 70}")
