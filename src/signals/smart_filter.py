@@ -129,14 +129,20 @@ def get_nifty_trend() -> dict[str, Any]:
                 red_days += 1
             else:
                 break
+        green_days = 0
+        for i in range(len(closes) - 1, 0, -1):
+            if closes[i] > closes[i - 1]:
+                green_days += 1
+            else:
+                break
 
         latest_change = ((closes[-1] - closes[-2]) / closes[-2]) * 100 if len(closes) >= 2 else 0
-        result = {"consecutive_red": red_days, "change_pct": round(latest_change, 2)}
+        result = {"consecutive_red": red_days, "consecutive_green": green_days, "change_pct": round(latest_change, 2)}
         _set_cache("nifty_trend", result)
         return result
     except Exception as e:
         log.warning("Nifty trend fetch failed: %s", e)
-        return {"consecutive_red": 0, "change_pct": 0}
+        return {"consecutive_red": 0, "consecutive_green": 0, "change_pct": 0}
 
 
 def get_crude_change() -> float:
@@ -348,11 +354,32 @@ def evaluate_signal(
     nifty = get_nifty_trend()
     red_days = nifty["consecutive_red"]
     if red_days >= 3:
-        score -= 25
-        reasons.append(f"Market red {red_days} consecutive days — strong skip (-25)")
+        if option_type == "PE":
+            score += 10
+            reasons.append(f"Market red {red_days} days + PE trade — momentum aligned (+10)")
+        else:
+            score -= 25
+            reasons.append(f"Market red {red_days} days + CE trade — strong skip (-25)")
     elif red_days >= 2:
-        score -= 15
-        reasons.append(f"Market red {red_days} consecutive days — caution (-15)")
+        if option_type == "PE":
+            score += 5
+            reasons.append(f"Market red {red_days} days + PE trade — direction aligned (+5)")
+        else:
+            score -= 15
+            reasons.append(f"Market red {red_days} days + CE trade — caution (-15)")
+
+    green_days = nifty.get("consecutive_green", 0)
+    if green_days >= 3:
+        if option_type == "CE":
+            score += 10
+            reasons.append(f"Market green {green_days} days + CE trade — momentum aligned (+10)")
+        else:
+            score -= 15
+            reasons.append(f"Market green {green_days} days + PE trade — against trend (-15)")
+    elif green_days >= 2:
+        if option_type == "CE":
+            score += 5
+            reasons.append(f"Market green {green_days} days + CE trade — direction aligned (+5)")
 
     # ------ 7. Sector trend alignment ------
     if sector != "UNKNOWN":
