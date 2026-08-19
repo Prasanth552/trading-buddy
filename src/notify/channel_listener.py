@@ -784,15 +784,23 @@ def _resolve_atm_strike(symbol: str, option_type: str) -> ParsedSignal | None:
 async def _run_scanner_once():
     """Run the market scanner and auto-execute top signals as ch5."""
     from src.signals.market_scanner import MarketScanner
+    from src.broker.upstox_data import load_cached_token
 
     log.info("[CH5] Scanner starting...")
+
+    token = load_cached_token()
+    if not token:
+        log.error("[CH5] No valid Upstox token — scanner cannot resolve ATM strikes")
+        _notify("*[CH5] Scanner SKIPPED* — No Upstox token for today. Cannot resolve option strikes.")
+        return
+
     _notify("*[CH5] Scanner running — scanning for signals...*")
 
     try:
         scanner = MarketScanner()
         signals = scanner.scan()
     except Exception as exc:
-        log.error("[CH5] Scanner failed: %s", exc)
+        log.error("[CH5] Scanner failed: %s", exc, exc_info=True)
         _notify(f"[CH5] Scanner error: {exc}")
         return
 
@@ -903,8 +911,11 @@ async def start_listener() -> None:
     # --- Background position monitor: checks LTP every 5s, auto-closes ---
     _peak_net: dict[int, float] = {}
 
+    _monitor_fail_count = 0
+
     async def _monitor_positions():
         """Periodically check open positions and auto-close on target/SL/floor."""
+        nonlocal _monitor_fail_count
         from src.storage import db
         while True:
             await asyncio.sleep(5)
@@ -919,10 +930,31 @@ async def start_listener() -> None:
                     continue
 
                 keys = {r["broker_key"]: r for r in rows}
-                from src.broker.upstox_data import UpstoxData
-                ud = UpstoxData()
+                from src.broker.upstox_data import UpstoxData, load_cached_token
+                token = load_cached_token()
+                if not token:
+                    if _monitor_fail_count % 360 == 0:
+                        log.error("SL MONITOR: No valid Upstox token for today! "
+                                  "SL/target checks DISABLED until token is refreshed. "
+                                  "%d open trades unprotected.", len(rows))
+                        _notify("*SL MONITOR DOWN* — No Upstox token for today. "
+                                f"{len(rows)} open trades have NO SL protection! "
+                                "Refresh token ASAP.")
+                    _monitor_fail_count += 1
+                    continue
+
+                ud = UpstoxData(access_token=token)
                 ltp_data = ud._get("/v2/market-quote/ltp",
                                    params={"instrument_key": ",".join(keys)}).get("data", {})
+
+                if not ltp_data:
+                    if _monitor_fail_count % 60 == 0:
+                        log.warning("SL MONITOR: LTP API returned empty data for %d trades — "
+                                    "token may be expired or API down", len(rows))
+                    _monitor_fail_count += 1
+                    continue
+
+                _monitor_fail_count = 0
 
                 for item in ltp_data.values():
                     ikey = item.get("instrument_token", "")
@@ -956,7 +988,11 @@ async def start_listener() -> None:
                         _close_trade_by_id(tid, ltp, "profit_floor")
                         _peak_net.pop(tid, None)
             except Exception as exc:  # noqa: BLE001
-                log.debug("Monitor tick error: %s", exc)
+                _monitor_fail_count += 1
+                if _monitor_fail_count % 60 == 0:
+                    log.error("Monitor tick error (repeated %dx): %s", _monitor_fail_count, exc)
+                else:
+                    log.warning("Monitor tick error: %s", exc)
 
     asyncio.get_event_loop().create_task(_monitor_positions())
     log.info("Position monitor started (target=₹%d, check every 5s)", PROFIT_TARGET)
