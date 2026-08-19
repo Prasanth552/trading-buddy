@@ -324,7 +324,7 @@ def _resolve_channel_option(
 # ---------------------------------------------------------------------------
 # Trade execution
 # ---------------------------------------------------------------------------
-def execute_signal(sig: ParsedSignal, *, channel: str = "ch1", max_lots: int | None = None) -> dict[str, Any]:
+def execute_signal(sig: ParsedSignal, *, channel: str = "ch1", max_lots: int | None = None, filter_score: int | None = None) -> dict[str, Any]:
     """Place an option order through the Upstox broker (paper/sandbox)."""
     from src.broker.upstox_client import UpstoxClient
     from src.storage import db
@@ -400,6 +400,7 @@ def execute_signal(sig: ParsedSignal, *, channel: str = "ch1", max_lots: int | N
         "pnl": None,
         "exit_price": None,
         "channel": channel,
+        "filter_score": filter_score,
     }
 
     try:
@@ -1060,45 +1061,38 @@ async def start_listener() -> None:
                      ch_label, sig.action, sig.symbol, sig.strike, sig.option_type,
                      sig.trigger_price, sig.stop_loss, sig.targets)
 
-            # --- Smart Filter: score the signal before execution ---
+            # --- Smart Filter: score signal (always execute, save score for comparison) ---
+            filt = None
+            filter_score = None
             try:
                 from src.signals.smart_filter import evaluate_signal
                 filt = evaluate_signal(sig.symbol, sig.option_type, channel, sig.trigger_price)
+                filter_score = filt.score
                 log.info("[%s] FILTER: score=%d action=%s reasons=%s",
                          ch_label, filt.score, filt.action, filt.reasons)
-
-                filter_line = f"Filter: {filt.action} (score {filt.score}/100)"
-                reason_lines = "\n".join(f"  • {r}" for r in filt.reasons[:5])
-
-                if filt.action == "SKIP":
-                    _notify(
-                        f"*[{ch_label}] Signal SKIPPED by smart filter*\n"
-                        f"{sig.action} {sig.symbol} {int(sig.strike)} {sig.option_type}\n"
-                        f"{filter_line}\n{reason_lines}"
-                    )
-                    log.info("[%s] Signal SKIPPED: %s %s (score=%d)",
-                             ch_label, sig.symbol, sig.option_type, filt.score)
-                    return
             except Exception as exc:
-                log.warning("Smart filter failed, proceeding without filter: %s", exc)
-                filt = None
-                filter_line = "Filter: unavailable"
-                reason_lines = ""
+                log.warning("Smart filter failed: %s", exc)
+
+            filter_line = f"Filter: {filt.action} (score {filt.score}/100)" if filt else "Filter: unavailable"
+            reason_lines = "\n".join(f"  • {r}" for r in filt.reasons[:5]) if filt else ""
+            filter_tag = ""
+            if filt and filt.action == "SKIP":
+                filter_tag = " (filter: SKIP)"
+            elif filt and filt.action == "REDUCE":
+                filter_tag = " (filter: REDUCE)"
 
             _notify(
-                f"*[{ch_label}] Signal received — executing*\n"
+                f"*[{ch_label}] Signal received — executing{filter_tag}*\n"
                 f"{sig.action} {sig.symbol} {int(sig.strike)} {sig.option_type}\n"
                 f"Entry ABOVE {sig.trigger_price} | SL: {sig.stop_loss} | "
                 f"Targets: {', '.join(str(t) for t in sig.targets)}\n"
-                f"{filter_line}"
+                f"{filter_line}\n{reason_lines}"
             )
 
-            filter_lots = filt.adjusted_lots if filt else None
-            result = execute_signal(sig, channel=channel, max_lots=filter_lots)
+            result = execute_signal(sig, channel=channel, filter_score=filter_score)
             if result["placed"]:
-                size_note = " (reduced)" if filter_lots else ""
                 _notify(
-                    f"*[{ch_label}] Order placed{size_note}*\n"
+                    f"*[{ch_label}] Order placed*\n"
                     f"{result['symbol']} x{result['qty']}\n"
                     f"Entry: {result['entry']} | SL: {result['sl']} | "
                     f"Target: {result['target']} | Floor: ₹{PROFIT_TARGET}\n"

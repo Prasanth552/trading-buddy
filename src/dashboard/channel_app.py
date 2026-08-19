@@ -31,6 +31,7 @@ _CH_FILTERS = {
     "ch2": f"({_CHANNEL_FILTER_BASE} AND channel = 'ch2')",
     "ch3": f"({_CHANNEL_FILTER_BASE} AND channel = 'ch3')",
     "ch5": f"({_CHANNEL_FILTER_BASE} AND channel = 'ch5')",
+    "ch1f": f"({_CHANNEL_FILTER_BASE} AND (channel IS NULL OR channel = 'ch1') AND filter_score >= 50)",
 }
 
 
@@ -374,6 +375,7 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
 
 <div class=tabs id=tabbar>
   <button class="tab active" onclick="switchCh('ch1')" id="tab-ch1"><span class=ico>1</span> Paid</button>
+  <button class="tab" onclick="switchCh('ch1f')" id="tab-ch1f"><span class=ico>F</span> Filtered</button>
   <button class="tab" onclick="switchCh('ch2')" id="tab-ch2"><span class=ico>2</span> Index</button>
   <button class="tab" onclick="switchCh('ch3')" id="tab-ch3"><span class=ico>3</span> Signals</button>
   <button class="tab" onclick="switchCh('ch5')" id="tab-ch5"><span class=ico>5</span> Scanner</button>

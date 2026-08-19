@@ -128,6 +128,8 @@ def init_db() -> None:
             conn.execute("ALTER TABLE trades ADD COLUMN charges REAL")
         if "channel" not in cols:
             conn.execute("ALTER TABLE trades ADD COLUMN channel TEXT DEFAULT 'ch1'")
+        if "filter_score" not in cols:
+            conn.execute("ALTER TABLE trades ADD COLUMN filter_score INTEGER")
         # Trade-journal context (JSON) on the signal: the conditions at decision time.
         sig_cols = {r[1] for r in conn.execute("PRAGMA table_info(signals)")}
         if "context" not in sig_cols:
@@ -229,10 +231,11 @@ def insert_trade(trade: dict[str, Any]) -> int:
             """INSERT INTO trades
                (signal_id, ts, symbol, side, qty, price, order_id, mode, status,
                 exit_price, pnl, stop_price, target_price, broker_key, is_hedge,
-                expiry, index_entry, channel)
+                expiry, index_entry, channel, filter_score)
                VALUES (:signal_id, :ts, :symbol, :side, :qty, :price, :order_id,
                        :mode, :status, :exit_price, :pnl, :stop_price, :target_price,
-                       :broker_key, :is_hedge, :expiry, :index_entry, :channel)""",
+                       :broker_key, :is_hedge, :expiry, :index_entry, :channel,
+                       :filter_score)""",
             {**{k: trade.get(k) for k in
                 ("signal_id", "ts", "symbol", "side", "qty", "price", "order_id",
                  "mode", "status", "exit_price", "pnl", "stop_price", "target_price",
@@ -240,7 +243,8 @@ def insert_trade(trade: dict[str, Any]) -> int:
              "is_hedge": trade.get("is_hedge", 0),
              "expiry": trade.get("expiry"),
              "index_entry": trade.get("index_entry"),
-             "channel": trade.get("channel", "ch1")},
+             "channel": trade.get("channel", "ch1"),
+             "filter_score": trade.get("filter_score")},
         )
         return cur.lastrowid
 
