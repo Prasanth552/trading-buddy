@@ -55,74 +55,107 @@ def avg_pnl(trades):
     return sum(t["pnl"] for t in trades) / len(trades)
 
 
+def avg_win_pnl(trades):
+    winners = [t["pnl"] for t in trades if t["pnl"] > 0]
+    return sum(winners) / len(winners) if winners else 0
+
+
+def worst_loss(trades):
+    losers = [t["pnl"] for t in trades if t["pnl"] <= 0]
+    return min(losers) if losers else 0
+
+
+def recent_streak(trades, n=3):
+    if len(trades) < n:
+        return "mixed"
+    recent = sorted(trades, key=lambda t: t["ts"], reverse=True)[:n]
+    if all(t["won"] for t in recent):
+        return "winning"
+    if all(not t["won"] for t in recent):
+        return "losing"
+    return "mixed"
+
+
+def expectancy(trades):
+    if len(trades) < 5:
+        return None
+    wr = win_rate(trades)
+    if wr is None:
+        return None
+    aw = avg_win_pnl(trades)
+    losers = [t["pnl"] for t in trades if t["pnl"] <= 0]
+    al = sum(losers) / len(losers) if losers else 0
+    return (wr * aw) + ((1 - wr) * al)
+
+
 def score_with_journal(stock, opt_type, hour, weekday, journal):
-    """Score a trade using only the journal (past trades). No live data."""
+    """Risk-focused scoring. Heavier penalties than boosts — asymmetric."""
     score = 50
     reasons = []
 
-    # 1. STOCK TRACK RECORD
     stock_trades = [t for t in journal if t["stock"] == stock]
     stock_same = [t for t in stock_trades if t["opt_type"] == opt_type]
 
-    if len(stock_same) >= 3:
-        wr = win_rate(stock_same)
-        avg = avg_pnl(stock_same)
-        if wr is not None:
-            if wr >= 0.65:
-                bonus = min(20, int((wr - 0.5) * 60))
-                score += bonus
-                reasons.append(f"{stock} {opt_type}: {wr:.0%} WR ({len(stock_same)}t) +{bonus}")
-            elif wr <= 0.35:
-                penalty = min(20, int((0.5 - wr) * 60))
-                score -= penalty
-                reasons.append(f"{stock} {opt_type}: {wr:.0%} WR ({len(stock_same)}t) -{penalty}")
+    # 1. RECENT STREAK (biggest risk signal)
+    if len(stock_same) >= 2:
+        streak = recent_streak(stock_same, n=min(3, len(stock_same)))
+        if streak == "losing":
+            n = min(3, len(stock_same))
+            score -= 20
+            reasons.append(f"{stock} {opt_type}: last {n} ALL lost (-20)")
+        elif streak == "winning":
+            score += 5
+    elif len(stock_trades) >= 2:
+        streak = recent_streak(stock_trades, n=min(3, len(stock_trades)))
+        if streak == "losing":
+            score -= 15
 
-            if avg > 500:
-                score += 5
-            elif avg < -500:
-                score -= 5
+    # 2. LOSS MAGNITUDE — blowup history
+    if len(stock_same) >= 3:
+        worst = worst_loss(stock_same)
+        aw = avg_win_pnl(stock_same)
+        if worst < -15000:
+            score -= 15
+            reasons.append(f"{stock} {opt_type}: ₹{abs(worst):,.0f} blowup in history (-15)")
+        elif worst < -8000 and aw > 0 and abs(worst) > aw * 3:
+            score -= 10
+            reasons.append(f"{stock}: worst loss {abs(worst)/aw:.0f}x avg win (-10)")
     elif len(stock_trades) >= 3:
-        wr = win_rate(stock_trades)
+        worst = worst_loss(stock_trades)
+        if worst < -15000:
+            score -= 12
+
+    # 3. EXPECTANCY
+    if len(stock_same) >= 5:
+        exp = expectancy(stock_same)
+        if exp is not None:
+            if exp < -500:
+                score -= 15
+                reasons.append(f"{stock}: negative expectancy ₹{exp:+,.0f}/trade (-15)")
+            elif exp < 0:
+                score -= 5
+            elif exp > 2000:
+                score += 10
+            elif exp > 500:
+                score += 5
+
+    # 4. STOCK WIN RATE (mild)
+    if len(stock_same) >= 5:
+        wr = win_rate(stock_same)
         if wr is not None:
-            if wr >= 0.60:
+            if wr >= 0.70:
                 score += 8
             elif wr <= 0.35:
-                score -= 8
-
-    # 2. OPTION TYPE OVERALL
-    type_trades = [t for t in journal if t["opt_type"] == opt_type]
-    if len(type_trades) >= 10:
-        wr = win_rate(type_trades)
-        if wr is not None:
-            if wr >= 0.55:
-                score += 5
-            elif wr <= 0.40:
-                score -= 5
-
-    # 3. TIME OF DAY
-    hour_trades = [t for t in journal if t["hour"] == hour]
-    if len(hour_trades) >= 5:
-        wr = win_rate(hour_trades)
-        if wr is not None:
-            if wr >= 0.60:
-                score += 10
-            elif wr <= 0.35:
                 score -= 10
-    else:
-        if hour == 9:
-            score += 5
-        elif hour >= 14:
-            score -= 3
 
-    # 4. DAY OF WEEK
-    day_trades = [t for t in journal if t["weekday"] == weekday]
-    if len(day_trades) >= 5:
-        wr = win_rate(day_trades)
-        if wr is not None:
-            if wr >= 0.60:
-                score += 5
-            elif wr <= 0.35:
-                score -= 5
+    # 5. OVERALL RECENT LOSING STREAK
+    if len(journal) >= 5:
+        recent_5 = sorted(journal, key=lambda t: t["ts"], reverse=True)[:5]
+        if all(not t["won"] for t in recent_5):
+            score -= 15
+            reasons.append("Last 5 trades ALL lost (-15)")
+        elif sum(1 for t in recent_5 if not t["won"]) >= 4:
+            score -= 8
 
     return score, reasons
 
@@ -146,17 +179,16 @@ if not rows:
     sys.exit()
 
 print("=" * 80)
-print("WALK-FORWARD TEST — Adaptive Filter")
+print("WALK-FORWARD TEST v2 — Risk-Focused Filter")
 print("=" * 80)
 print(f"Total closed CH1 trades: {len(rows)}")
 print()
 print("Rules: at each trade, filter only sees trades that closed BEFORE it.")
-print("No future peeking. Exactly how it would run live.")
+print("Focus: detect RISK (streaks, blowups, bad expectancy) not just win rate.")
 print("=" * 80)
 print()
 
-# Build the walk-forward
-journal = []  # grows as we process each trade
+journal = []
 all_pnl = 0
 filtered_pnl = 0
 all_count = 0
@@ -167,10 +199,11 @@ skipped_losers = 0
 skipped_winners = 0
 skipped_losers_pnl = 0
 skipped_winners_pnl = 0
+reduced_count = 0
+reduced_saved = 0
 
 daily = defaultdict(lambda: {"all_pnl": 0, "filt_pnl": 0, "all_count": 0, "filt_count": 0})
 
-# First N trades go into "training" — filter needs some history
 MIN_JOURNAL = 10
 
 for i, row in enumerate(rows):
@@ -191,7 +224,6 @@ for i, row in enumerate(rows):
     daily[trade_date]["all_count"] += 1
 
     if i < MIN_JOURNAL:
-        # Training phase — take all trades, add to journal
         filtered_pnl += pnl
         filt_count += 1
         if won:
@@ -201,11 +233,10 @@ for i, row in enumerate(rows):
         tag = "TRAIN"
         score = 50
     else:
-        # Test phase — score using only past journal
         score, reasons = score_with_journal(stock, opt_type, hour, weekday, journal)
-        would_take = score >= 50
 
-        if would_take:
+        if score >= 50:
+            # TAKE — full size
             filtered_pnl += pnl
             filt_count += 1
             if won:
@@ -213,7 +244,21 @@ for i, row in enumerate(rows):
             daily[trade_date]["filt_pnl"] += pnl
             daily[trade_date]["filt_count"] += 1
             tag = "TAKE"
+        elif score >= 30:
+            # REDUCE — half size (simulate by counting half P&L)
+            half_pnl = pnl / 2
+            filtered_pnl += half_pnl
+            filt_count += 1
+            if won:
+                filt_wins += 1
+            daily[trade_date]["filt_pnl"] += half_pnl
+            daily[trade_date]["filt_count"] += 1
+            reduced_count += 1
+            if pnl < 0:
+                reduced_saved += abs(pnl) / 2
+            tag = "REDUCE"
         else:
+            # SKIP
             tag = "SKIP"
             if won:
                 skipped_winners += 1
@@ -222,7 +267,6 @@ for i, row in enumerate(rows):
                 skipped_losers += 1
                 skipped_losers_pnl += abs(pnl)
 
-    # Add this trade to journal for future trades to learn from
     journal.append({
         "stock": stock,
         "opt_type": opt_type,
@@ -235,8 +279,13 @@ for i, row in enumerate(rows):
 
     icon = "W" if won else "L"
     pnl_str = f"₹{pnl:+,.0f}"
+    extra = ""
+    if tag == "SKIP" and not won:
+        extra = f"  ← saved ₹{abs(pnl):,.0f}"
+    elif tag == "REDUCE" and not won:
+        extra = f"  ← halved loss"
     print(f"  #{row['id']:<4} {row['symbol']:<25} [{icon}] {pnl_str:>10}  "
-          f"score={score:>3}  {tag}")
+          f"score={score:>3}  {tag}{extra}")
 
 # ---------------------------------------------------------------------------
 # Daily breakdown
@@ -282,23 +331,27 @@ print()
 edge = filtered_pnl - all_pnl
 print(f"  Filter edge: ₹{edge:+,.0f}")
 print()
-print(f"  Correctly skipped losers:  {skipped_losers} trades (saved ₹{skipped_losers_pnl:,.0f})")
-print(f"  Wrongly skipped winners:   {skipped_winners} trades (missed ₹{skipped_winners_pnl:,.0f})")
-
+print(f"  SKIP decisions:")
+print(f"    Correctly skipped losers:  {skipped_losers} trades (saved ₹{skipped_losers_pnl:,.0f})")
+print(f"    Wrongly skipped winners:   {skipped_winners} trades (missed ₹{skipped_winners_pnl:,.0f})")
 if skipped_losers + skipped_winners > 0:
     skip_accuracy = skipped_losers / (skipped_losers + skipped_winners) * 100
-    print(f"  Skip accuracy:             {skip_accuracy:.0f}% (of skipped trades, how many were actual losers)")
+    print(f"    Skip accuracy:             {skip_accuracy:.0f}%")
+print()
+print(f"  REDUCE decisions:")
+print(f"    Trades at half size:       {reduced_count}")
+print(f"    Saved by halving losses:   ₹{reduced_saved:,.0f}")
 
 print()
 if edge > 0:
-    print(f"  VERDICT: Filter HELPS — saves ₹{edge:,.0f} by learning from past trades")
+    print(f"  VERDICT: Filter SAVES ₹{edge:,.0f}")
+    print(f"  How: skipping {skipped_losers} bad trades + halving {reduced_count} risky ones")
 elif edge < 0:
-    print(f"  VERDICT: Filter HURTS — costs ₹{abs(edge):,.0f} (skipping too many winners)")
+    print(f"  VERDICT: Filter COSTS ₹{abs(edge):,.0f}")
 else:
     print(f"  VERDICT: No difference")
 
 print()
-print("  Note: This test uses ONLY journal-based learning (stock track record,")
-print("  time/day patterns). Live market factors (FII, crude, sector trend)")
-print("  would add more signal in real-time but can't be backtested here.")
+print("  Note: REDUCE simulates half position size (P&L ÷ 2).")
+print("  Live market factors (FII, crude, sector) add more signal in real-time.")
 print("=" * 80)

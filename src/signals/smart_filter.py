@@ -1,14 +1,19 @@
-"""Adaptive smart filter — learns from your own trade journal.
+"""Adaptive smart filter — thinks like a trader, not a programmer.
 
-Instead of rigid if-else rules, this filter thinks like an experienced trader:
-  1. Checks YOUR past results for this stock + option type → stock track record
-  2. Checks how similar setups (same sector, same market condition) performed
-  3. Uses live market context (FII flow, crude, sector trend) as soft modifiers
-  4. Adapts every day as new closed trades flow into the journal
+The walk-forward test on 247 trades showed: 62% win rate but -₹46K P&L.
+Problem isn't WHICH trades to take — it's risk control. 8 monster losses
+(₹-30K to ₹-58K each) wiped out 153 winning trades.
 
-The only hardcoded rule: earnings-day trades get a boost (universally high WR).
-Everything else is learned from data. When data is thin (<5 similar trades),
-falls back to neutral bias — doesn't penalize what it hasn't seen enough of.
+This filter focuses on RISK, not just selection:
+  1. Recent streak — last 2-3 trades on this stock lost? Reduce or skip
+  2. Loss magnitude — stock's worst loss vs avg win (risk-reward ratio)
+  3. Stock track record — but weighted toward RECENT performance
+  4. Expectancy — avg win × WR vs avg loss × loss rate
+  5. Live market context — soft modifiers, never blanket rules
+  6. Sizing output — TAKE (full), REDUCE (half), SKIP (don't touch)
+
+Philosophy: don't try to predict winners (62% WR is already good).
+Instead, protect against the trades that can blow up your account.
 """
 from __future__ import annotations
 
@@ -143,7 +148,6 @@ def _get_trade_journal(lookback_days: int = 30) -> list[dict]:
 
 
 def _win_rate(trades: list[dict]) -> float | None:
-    """Win rate from a list of trade dicts. None if too few trades."""
     if len(trades) < 3:
         return None
     wins = sum(1 for t in trades if t["won"])
@@ -154,6 +158,45 @@ def _avg_pnl(trades: list[dict]) -> float:
     if not trades:
         return 0
     return sum(t["pnl"] for t in trades) / len(trades)
+
+
+def _avg_win(trades: list[dict]) -> float:
+    winners = [t["pnl"] for t in trades if t["pnl"] > 0]
+    return sum(winners) / len(winners) if winners else 0
+
+
+def _avg_loss(trades: list[dict]) -> float:
+    losers = [t["pnl"] for t in trades if t["pnl"] <= 0]
+    return sum(losers) / len(losers) if losers else 0
+
+
+def _worst_loss(trades: list[dict]) -> float:
+    losers = [t["pnl"] for t in trades if t["pnl"] <= 0]
+    return min(losers) if losers else 0
+
+
+def _recent_streak(trades: list[dict], n: int = 3) -> str:
+    """Check the last N trades: 'winning', 'losing', or 'mixed'."""
+    if len(trades) < n:
+        return "mixed"
+    recent = sorted(trades, key=lambda t: t["ts"], reverse=True)[:n]
+    if all(t["won"] for t in recent):
+        return "winning"
+    if all(not t["won"] for t in recent):
+        return "losing"
+    return "mixed"
+
+
+def _expectancy(trades: list[dict]) -> float | None:
+    """Expected value per trade: (WR × avg_win) + (LR × avg_loss)."""
+    if len(trades) < 5:
+        return None
+    wr = _win_rate(trades)
+    if wr is None:
+        return None
+    aw = _avg_win(trades)
+    al = _avg_loss(trades)
+    return (wr * aw) + ((1 - wr) * al)
 
 
 # ---------------------------------------------------------------------------
@@ -319,7 +362,7 @@ def get_sector_index_trend(sector: str) -> float:
 
 
 # ---------------------------------------------------------------------------
-# ADAPTIVE FILTER — learns from your trade journal
+# RISK-FOCUSED FILTER — protect against blowups, not just pick winners
 # ---------------------------------------------------------------------------
 def evaluate_signal(
     symbol: str,
@@ -327,210 +370,171 @@ def evaluate_signal(
     channel: str = "ch1",
     trigger_price: float = 0,
 ) -> FilterResult:
-    """Score using trade history + live market context.
+    """Score a signal based on risk analysis from trade journal.
 
-    Scoring layers (each contributes to the final score):
-      1. Stock track record — how this specific stock performed in your trades
-      2. Option-type track record — CE vs PE overall win rate
-      3. Time pattern — what time of day works best in YOUR data
-      4. Day pattern — which weekdays work in YOUR data
-      5. Earnings catalyst — universally strong (hardcoded boost)
-      6. Sector + crude alignment — soft modifier from market data
-      7. FII flow — extreme selling is a real warning
-      8. Market trend context — soft, not a blanket penalty
+    Starts at 50 (neutral). Unlike v1 which only boosted, this version
+    applies meaningful PENALTIES for risk signals. The goal is not to
+    predict winners (62% WR is fine) but to avoid the ₹30K-60K blowups.
+
+    Risk layers (penalties are heavier than boosts — asymmetric by design):
+      1. Recent losing streak on this stock → strong penalty
+      2. Stock has history of outsized losses → penalty
+      3. Negative expectancy on this stock → penalty
+      4. Overall stock track record → mild boost/penalty
+      5. Recent overall losing streak (last 5 trades all lost) → penalty
+      6. Earnings catalyst → boost
+      7. Live market context → soft modifiers
     """
     now = datetime.now(IST)
     score = 50
     reasons: list[str] = []
 
-    journal = _get_trade_journal(lookback_days=30)
+    journal = _get_trade_journal(lookback_days=45)
     sym_clean = symbol.replace(" ", "").upper()
     stock_name = _extract_stock(sym_clean)
     sector = _get_sector(sym_clean)
 
-    # ------ 1. STOCK TRACK RECORD (most important) ------
     stock_trades = [t for t in journal if t["stock"] == stock_name]
-    stock_same_type = [t for t in stock_trades if t["opt_type"] == option_type]
+    stock_same = [t for t in stock_trades if t["opt_type"] == option_type]
 
-    if len(stock_same_type) >= 3:
-        wr = _win_rate(stock_same_type)
-        avg = _avg_pnl(stock_same_type)
-        if wr >= 0.65:
-            bonus = min(20, int((wr - 0.5) * 60))
-            score += bonus
-            reasons.append(f"{stock_name} {option_type}: {wr:.0%} WR over {len(stock_same_type)} trades (+{bonus})")
-        elif wr <= 0.35:
-            penalty = min(20, int((0.5 - wr) * 60))
-            score -= penalty
-            reasons.append(f"{stock_name} {option_type}: {wr:.0%} WR over {len(stock_same_type)} trades (-{penalty})")
-        else:
-            reasons.append(f"{stock_name} {option_type}: {wr:.0%} WR over {len(stock_same_type)} trades (neutral)")
-
-        if avg > 500:
+    # ------ 1. RECENT STREAK on this stock (most important risk signal) ------
+    if len(stock_same) >= 2:
+        streak = _recent_streak(stock_same, n=min(3, len(stock_same)))
+        if streak == "losing":
+            n = min(3, len(stock_same))
+            score -= 20
+            reasons.append(f"{stock_name} {option_type}: last {n} trades ALL lost — losing streak (-20)")
+        elif streak == "winning":
             score += 5
-            reasons.append(f"Avg P&L ₹{avg:+,.0f} per trade — profitable stock")
-        elif avg < -500:
-            score -= 5
-            reasons.append(f"Avg P&L ₹{avg:+,.0f} per trade — losing stock")
+            reasons.append(f"{stock_name} {option_type}: on a winning streak (+5)")
+    elif len(stock_trades) >= 2:
+        streak = _recent_streak(stock_trades, n=min(3, len(stock_trades)))
+        if streak == "losing":
+            score -= 15
+            reasons.append(f"{stock_name}: last trades ALL lost — caution (-15)")
+
+    # ------ 2. LOSS MAGNITUDE — has this stock blown up before? ------
+    if len(stock_same) >= 3:
+        worst = _worst_loss(stock_same)
+        aw = _avg_win(stock_same)
+        if worst < -15000:
+            score -= 15
+            reasons.append(f"{stock_name} {option_type}: has a ₹{abs(worst):,.0f} blowup in history (-15)")
+        elif worst < -8000 and aw > 0 and abs(worst) > aw * 3:
+            score -= 10
+            reasons.append(f"{stock_name} {option_type}: worst loss ₹{abs(worst):,.0f} is {abs(worst)/aw:.0f}x avg win — risky (-10)")
     elif len(stock_trades) >= 3:
-        wr = _win_rate(stock_trades)
-        if wr is not None:
-            if wr >= 0.60:
-                score += 8
-                reasons.append(f"{stock_name} overall: {wr:.0%} WR ({len(stock_trades)} trades) (+8)")
-            elif wr <= 0.35:
-                score -= 8
-                reasons.append(f"{stock_name} overall: {wr:.0%} WR ({len(stock_trades)} trades) (-8)")
-    else:
-        reasons.append(f"{stock_name}: <3 past trades — no track record yet")
+        worst = _worst_loss(stock_trades)
+        if worst < -15000:
+            score -= 12
+            reasons.append(f"{stock_name}: has a ₹{abs(worst):,.0f} blowup — careful (-12)")
 
-    # ------ 2. OPTION TYPE TRACK RECORD (CE vs PE overall) ------
-    type_trades = [t for t in journal if t["opt_type"] == option_type]
-    if len(type_trades) >= 10:
-        wr = _win_rate(type_trades)
-        if wr >= 0.55:
-            score += 5
-            reasons.append(f"{option_type} trades overall: {wr:.0%} WR ({len(type_trades)} trades)")
-        elif wr <= 0.40:
-            score -= 5
-            reasons.append(f"{option_type} trades weak: {wr:.0%} WR ({len(type_trades)} trades)")
-
-    # ------ 3. TIME OF DAY (learned from your trades) ------
-    current_hour = now.hour
-    hour_trades = [t for t in journal if t["hour"] == current_hour]
-    if len(hour_trades) >= 5:
-        wr = _win_rate(hour_trades)
-        if wr is not None:
-            if wr >= 0.60:
+    # ------ 3. EXPECTANCY — is trading this stock actually profitable? ------
+    if len(stock_same) >= 5:
+        exp = _expectancy(stock_same)
+        if exp is not None:
+            if exp < -500:
+                score -= 15
+                reasons.append(f"{stock_name} {option_type}: negative expectancy ₹{exp:+,.0f}/trade — losing setup (-15)")
+            elif exp < 0:
+                score -= 5
+                reasons.append(f"{stock_name} {option_type}: weak expectancy ₹{exp:+,.0f}/trade (-5)")
+            elif exp > 2000:
                 score += 10
-                reasons.append(f"{current_hour}:xx trades: {wr:.0%} WR — your strong hour (+10)")
+                reasons.append(f"{stock_name} {option_type}: strong expectancy ₹{exp:+,.0f}/trade (+10)")
+            elif exp > 500:
+                score += 5
+                reasons.append(f"{stock_name} {option_type}: positive expectancy ₹{exp:+,.0f}/trade (+5)")
+
+    # ------ 4. STOCK WIN RATE — mild factor, not dominant ------
+    if len(stock_same) >= 5:
+        wr = _win_rate(stock_same)
+        if wr is not None:
+            if wr >= 0.70:
+                score += 8
+                reasons.append(f"{stock_name} {option_type}: {wr:.0%} WR ({len(stock_same)} trades) (+8)")
             elif wr <= 0.35:
                 score -= 10
-                reasons.append(f"{current_hour}:xx trades: {wr:.0%} WR — your weak hour (-10)")
-    else:
-        if current_hour == 9:
-            score += 5
-            reasons.append("Opening hour — generally active (+5)")
-        elif current_hour >= 14:
-            score -= 3
-            reasons.append("Late session — less edge (-3)")
+                reasons.append(f"{stock_name} {option_type}: {wr:.0%} WR ({len(stock_same)} trades) (-10)")
+    elif len(stock_same) == 0 and len(stock_trades) == 0:
+        reasons.append(f"{stock_name}: first time trading — no history")
 
-    # ------ 4. DAY OF WEEK (learned from your trades) ------
-    weekday = now.weekday()
-    day_trades = [t for t in journal if t["weekday"] == weekday]
-    day_names = ["Mon", "Tue", "Wed", "Thu", "Fri"]
-    if len(day_trades) >= 5:
-        wr = _win_rate(day_trades)
-        if wr is not None:
-            if wr >= 0.60:
-                score += 5
-                reasons.append(f"{day_names[weekday]}: {wr:.0%} WR — your strong day (+5)")
-            elif wr <= 0.35:
-                score -= 5
-                reasons.append(f"{day_names[weekday]}: {wr:.0%} WR — your weak day (-5)")
-    # no fallback needed — day of week alone isn't a strong signal
+    # ------ 5. OVERALL RECENT LOSING STREAK ------
+    if len(journal) >= 5:
+        recent_5 = sorted(journal, key=lambda t: t["ts"], reverse=True)[:5]
+        if all(not t["won"] for t in recent_5):
+            score -= 15
+            reasons.append("Last 5 trades overall ALL lost — bad day, reduce risk (-15)")
+        elif sum(1 for t in recent_5 if not t["won"]) >= 4:
+            score -= 8
+            reasons.append("4 of last 5 trades lost — tough stretch (-8)")
 
-    # ------ 5. EARNINGS CATALYST (universal edge, always keep) ------
+    # ------ 6. EARNINGS CATALYST ------
     if check_earnings_today(sym_clean):
-        score += 20
-        reasons.append(f"{stock_name} has earnings today — strong catalyst (+20)")
+        score += 15
+        reasons.append(f"{stock_name} has earnings today — catalyst (+15)")
 
-    # ------ 6. SECTOR + CRUDE (soft modifiers, not blanket rules) ------
+    # ------ 7. MARKET CONTEXT (soft, never dominant) ------
     crude_chg = get_crude_change()
-
     if sector == "METAL" and crude_chg > 2 and option_type == "CE":
-        score -= 10
-        reasons.append(f"Metal CE + crude up {crude_chg:.1f}% — headwind (-10)")
-    elif sector == "AIRLINE" and crude_chg < -2 and option_type == "CE":
-        score += 8
-        reasons.append(f"Airline CE + crude down {crude_chg:.1f}% — tailwind (+8)")
+        score -= 5
+        reasons.append(f"Metal CE + crude up {crude_chg:.1f}% — headwind (-5)")
     elif sector == "AIRLINE" and crude_chg > 2 and option_type == "CE":
-        score -= 8
-        reasons.append(f"Airline CE + crude up {crude_chg:.1f}% — headwind (-8)")
-    elif sector == "ENERGY" and crude_chg > 2 and option_type == "CE":
+        score -= 5
+        reasons.append(f"Airline CE + crude up {crude_chg:.1f}% — headwind (-5)")
+    elif sector == "AIRLINE" and crude_chg < -2 and option_type == "CE":
         score += 5
-        reasons.append(f"Energy CE + crude up {crude_chg:.1f}% — aligned (+5)")
+        reasons.append(f"Airline CE + crude down — tailwind (+5)")
 
     if sector != "UNKNOWN":
         sector_chg = get_sector_index_trend(sector)
         if abs(sector_chg) > 1.5:
-            if (option_type == "CE" and sector_chg > 1.5) or (option_type == "PE" and sector_chg < -1.5):
-                score += 8
-                reasons.append(f"{sector} {sector_chg:+.1f}% — {option_type} aligned with sector (+8)")
-            elif (option_type == "CE" and sector_chg < -1.5) or (option_type == "PE" and sector_chg > 1.5):
-                score -= 8
-                reasons.append(f"{sector} {sector_chg:+.1f}% — {option_type} against sector (-8)")
+            if (option_type == "CE" and sector_chg < -1.5) or (option_type == "PE" and sector_chg > 1.5):
+                score -= 5
+                reasons.append(f"{sector} {sector_chg:+.1f}% — {option_type} against sector (-5)")
 
-    # ------ 7. FII FLOW (only extreme levels matter) ------
     flows = get_fii_dii_flow()
     fii = flows["fii"]
-    if fii < -500:
-        if option_type == "CE":
-            score -= 12
-            reasons.append(f"FII heavy selling ₹{fii:.0f}cr + CE — caution (-12)")
-        else:
-            score += 5
-            reasons.append(f"FII heavy selling ₹{fii:.0f}cr + PE — aligned (+5)")
-    elif fii > 500:
-        if option_type == "CE":
-            score += 5
-            reasons.append(f"FII buying ₹{fii:.0f}cr + CE — flow support (+5)")
+    if fii < -500 and option_type == "CE":
+        score -= 8
+        reasons.append(f"FII heavy selling ₹{fii:.0f}cr + CE — risk-off (-8)")
 
-    # ------ 8. MARKET TREND (soft context, NOT blanket penalty) ------
     nifty = get_nifty_trend()
     red_days = nifty.get("consecutive_red", 0)
     green_days = nifty.get("consecutive_green", 0)
-    mkt_chg = nifty.get("change_pct", 0)
 
-    if red_days >= 3:
-        if option_type == "PE":
-            score += 8
-            reasons.append(f"Market red {red_days} days + PE — trend aligned (+8)")
-        elif option_type == "CE":
-            # DON'T blanket-skip CE in red markets — check if this stock
-            # has a track record of winning CE trades regardless
-            ce_in_red = len(stock_same_type) >= 3 and option_type == "CE"
-            stock_wr = _win_rate(stock_same_type) if ce_in_red else None
-            if stock_wr and stock_wr >= 0.55:
-                score -= 3
-                reasons.append(f"Market red {red_days}d but {stock_name} CE WR {stock_wr:.0%} — mild caution only (-3)")
-            else:
-                score -= 10
-                reasons.append(f"Market red {red_days} days + CE — caution (-10)")
-    elif green_days >= 3:
-        if option_type == "CE":
-            score += 5
-            reasons.append(f"Market green {green_days} days + CE — momentum (+5)")
-        elif option_type == "PE":
-            score -= 5
-            reasons.append(f"Market green {green_days} days + PE — against trend (-5)")
+    if red_days >= 3 and option_type == "CE":
+        score -= 5
+        reasons.append(f"Market red {red_days} days + CE — mild headwind (-5)")
+    elif red_days >= 3 and option_type == "PE":
+        score += 5
+        reasons.append(f"Market red {red_days} days + PE — aligned (+5)")
 
-    # ------ 9. SECTOR PEER PERFORMANCE (learned) ------
-    if sector != "UNKNOWN" and len(stock_same_type) < 3:
+    # ------ 8. SECTOR PEER RISK (when no stock history) ------
+    if len(stock_same) < 3 and sector != "UNKNOWN":
         sector_trades = [t for t in journal
                          if _get_sector(t["stock"]) == sector
                          and t["opt_type"] == option_type]
         if len(sector_trades) >= 5:
-            wr = _win_rate(sector_trades)
-            if wr is not None:
-                if wr >= 0.60:
-                    score += 5
-                    reasons.append(f"{sector} {option_type} peers: {wr:.0%} WR — sector doing well (+5)")
-                elif wr <= 0.35:
-                    score -= 5
-                    reasons.append(f"{sector} {option_type} peers: {wr:.0%} WR — sector struggling (-5)")
+            s_exp = _expectancy(sector_trades)
+            if s_exp is not None and s_exp < -500:
+                score -= 8
+                reasons.append(f"{sector} {option_type} peers: negative expectancy — sector struggling (-8)")
+            s_worst = _worst_loss(sector_trades)
+            if s_worst < -20000:
+                score -= 5
+                reasons.append(f"{sector} peers had ₹{abs(s_worst):,.0f} blowup — sector risky (-5)")
 
     # ------ Decision ------
     if score >= TAKE_THRESHOLD:
         action = "TAKE"
-    elif score < SKIP_THRESHOLD:
-        action = "SKIP"
-    else:
+        adjusted_lots = None
+    elif score >= SKIP_THRESHOLD:
         action = "REDUCE"
-
-    adjusted_lots = None
-    if action == "REDUCE":
         adjusted_lots = 1
+    else:
+        action = "SKIP"
+        adjusted_lots = None
 
     result = FilterResult(
         score=score, action=action, reasons=reasons, adjusted_lots=adjusted_lots,
