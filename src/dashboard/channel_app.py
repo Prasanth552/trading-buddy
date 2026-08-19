@@ -58,50 +58,46 @@ def api_trades(channel: str = "ch1") -> JSONResponse:
 def api_stats(channel: str = "ch1") -> JSONResponse:
     db.init_db()
     cf = _ch_filter(channel)
+    today_iso = mc.now_ist().date().isoformat()
     with db.get_conn() as conn:
-        total = conn.execute(f"SELECT COUNT(*) FROM trades WHERE {cf}").fetchone()[0]
-        open_count = conn.execute(f"SELECT COUNT(*) FROM trades WHERE {cf} AND status='OPEN'").fetchone()[0]
-        closed = conn.execute(f"SELECT COUNT(*) FROM trades WHERE {cf} AND status LIKE 'CLOSED%'").fetchone()[0]
-        wins = conn.execute(f"SELECT COUNT(*) FROM trades WHERE {cf} AND pnl > 0").fetchone()[0]
-        losses = conn.execute(f"SELECT COUNT(*) FROM trades WHERE {cf} AND pnl IS NOT NULL AND pnl <= 0").fetchone()[0]
-        total_pnl = conn.execute(f"SELECT COALESCE(SUM(pnl),0) FROM trades WHERE {cf} AND pnl IS NOT NULL").fetchone()[0]
-        best = conn.execute(f"SELECT COALESCE(MAX(pnl),0) FROM trades WHERE {cf}").fetchone()[0]
-        worst = conn.execute(f"SELECT COALESCE(MIN(pnl),0) FROM trades WHERE {cf} AND pnl IS NOT NULL").fetchone()[0]
-        avg_pnl = conn.execute(f"SELECT COALESCE(AVG(pnl),0) FROM trades WHERE {cf} AND pnl IS NOT NULL").fetchone()[0]
-        today_iso = mc.now_ist().date().isoformat()
-        today_pnl = conn.execute(
-            f"SELECT COALESCE(SUM(pnl),0) FROM trades WHERE {cf} AND pnl IS NOT NULL AND ts >= ?",
-            (today_iso,)).fetchone()[0]
-        today_count = conn.execute(
-            f"SELECT COUNT(*) FROM trades WHERE {cf} AND ts >= ?", (today_iso,)).fetchone()[0]
-        total_charges = conn.execute(
-            f"SELECT COALESCE(SUM(charges),0) FROM trades WHERE {cf} AND charges IS NOT NULL").fetchone()[0]
-        today_charges = conn.execute(
-            f"SELECT COALESCE(SUM(charges),0) FROM trades WHERE {cf} AND charges IS NOT NULL AND ts >= ?",
-            (today_iso,)).fetchone()[0]
+        row = conn.execute(f"""SELECT
+            COUNT(*) AS total,
+            SUM(CASE WHEN status='OPEN' THEN 1 ELSE 0 END) AS open_count,
+            SUM(CASE WHEN status LIKE 'CLOSED%' THEN 1 ELSE 0 END) AS closed,
+            SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins,
+            SUM(CASE WHEN pnl IS NOT NULL AND pnl <= 0 THEN 1 ELSE 0 END) AS losses,
+            COALESCE(SUM(CASE WHEN pnl IS NOT NULL THEN pnl END),0) AS total_pnl,
+            COALESCE(MAX(pnl),0) AS best,
+            COALESCE(MIN(CASE WHEN pnl IS NOT NULL THEN pnl END),0) AS worst,
+            COALESCE(AVG(CASE WHEN pnl IS NOT NULL THEN pnl END),0) AS avg_pnl,
+            COALESCE(SUM(CASE WHEN pnl IS NOT NULL AND ts >= '{today_iso}' THEN pnl END),0) AS today_pnl,
+            SUM(CASE WHEN ts >= '{today_iso}' THEN 1 ELSE 0 END) AS today_count,
+            COALESCE(SUM(CASE WHEN charges IS NOT NULL THEN charges END),0) AS total_charges,
+            COALESCE(SUM(CASE WHEN charges IS NOT NULL AND ts >= '{today_iso}' THEN charges END),0) AS today_charges,
+            COALESCE(SUM(CASE WHEN status='OPEN' THEN price * qty END),0) AS utilized
+        FROM trades WHERE {cf}""").fetchone()
+        s = dict(row)
         pnl_series = [dict(r) for r in conn.execute(
             f"SELECT ts, pnl FROM trades WHERE {cf} AND pnl IS NOT NULL ORDER BY id"
         ).fetchall()]
-        utilized = conn.execute(
-            f"SELECT COALESCE(SUM(price * qty), 0) FROM trades WHERE {cf} AND status = 'OPEN'"
-        ).fetchone()[0]
 
-    capital = 100000
+    closed = s["closed"] or 0
+    wins = s["wins"] or 0
     win_rate = (wins / closed * 100) if closed > 0 else 0
     cumulative = []
     running = 0
-    for row in pnl_series:
-        running += row["pnl"]
-        cumulative.append({"ts": row["ts"], "pnl": row["pnl"], "cumulative": round(running, 2)})
+    for r in pnl_series:
+        running += r["pnl"]
+        cumulative.append({"ts": r["ts"], "pnl": r["pnl"], "cumulative": round(running, 2)})
 
     return JSONResponse({
-        "total": total, "open": open_count, "closed": closed,
-        "wins": wins, "losses": losses, "win_rate": round(win_rate, 1),
-        "total_pnl": round(total_pnl, 2), "best_trade": round(best, 2),
-        "worst_trade": round(worst, 2), "avg_pnl": round(avg_pnl, 2),
-        "today_pnl": round(today_pnl, 2), "today_count": today_count,
-        "total_charges": round(total_charges, 2), "today_charges": round(today_charges, 2),
-        "capital": capital, "utilized": round(utilized, 2),
+        "total": s["total"], "open": s["open_count"] or 0, "closed": closed,
+        "wins": wins, "losses": s["losses"] or 0, "win_rate": round(win_rate, 1),
+        "total_pnl": round(s["total_pnl"], 2), "best_trade": round(s["best"], 2),
+        "worst_trade": round(s["worst"], 2), "avg_pnl": round(s["avg_pnl"], 2),
+        "today_pnl": round(s["today_pnl"], 2), "today_count": s["today_count"] or 0,
+        "total_charges": round(s["total_charges"], 2), "today_charges": round(s["today_charges"], 2),
+        "capital": 100000, "utilized": round(s["utilized"], 2),
         "pnl_curve": cumulative,
         "now": mc.now_ist().strftime("%Y-%m-%d %H:%M:%S IST"),
     })
@@ -441,11 +437,12 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
 <script>
 const $=id=>document.getElementById(id);
 let AT=[],CF='all',LTP={},CH='ch1',VIEW='trades';
+let _loading=false,_scanCache=null,_scanCacheTs=0,_refreshTimer=null;
+const REFRESH_MS=30000,SCAN_CACHE_MS=300000;
 
 function inr(v){if(v==null||isNaN(v))return'-';return(v<0?'-':'+')+'₹'+Math.abs(Math.round(v)).toLocaleString('en-IN')}
 function inr0(v){if(v==null||isNaN(v))return'-';return'₹'+Math.abs(Math.round(v)).toLocaleString('en-IN')}
 function pc(v){return v>0?'pos':v<0?'neg':''}
-function sp(s){return s==='OPEN'?'<span class="pill op">OPEN</span>':s&&s.includes('SL')?'<span class="pill sl">SL</span>':'<span class="pill cl">CLOSED</span>'}
 function tf(t){if(!t)return'-';const d=new Date(t),mm=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];return d.getDate()+' '+mm[d.getMonth()]+' '+String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0')}
 
 async function cp(id,sym){if(!confirm('Close '+sym+' at market?'))return;await fetch('/api/close/'+id,{method:'POST'});load()}
@@ -565,6 +562,7 @@ function rH(T){
 function sF(f){CF=f;rH(AT)}
 
 function switchCh(ch){
+  if(ch===CH)return;
   CH=ch;CF='all';
   document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
   $('tab-'+ch).classList.add('active');
@@ -575,35 +573,57 @@ function switchCh(ch){
 }
 
 async function loadScan(){
+  if(_scanCache&&Date.now()-_scanCacheTs<SCAN_CACHE_MS){
+    renderScan(_scanCache);return;
+  }
+  $('scanList').innerHTML='<div class=empty>Loading scanner...</div>';
   try{
     const data=await fetch('/api/scan').then(r=>r.json());
-    if(Array.isArray(data)&&data.length>0){
-      $('scanList').innerHTML=data.map(s=>{
-        const cc=s.confidence>=70?'hi':s.confidence>=50?'md':'lo';
-        return '<div class=scan-card>'+
-          '<div class=scan-top><span class=scan-sym>'+s.symbol+' '+s.option_type+'</span>'+
-            '<span class="scan-conf '+cc+'">'+s.confidence+'/100</span></div>'+
-          '<div class=scan-strat>'+s.strategy+' | '+s.entry_window+'</div>'+
-          '<div class=scan-reasons>'+s.reasons.slice(0,3).join(' | ')+'</div>'+
-        '</div>'
-      }).join('');
-    }else{
-      $('scanList').innerHTML='<div class=empty>No scanner signals right now</div>';
-    }
+    if(Array.isArray(data)){_scanCache=data;_scanCacheTs=Date.now();renderScan(data)}
+    else{$('scanList').innerHTML='<div class=empty>No scanner signals right now</div>'}
   }catch(e){$('scanList').innerHTML='<div class=empty>Scanner unavailable</div>'}
 }
 
+function renderScan(data){
+  if(!data||!data.length){$('scanList').innerHTML='<div class=empty>No scanner signals right now</div>';return}
+  $('scanList').innerHTML=data.map(s=>{
+    const cc=s.confidence>=70?'hi':s.confidence>=50?'md':'lo';
+    return '<div class=scan-card>'+
+      '<div class=scan-top><span class=scan-sym>'+s.symbol+' '+s.option_type+'</span>'+
+        '<span class="scan-conf '+cc+'">'+s.confidence+'/100</span></div>'+
+      '<div class=scan-strat>'+s.strategy+' | '+s.entry_window+'</div>'+
+      '<div class=scan-reasons>'+s.reasons.slice(0,3).join(' | ')+'</div>'+
+    '</div>'
+  }).join('');
+}
+
 async function load(){
+  if(_loading)return;
+  _loading=true;
   try{
     const q='?channel='+CH;
     const [s,t]=await Promise.all([fetch('/api/stats'+q).then(r=>r.json()),fetch('/api/trades'+q).then(r=>r.json())]);
     AT=t;$('ck').textContent=s.now;$('sd').className='live-dot';
     rHero(s);rRing(s);rChips(s);rC(s.pnl_curve);rH(t);
-    try{const ltp=await fetch('/api/ltp'+q).then(r=>r.json());if(!ltp.error)LTP=ltp}catch(e){}
+    // LTP fetch is fire-and-forget — don't block render
+    fetch('/api/ltp'+q).then(r=>r.json()).then(ltp=>{if(!ltp.error){LTP=ltp;rO(t)}}).catch(()=>{});
     rO(t);
   }catch(e){$('sd').className='live-dot off'}
+  finally{_loading=false}
 }
-load();setInterval(load,10000);
+
+function startRefresh(){
+  clearInterval(_refreshTimer);
+  _refreshTimer=setInterval(load,REFRESH_MS);
+}
+
+// Pause refresh when tab is hidden
+document.addEventListener('visibilitychange',()=>{
+  if(document.hidden){clearInterval(_refreshTimer)}
+  else{load();startRefresh()}
+});
+
+load();startRefresh();
 </script></body></html>"""
 
 
