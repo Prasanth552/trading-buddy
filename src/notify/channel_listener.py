@@ -1002,8 +1002,11 @@ async def start_listener() -> None:
     async def _scanner_scheduler():
         """Wait until SCANNER_RUN_TIME IST each day, then run the scanner."""
         from zoneinfo import ZoneInfo
-        from datetime import datetime, timedelta
+        from datetime import datetime, time as dt_time, timedelta
         IST = ZoneInfo(config.TIMEZONE)
+
+        h, m = map(int, SCANNER_RUN_TIME.split(":"))
+        first_run = True
 
         while True:
             if not SCANNER_ENABLED:
@@ -1011,7 +1014,18 @@ async def start_listener() -> None:
                 continue
 
             now = datetime.now(IST)
-            h, m = map(int, SCANNER_RUN_TIME.split(":"))
+
+            # Catch-up: if process started after scheduled time but before 15:00,
+            # run the scanner immediately on first iteration
+            if first_run and mc.is_market_day():
+                first_run = False
+                scheduled = now.replace(hour=h, minute=m, second=0, microsecond=0)
+                if now > scheduled and now.hour < 15:
+                    log.info("[CH5] Missed scheduled %s run — catching up now", SCANNER_RUN_TIME)
+                    await _run_scanner_once()
+                    continue
+            first_run = False
+
             target = now.replace(hour=h, minute=m, second=0, microsecond=0)
             if now >= target:
                 target += timedelta(days=1)
@@ -1021,7 +1035,6 @@ async def start_listener() -> None:
                      target.strftime("%Y-%m-%d %H:%M"), wait_secs / 60)
             await asyncio.sleep(wait_secs)
 
-            # Check if it's a trading day
             if not mc.is_market_day():
                 log.info("[CH5] Not a trading day, skipping scanner")
                 continue
