@@ -576,88 +576,170 @@ def _handle_followup(action: str, exit_price: float | None, channel: str, ch_lab
 
 
 # ---------------------------------------------------------------------------
-# Channel 2 signal parser (NIFTY/SENSEX index options + stock options)
+# Channel 2 signal parser — "Shrivastav G Prime" format
+#
+# Signals come in two patterns:
+#   A) All in one message:  NIFTY 24250 CE\nABOVE 118\nTGT 128/140/170+\nSl below 108
+#   B) Split across 2 messages sent seconds apart:
+#        msg1: NIFTY 24150 CE\nNear 150
+#        msg2: TGT 160/175/200+\nSl 8-9 point
+#
+# We buffer a partial signal (header + entry but no TGT/SL) and complete it
+# when the next message supplies TGT + SL within 60 seconds.
 # ---------------------------------------------------------------------------
+_ch2_pending: dict[str, Any] | None = None
+_ch2_pending_ts: float = 0.0
+
+_CH2_SYMBOL_RE = re.compile(
+    r'^(?:(?:Intra|positional|Hazing|Note)[/\s]*)*'
+    r'((?:BANK\s*NIFTY|NIFTY|SENSEX|FINNIFTY|MIDCPNIFTY|[A-Za-z&]{2,20}))'
+    r'\s+(\d+)\s+(CE|PE)',
+    re.IGNORECASE | re.MULTILINE,
+)
+_CH2_ENTRY_RE = re.compile(
+    r'(?:ABOVE|NEAR|Entry\s+near|BUY\s*@)\s*[:\-]?\s*(\d+(?:\.\d+)?)',
+    re.IGNORECASE,
+)
+_CH2_TGT_RE = re.compile(
+    r'(?:TGT|TARGET)\s*[:\-]?\s*([\d\s,/.+\-]+)',
+    re.IGNORECASE,
+)
+_CH2_SL_RE = re.compile(
+    r'(?:^|[^A-Z])(?:SL|Stop\s*loss)\s*(?:bel\w*\s*|use\s*)?(\d+(?:\.\d+)?(?:\s*[-–]\s*\d+)?)\s*(point)?',
+    re.IGNORECASE,
+)
+_CH2_SKIP = {"CRUDEOIL", "CRUDE", "GOLD", "SILVER", "NATURALGAS", "GOLF"}
+
+
 def parse_signal_ch2(text: str) -> ParsedSignal | None:
-    """Parse Channel 2 signal format (no LLM — pure regex)."""
+    """Parse Channel 2 (Shrivastav G Prime) signal format.
+
+    Handles single-message and split-message signals with a buffer.
+    """
+    global _ch2_pending, _ch2_pending_ts
     text = text.strip()
     clean = text.replace("**", "")
-    clean = re.sub(r'[^\x00-\x7F]+', ' ', clean).strip()
-    clean = re.sub(r'\s+', ' ', clean)
+    clean = re.sub(r'[\U0001F600-\U0001FAFF☀-➿❤️‍]+', ' ', clean).strip()
 
-    if len(clean) < 10:
-        return None
-
-    lines = [l.strip() for l in text.splitlines() if l.strip()]
-    if len(lines) < 2:
+    if len(clean) < 5:
         return None
 
     upper = clean.upper()
-    if " CE" not in upper and " PE" not in upper:
+    if any(skip in upper for skip in ("DISCLAIMER", "WATCH LIST", "IMPORTANT",
+                                       "FAKE ALERT", "OFFER", "APPLICATION",
+                                       "FOLLOW THIS", "PLS READ")):
         return None
 
-    parse_text = re.sub(r'[^\w\s.&/-]', ' ', clean).strip()
-    parse_text = re.sub(r'(\d)\s+(\d{3})(?=\s)', r'\1\2', parse_text)
-    parse_text = re.sub(r'\s+', ' ', parse_text).upper()
-    parse_text = re.sub(r'^[#\s]+', '', parse_text)
-
-    action = "BUY"
-    if "SELL" in parse_text:
-        action = "SELL"
-
-    m_opt = re.search(r'(\d[\d,]*(?:\.\d+)?)\s+(CE|PE)', parse_text)
-    if not m_opt:
+    if re.search(r'NOT\s+ACTIVE\s+AVOID', upper):
+        _ch2_pending = None
         return None
 
-    strike = float(m_opt.group(1).replace(",", ""))
-    option_type = m_opt.group(2)
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
 
-    before_strike = parse_text[:m_opt.start()].strip()
-    before_strike = re.sub(r'^(BUY|SELL)\s+', '', before_strike).strip()
-    before_strike = re.sub(r'^(ZERO\s+TO\s+HERO|STOCK\s+OPTION\s+TRADE|SWING\s+TRADE)\s*', '', before_strike).strip()
-    symbol = before_strike.strip()
-    if not symbol:
-        return None
+    sym_match = _CH2_SYMBOL_RE.search(clean)
+    entry_match = _CH2_ENTRY_RE.search(clean)
+    tgt_match = _CH2_TGT_RE.search(clean)
+    sl_match = _CH2_SL_RE.search(clean)
 
-    trigger = 0.0
-    for line in lines:
-        m_above = re.search(r'(?:ABOVE|BUY\s*@)\s*[:\-]?\s*(\d+(?:\.\d+)?)', line, re.I)
-        if m_above:
-            trigger = float(m_above.group(1))
-            break
+    has_symbol = sym_match is not None
+    has_tgt = tgt_match is not None
+    has_sl = sl_match is not None
 
-    sl = 0.0
-    for line in lines:
-        m_sl = re.search(r'SL\s*[:\-]?\s*(\d+(?:\.\d+)?)', line, re.I)
-        if m_sl:
-            sl = float(m_sl.group(1))
-            break
+    if has_symbol:
+        raw_sym = sym_match.group(1).upper().strip()
+        raw_sym = re.sub(r'\s+', ' ', raw_sym)
+        if raw_sym == "BANK NIFTY":
+            raw_sym = "BANKNIFTY"
 
-    targets: list[float] = []
-    for line in lines:
-        m_tgt = re.search(r'(?:TARGET|TGT)\s*[:\-]?\s*([\d\s,/.+\-]+)', line, re.I)
-        if m_tgt:
-            raw = m_tgt.group(1)
-            nums = re.findall(r'\d+(?:\.\d+)?', raw)
-            targets = [float(n) for n in nums]
-            break
+        if raw_sym in _CH2_SKIP:
+            return None
 
-    if sl <= 0 or not targets:
-        return None
+        strike = float(sym_match.group(2))
+        opt_type = sym_match.group(3).upper()
+        trigger = float(entry_match.group(1)) if entry_match else 0.0
 
-    is_swing = "SWING" in text.upper() or "HOLD WITH PATIENCE" in text.upper() or "HOLDING TRADE" in text.upper()
-    if is_swing:
-        return None
+        if has_tgt and has_sl:
+            targets = _ch2_extract_targets(tgt_match)
+            sl = _ch2_extract_sl(sl_match, trigger)
+            if sl <= 0 or not targets:
+                return None
 
-    return ParsedSignal(
-        action=action,
-        symbol=symbol,
-        strike=strike,
-        option_type=option_type,
-        trigger_price=trigger,
-        stop_loss=sl,
-        targets=targets,
-    )
+            is_swing = any(kw in upper for kw in ("SWING", "POSITIONAL", "HOLD WITH PATIENCE"))
+            if is_swing and "INTRA" not in upper:
+                return None
+
+            _ch2_pending = None
+            return ParsedSignal(
+                action="BUY",
+                symbol=raw_sym,
+                strike=strike,
+                option_type=opt_type,
+                trigger_price=trigger,
+                stop_loss=sl,
+                targets=targets,
+            )
+        else:
+            _ch2_pending = {
+                "symbol": raw_sym, "strike": strike, "opt_type": opt_type,
+                "trigger": trigger,
+            }
+            _ch2_pending_ts = _time.time()
+            log.info("[CH2] Buffered partial signal: %s %s %s trigger=%.0f (waiting for TGT/SL)",
+                     raw_sym, strike, opt_type, trigger)
+            return None
+
+    if not has_symbol and _ch2_pending and (has_tgt or has_sl):
+        if _time.time() - _ch2_pending_ts > 60:
+            _ch2_pending = None
+            return None
+
+        if has_tgt and has_sl:
+            targets = _ch2_extract_targets(tgt_match)
+            trigger = _ch2_pending["trigger"]
+
+            if not trigger and entry_match:
+                trigger = float(entry_match.group(1))
+
+            sl = _ch2_extract_sl(sl_match, trigger)
+            if sl <= 0 or not targets:
+                return None
+
+            sig = ParsedSignal(
+                action="BUY",
+                symbol=_ch2_pending["symbol"],
+                strike=_ch2_pending["strike"],
+                option_type=_ch2_pending["opt_type"],
+                trigger_price=trigger,
+                stop_loss=sl,
+                targets=targets,
+            )
+            _ch2_pending = None
+            return sig
+
+    return None
+
+
+def _ch2_extract_targets(tgt_match: re.Match) -> list[float]:
+    raw = tgt_match.group(1)
+    nums = re.findall(r'\d+(?:\.\d+)?', raw)
+    return [float(n) for n in nums if float(n) > 0]
+
+
+def _ch2_extract_sl(sl_match: re.Match, trigger: float) -> float:
+    raw_val = sl_match.group(1).strip()
+    is_points = sl_match.group(2) is not None
+
+    if '-' in raw_val or '–' in raw_val:
+        parts = re.split(r'[-–]', raw_val)
+        sl_val = float(parts[0].strip())
+    else:
+        sl_val = float(raw_val)
+
+    if is_points and trigger > 0:
+        return trigger - sl_val
+    if sl_val <= 25 and trigger > 50:
+        return trigger - sl_val
+    return sl_val
 
 
 # ---------------------------------------------------------------------------
