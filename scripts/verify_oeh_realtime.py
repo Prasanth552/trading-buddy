@@ -30,8 +30,12 @@ parser.add_argument("--days", type=int, default=10, help="Last N trading days (d
 parser.add_argument("--universe", type=int, default=50, help="Number of stocks to scan (default 50)")
 parser.add_argument("--max-trades", type=int, default=5, help="Max trades per day (default 5)")
 parser.add_argument("--cap", type=float, default=100000, help="Capital per trade (default 1L)")
-parser.add_argument("--wait-min", type=int, default=15, help="Minutes after open to check (default 15)")
+parser.add_argument("--wait-min", type=int, default=5, help="Minutes after open to check (default 5)")
+parser.add_argument("--min-drop", type=float, default=0.3, help="Min drop %% to qualify (default 0.3)")
+parser.add_argument("--blocklist", type=str, default="GODREJCP,GRASIM", help="Comma-separated blocklist")
 args = parser.parse_args()
+
+_BLOCKLIST = set(b.strip().upper() for b in args.blocklist.split(",") if b.strip())
 
 NIFTY50 = [
     "RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK", "BHARTIARTL",
@@ -151,6 +155,8 @@ for day in trading_days:
     day_candidates = []
 
     for sym in matched:
+        if sym in _BLOCKLIST:
+            continue
         total_scanned += 1
         candles = fetch_intraday(sym, day)
         if not candles or len(candles) < check_candle_count + 1:
@@ -160,27 +166,26 @@ for day in trading_days:
         if open_price <= 0:
             continue
 
-        # Check first N candles (9:15 to 9:30): has high stayed <= open?
         first_candles = candles[:check_candle_count]
         max_high_early = max(c["high"] for c in first_candles)
 
         if max_high_early > open_price + 0.05:
-            continue  # Stock went above open in first 15 min — not OEH candidate
+            continue
+
+        entry_price = first_candles[-1]["close"]
+        drop_pct = (open_price - entry_price) / open_price * 100
+
+        if drop_pct < args.min_drop:
+            continue
 
         total_candidates += 1
 
-        # Entry price = close of the last check candle (9:30 price)
-        entry_price = first_candles[-1]["close"]
-
-        # Exit price = close of last candle (3:25 PM)
         exit_price = candles[-1]["close"]
 
-        # Did it break above open AFTER 9:30?
         remaining = candles[check_candle_count:]
         max_high_after = max(c["high"] for c in remaining) if remaining else entry_price
         broke_above = max_high_after > open_price + 0.05
 
-        # Day's actual high
         day_high = max(c["high"] for c in candles)
 
         day_candidates.append({
@@ -191,7 +196,7 @@ for day in trading_days:
             "exit": exit_price,
             "day_high": day_high,
             "broke_above": broke_above,
-            "drop_pct": (open_price - entry_price) / open_price * 100,
+            "drop_pct": drop_pct,
         })
 
     # Sort candidates: prefer ones that dropped most in first 15 min (strongest signal)

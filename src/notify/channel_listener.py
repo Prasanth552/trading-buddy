@@ -96,20 +96,22 @@ SCANNER_TARGET_MULT = 2.0        # target = 2x entry premium
 # OEH Scanner (Open=High) — auto-execute config
 # ---------------------------------------------------------------------------
 OEH_ENABLED = True
-OEH_RUN_TIME = "09:30"          # IST — check 15 min after open
-OEH_MAX_TRADES = 3              # max trades per scan
+OEH_RUN_TIME = "09:20"          # IST — check after first 5-min candle
+OEH_MAX_TRADES = 5              # max trades per scan
 OEH_SL_PCT = 0.30               # 30% of premium as stop-loss
 OEH_TARGET_MULT = 2.0           # target = 2x entry premium
 OEH_TOLERANCE = 0.05            # ₹0.05 tolerance for high <= open check
+OEH_MIN_DROP_PCT = 0.3          # skip candidates with <0.3% drop (weak signal)
+OEH_BLOCKLIST = {"GODREJCP", "GRASIM"}  # repeat losers — skip these
 OEH_UNIVERSE = [
     "RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK", "BHARTIARTL",
     "SBIN", "ITC", "BAJFINANCE", "LT", "KOTAKBANK", "AXISBANK",
     "TITAN", "MARUTI", "SUNPHARMA", "HCLTECH", "WIPRO", "TATASTEEL",
     "ADANIENT", "CIPLA", "DRREDDY", "M&M", "ASIANPAINT", "HINDUNILVR",
-    "NESTLEIND", "GRASIM", "ONGC", "ULTRACEMCO", "JSWSTEEL", "TRENT",
+    "NESTLEIND", "ONGC", "ULTRACEMCO", "JSWSTEEL", "TRENT",
     "BAJAJFINSV", "VEDL", "HINDALCO", "BPCL", "HEROMOTOCO", "EICHERMOT",
     "TATAPOWER", "BEL", "NTPC", "POWERGRID", "COALINDIA", "PIDILITIND",
-    "SHREECEM", "DABUR", "COLPAL", "GODREJCP", "AMBUJACEM", "BHEL",
+    "SHREECEM", "DABUR", "COLPAL", "AMBUJACEM", "BHEL",
     "DIVISLAB", "BRITANNIA",
 ]
 
@@ -1029,12 +1031,15 @@ async def _run_oeh_scan():
 
     today = datetime.now(IST).date()
     from_dt = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=15)
-    to_dt = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=35)
+    to_dt = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=25)
 
     candidates = []
     scanned = 0
 
     for sym in OEH_UNIVERSE:
+        if sym in OEH_BLOCKLIST:
+            continue
+
         inst_key = eq_keys.get(sym)
         if not inst_key:
             continue
@@ -1054,21 +1059,23 @@ async def _run_oeh_scan():
                 continue
 
         scanned += 1
-        if not candles or len(candles) < 3:
+        if not candles or len(candles) < 1:
             continue
 
         open_price = candles[0]["open"]
         if open_price <= 0:
             continue
 
-        first_3 = candles[:3]
-        max_high = max(c["high"] for c in first_3)
+        max_high = candles[0]["high"]
 
         if max_high > open_price + OEH_TOLERANCE:
             continue
 
-        entry_price = first_3[-1]["close"]
+        entry_price = candles[0]["close"]
         drop_pct = (open_price - entry_price) / open_price * 100
+
+        if drop_pct < OEH_MIN_DROP_PCT:
+            continue
 
         candidates.append({
             "symbol": sym,
@@ -1078,7 +1085,8 @@ async def _run_oeh_scan():
             "drop_pct": drop_pct,
         })
 
-    log.info("[OEH] Scanned %d stocks, found %d OEH candidates", scanned, len(candidates))
+    log.info("[OEH] Scanned %d stocks, found %d OEH candidates (blocked %d)",
+             scanned, len(candidates), len(OEH_BLOCKLIST))
 
     if not candidates:
         _notify(f"[OEH] No OEH candidates found today (scanned {scanned} stocks)")
