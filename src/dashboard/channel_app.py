@@ -28,7 +28,7 @@ _CHANNEL_FILTER_BASE = "(symbol LIKE '% % CE' OR symbol LIKE '% % PE')"
 _CH_FILTERS = {
     "ch1": f"({_CHANNEL_FILTER_BASE} AND (channel IS NULL OR channel = 'ch1'))",
     "ch1b": f"({_CHANNEL_FILTER_BASE} AND channel = 'ch1b')",
-    "ch2": f"({_CHANNEL_FILTER_BASE} AND channel = 'ch2')",
+    "ch2": f"({_CHANNEL_FILTER_BASE} AND channel = 'ch2' AND ts >= '2026-08-20')",
     "ch3": f"({_CHANNEL_FILTER_BASE} AND channel = 'ch3')",
     "ch5": f"({_CHANNEL_FILTER_BASE} AND channel = 'ch5')",
     "ch1f": f"({_CHANNEL_FILTER_BASE} AND (channel IS NULL OR channel = 'ch1') AND filter_score >= 50)",
