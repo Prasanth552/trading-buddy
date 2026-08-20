@@ -238,9 +238,7 @@ def simulate(sigs, label, max_per_day=99):
         sl = s["sl"]
         outcome = s["outcome"]
 
-        premium_per_lot = entry * lot_size
-        lots = max(1, int(CAPITAL / premium_per_lot)) if premium_per_lot > 0 else 1
-
+        lots = 3  # 3 lots with ₹2L capital (weekly expiry options)
         qty = lot_size * lots
 
         # --- FULL mode: exit at TGT1 or SL ---
