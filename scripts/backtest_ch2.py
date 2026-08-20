@@ -221,13 +221,36 @@ msg_by_date = defaultdict(list)
 for msg in messages:
     msg_by_date[msg["ts"][:10]].append(msg)
 
+def _msg_relates_to(text, sig):
+    """Check if a follow-up message is about THIS specific signal."""
+    upper = text.upper().replace("**", "")
+    sym = sig.symbol
+    strike_s = str(int(sig.strike))
+    # Direct symbol mention (e.g., "NIFTY", "BANKNIFTY", "MFSL")
+    if sym in ("BANKNIFTY",):
+        if re.search(r'BANK\s*NIFTY', upper):
+            return True
+    elif sym in upper:
+        return True
+    # Strike price mention (e.g., "24150" in "24150 CE")
+    if strike_s in upper:
+        return True
+    # Bare price in range of this signal's entry (price feed updates)
+    price_m = re.match(r'^\s*(\d+(?:\.\d+)?)\s*$', text.strip())
+    if price_m:
+        p = float(price_m.group(1))
+        if sig.entry * 0.3 < p < sig.entry * 5:
+            return True
+    return False
+
+
+# Track which signals are "active" on each day to handle generic messages
+# Generic TGT/SL messages (without symbol) apply to the MOST RECENT signal only
 for sig in signals:
     day_msgs = msg_by_date[sig.date]
     sig_time = sig.ts
 
-    # Find messages AFTER this signal on the same day
     after = False
-    prices_seen = []
     for msg in day_msgs:
         if msg["ts"] == sig_time and SYMBOL_RE.search(msg["text"].replace("**", "")):
             after = True
@@ -240,28 +263,28 @@ for sig in signals:
 
         ft = msg["text"].strip()
 
-        # Check for TGT hit
-        if TGT_HIT_RE.search(ft):
+        # Only process messages that relate to THIS signal
+        relates = _msg_relates_to(ft, sig)
+
+        # Check for TGT hit — only if message relates to this signal
+        if relates and TGT_HIT_RE.search(ft):
             sig.tgt_count = max(sig.tgt_count, 1)
             if re.search(r'2nd|second', ft, re.I):
                 sig.tgt_count = max(sig.tgt_count, 2)
             if re.search(r'3rd|third', ft, re.I):
                 sig.tgt_count = max(sig.tgt_count, 3)
-        if ALL_TGT_RE.search(ft):
+        if relates and ALL_TGT_RE.search(ft):
             sig.tgt_count = max(sig.tgt_count, len(sig.targets))
 
-        # Check for SL hit
-        if SL_HIT_RE.search(ft):
+        # Check for SL hit — only if message relates to this signal
+        if relates and SL_HIT_RE.search(ft):
             sig.outcome = "SL_HIT"
 
-        # Track bare price numbers (could be for this or another signal)
-        price_m = re.match(r'^(\d+(?:\.\d+)?)\s*$', ft)
-        if price_m:
+        # Track bare price numbers — _msg_relates_to already validates range
+        price_m = re.match(r'^(\d+(?:\.\d+)?)\s*$', ft.strip())
+        if price_m and relates:
             p = float(price_m.group(1))
-            # Only consider prices in a reasonable range of entry
-            if sig.entry * 0.3 < p < sig.entry * 5:
-                prices_seen.append(p)
-                sig.max_price = max(sig.max_price, p)
+            sig.max_price = max(sig.max_price, p)
 
     # Determine outcome
     if sig.outcome == "SL_HIT":
