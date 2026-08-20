@@ -591,13 +591,13 @@ _ch2_pending: dict[str, Any] | None = None
 _ch2_pending_ts: float = 0.0
 
 _CH2_SYMBOL_RE = re.compile(
-    r'^(?:(?:Intra|positional|Hazing|Note)[/\s]*)*'
+    r'(?:(?:Intra|positional|Note)[/\s]*)*'
     r'((?:BANK\s*NIFTY|NIFTY|SENSEX|FINNIFTY|MIDCPNIFTY|[A-Za-z&]{2,20}))'
     r'\s+(\d+)\s+(CE|PE)',
     re.IGNORECASE | re.MULTILINE,
 )
 _CH2_ENTRY_RE = re.compile(
-    r'(?:ABOVE|NEAR|Entry\s+near|BUY\s*@)\s*[:\-]?\s*(\d+(?:\.\d+)?)',
+    r'(?:ABOVE|NEAR|Entry\s+near|BUY\s*@|CMP)\s*[:\-]?\s*(\d+(?:\.\d+)?)',
     re.IGNORECASE,
 )
 _CH2_TGT_RE = re.compile(
@@ -627,11 +627,19 @@ def parse_signal_ch2(text: str) -> ParsedSignal | None:
     upper = clean.upper()
     if any(skip in upper for skip in ("DISCLAIMER", "WATCH LIST", "IMPORTANT",
                                        "FAKE ALERT", "OFFER", "APPLICATION",
-                                       "FOLLOW THIS", "PLS READ")):
+                                       "FOLLOW THIS", "PLS READ",
+                                       "PERFORMANCE", "MEMBERS SEND",
+                                       "CONGRATULATIONS", "ENTER AFTER BREAK")):
         return None
 
     if re.search(r'NOT\s+ACTIVE\s+AVOID', upper):
         _ch2_pending = None
+        return None
+
+    if re.search(r'WAIT\s+FOR\s+TRIGGER', upper):
+        return None
+
+    if "HAZING" in upper or "HEDGE" in upper:
         return None
 
     lines = [l.strip() for l in text.splitlines() if l.strip()]
