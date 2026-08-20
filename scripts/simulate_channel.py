@@ -240,7 +240,6 @@ def simulate(sigs, label, max_per_day=99):
 
         premium_per_lot = entry * lot_size
         lots = max(1, int(CAPITAL / premium_per_lot)) if premium_per_lot > 0 else 1
-        lots = 1  # Conservative: 1 lot per trade
 
         qty = lot_size * lots
 
@@ -299,7 +298,7 @@ def simulate(sigs, label, max_per_day=99):
         d["details"].append({
             "ts": s["ts"], "symbol": s["symbol"], "entry": entry,
             "exit": exit_price, "qty": qty, "lot_size": lot_size,
-            "full_pnl": full_pnl, "capped_pnl": capped_pnl,
+            "lots": lots, "full_pnl": full_pnl, "capped_pnl": capped_pnl,
             "outcome": outcome, "icon": icon,
         })
 
@@ -308,13 +307,13 @@ def simulate(sigs, label, max_per_day=99):
     print(f"  {label} — TRADE DETAILS")
     print(f"{'─' * 90}")
     print()
-    print(f"  {'Time':<17} {'Symbol':<22} {'Lot':>4} {'Entry':>7} {'Exit':>7}"
+    print(f"  {'Time':<17} {'Symbol':<22} {'Lots':>5} {'Qty':>6} {'Entry':>7} {'Exit':>7}"
           f" {'Full P&L':>10} {'₹2K Cap':>10} {'Result'}")
-    print(f"  {'─'*17} {'─'*22} {'─'*4} {'─'*7} {'─'*7} {'─'*10} {'─'*10} {'─'*6}")
+    print(f"  {'─'*17} {'─'*22} {'─'*5} {'─'*6} {'─'*7} {'─'*7} {'─'*10} {'─'*10} {'─'*6}")
 
     for date in sorted(daily.keys()):
         for t in daily[date]["details"]:
-            print(f"  {t['ts']:<17} {t['symbol']:<22} {t['lot_size']:>4} "
+            print(f"  {t['ts']:<17} {t['symbol']:<22} {t['lots']:>5} {t['qty']:>6} "
                   f"{t['entry']:>7.0f} {t['exit']:>7.0f} "
                   f"₹{t['full_pnl']:>+9,.0f} ₹{t['capped_pnl']:>+9,.0f} "
                   f"[{t['icon']}]")
