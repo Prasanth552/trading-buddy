@@ -33,6 +33,7 @@ parser.add_argument("--cap", type=float, default=100000, help="Capital per trade
 parser.add_argument("--wait-min", type=int, default=5, help="Minutes after open to check (default 5)")
 parser.add_argument("--min-drop", type=float, default=0.3, help="Min drop %% to qualify (default 0.3)")
 parser.add_argument("--blocklist", type=str, default="GODREJCP,GRASIM", help="Comma-separated blocklist")
+parser.add_argument("--no-nifty-filter", action="store_true", help="Disable NIFTY trend filter")
 args = parser.parse_args()
 
 _BLOCKLIST = set(b.strip().upper() for b in args.blocklist.split(",") if b.strip())
@@ -78,15 +79,24 @@ for inst in master:
         if tsym:
             eq_keys[tsym] = inst.get("instrument_key")
 
+nifty_key = None
+for inst in master:
+    if inst.get("segment") == "NSE_INDEX" and "NIFTY 50" in (inst.get("name") or "").upper():
+        nifty_key = inst.get("instrument_key")
+        break
+if not nifty_key:
+    nifty_key = config.UPSTOX_INDEX_KEYS.get("NSE:NIFTY 50")
+
 matched = [s for s in universe if s in eq_keys]
 print(f"Matched {len(matched)}/{len(universe)} stocks in master")
+print(f"NIFTY filter: {'ON' if nifty_key and not args.no_nifty_filter else 'OFF'}")
 
 # Find last N trading days by scanning recent dates
 today = datetime.now(IST).date()
 trading_days = []
 check_date = today - timedelta(days=1)
 attempts = 0
-while len(trading_days) < args.days and attempts < 60:
+while len(trading_days) < args.days and attempts < 180:
     if check_date.weekday() < 5:  # Mon-Fri
         trading_days.append(check_date)
     check_date -= timedelta(days=1)
@@ -150,9 +160,25 @@ total_scanned = 0
 total_candidates = 0
 total_false_oeh = 0
 trade_num = 0
+nifty_skipped = 0
 
 for day in trading_days:
     day_candidates = []
+
+    # NIFTY trend filter: skip day if NIFTY's first candle is green
+    if nifty_key and not args.no_nifty_filter:
+        nf_from = datetime.combine(day, datetime.min.time()).replace(hour=9, minute=15)
+        nf_to = datetime.combine(day, datetime.min.time()).replace(hour=9, minute=25)
+        try:
+            nc = client.historical_data(nifty_key, nf_from, nf_to, "5minute")
+            _time.sleep(0.3)
+            if nc and len(nc) >= 1:
+                if nc[0]["close"] > nc[0]["open"]:
+                    print(f"  ---  {day.strftime('%d-%m-%Y')}  NIFTY GREEN (open={nc[0]['open']:.1f} → {nc[0]['close']:.1f}) — SKIPPED")
+                    nifty_skipped += 1
+                    continue
+        except Exception:
+            pass
 
     for sym in matched:
         if sym in _BLOCKLIST:
@@ -254,9 +280,10 @@ print("RESULTS SUMMARY — REAL-TIME OEH (9:30 AM check)")
 print("=" * 115)
 print()
 print(f"  Total stock-days scanned:   {total_scanned}")
-print(f"  OEH candidates at 9:30:     {total_candidates} ({total_candidates/total_scanned*100:.1f}% of scans)" if total_scanned else "")
+print(f"  Days skipped (NIFTY green): {nifty_skipped}")
+print(f"  OEH candidates at 9:{15+check_time_min:02d}:     {total_candidates} ({total_candidates/total_scanned*100:.1f}% of scans)" if total_scanned else "")
 print(f"  Trades taken (max {args.max_trades}/day): {total_trades}")
-print(f"  Broke above open after 9:30: {total_false_oeh} ({total_false_oeh/total_trades*100:.1f}% false OEH)" if total_trades else "")
+print(f"  Broke above open after 9:{15+check_time_min:02d}: {total_false_oeh} ({total_false_oeh/total_trades*100:.1f}% false OEH)" if total_trades else "")
 print()
 
 if total_trades > 0:

@@ -1033,6 +1033,26 @@ async def _run_oeh_scan():
     from_dt = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=15)
     to_dt = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=25)
 
+    # NIFTY trend filter: skip if NIFTY is green (bullish day)
+    nifty_key = config.UPSTOX_INDEX_KEYS.get("NSE:NIFTY 50")
+    if nifty_key:
+        try:
+            nifty_candles = ud.historical_data(nifty_key, from_dt, to_dt, "5minute")
+            if nifty_candles and len(nifty_candles) >= 1:
+                nifty_open = nifty_candles[0]["open"]
+                nifty_close = nifty_candles[0]["close"]
+                if nifty_close > nifty_open:
+                    log.info("[OEH] NIFTY is green (open=%.1f close=%.1f) — skipping OEH scan",
+                             nifty_open, nifty_close)
+                    _notify(f"[OEH] Skipped — NIFTY is green at 9:20 "
+                            f"(open={nifty_open:.1f} → {nifty_close:.1f}). "
+                            f"OEH works best on red days.")
+                    return
+                log.info("[OEH] NIFTY is red (open=%.1f close=%.1f) — proceeding with scan",
+                         nifty_open, nifty_close)
+        except Exception as exc:
+            log.warning("[OEH] Could not fetch NIFTY data, proceeding anyway: %s", exc)
+
     candidates = []
     scanned = 0
 
