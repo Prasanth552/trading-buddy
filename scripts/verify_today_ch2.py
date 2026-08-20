@@ -214,13 +214,21 @@ for inst in master:
     tsym = (inst.get("trading_symbol") or "").upper()
     strike = inst.get("strike_price", 0)
     opt_type = inst.get("instrument_type", "")
-    name = inst.get("name", "").upper().replace(" ", "")
-    if not name:
-        name = re.sub(r'\d.*', '', tsym)
-    key = f"{name}|{int(strike)}|{opt_type}"
-    opt_keys[key] = inst.get("instrument_key")
+    inst_key = inst.get("instrument_key")
 
-print(f"Master: {len(master)} instruments, {len(opt_keys)} option contracts")
+    # Index by trading_symbol prefix (e.g., "MFSL" from "MFSL 1360 CE 25 AUG 26")
+    sym_prefix = re.sub(r'[\s\d].*', '', tsym).strip()
+    if sym_prefix:
+        key = f"{sym_prefix}|{int(strike)}|{opt_type}"
+        opt_keys[key] = inst_key
+
+    # Also index by name field
+    name = inst.get("name", "").upper().replace(" ", "")
+    if name:
+        key2 = f"{name}|{int(strike)}|{opt_type}"
+        opt_keys[key2] = inst_key
+
+print(f"Master: {len(master)} instruments, {len(opt_keys)} option contract lookups")
 
 # --- Verify each signal ---
 print()
@@ -280,19 +288,26 @@ for idx, s in enumerate(signals):
     from_dt = dt_today
     to_dt = datetime.now(IST).replace(hour=15, minute=30, second=0, microsecond=0)
 
-    try:
-        candles = client.historical_data(inst_key, from_dt, to_dt, "1minute")
-        _time.sleep(0.3)
-    except Exception as e:
-        err = str(e)
-        if "429" in err or "rate" in err.lower():
-            _time.sleep(3)
-            try:
-                candles = client.historical_data(inst_key, from_dt, to_dt, "1minute")
-            except Exception:
-                candles = None
-        else:
+    candles = None
+    for interval in ("1minute", "30minute", "day"):
+        try:
+            if interval == "day":
+                f_dt = datetime.now(IST).replace(hour=9, minute=15, second=0, microsecond=0)
+                t_dt = datetime.now(IST).replace(hour=15, minute=35, second=0, microsecond=0)
+                candles = client.historical_data(inst_key, f_dt, t_dt, interval)
+            else:
+                candles = client.historical_data(inst_key, from_dt, to_dt, interval)
+            _time.sleep(0.3)
+        except Exception as e:
+            err = str(e)
+            if "429" in err or "rate" in err.lower():
+                _time.sleep(3)
+                continue
             candles = None
+
+        if candles:
+            break
+        _time.sleep(0.2)
 
     if not candles:
         print(f"  {idx+1:<3} {sig_time[11:]:<6} {sym:<12} {strike:>7} {opt_type:>3} "
