@@ -31,6 +31,7 @@ _CH_FILTERS = {
     "ch2": f"({_CHANNEL_FILTER_BASE} AND channel = 'ch2' AND ts >= '2026-08-20')",
     "ch3": f"({_CHANNEL_FILTER_BASE} AND channel = 'ch3')",
     "ch5": f"({_CHANNEL_FILTER_BASE} AND channel = 'ch5')",
+    "oeh": f"({_CHANNEL_FILTER_BASE} AND channel = 'oeh')",
     "ch1f": f"({_CHANNEL_FILTER_BASE} AND (channel IS NULL OR channel = 'ch1') AND filter_score >= 50)",
 }
 
@@ -376,6 +377,7 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
 <div class=tabs id=tabbar>
   <button class="tab active" onclick="switchCh('ch1')" id="tab-ch1"><span class=ico>1</span> Paid</button>
   <button class="tab" onclick="switchCh('ch2')" id="tab-ch2"><span class=ico>2</span> G Prime</button>
+  <button class="tab" onclick="switchCh('oeh')" id="tab-oeh"><span class=ico>H</span> OEH</button>
 </div>
 
 <div class=wrap>

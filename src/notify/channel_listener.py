@@ -93,6 +93,27 @@ SCANNER_SL_PCT = 0.30            # 30% of premium as stop-loss
 SCANNER_TARGET_MULT = 2.0        # target = 2x entry premium
 
 # ---------------------------------------------------------------------------
+# OEH Scanner (Open=High) — auto-execute config
+# ---------------------------------------------------------------------------
+OEH_ENABLED = True
+OEH_RUN_TIME = "09:30"          # IST — check 15 min after open
+OEH_MAX_TRADES = 3              # max trades per scan
+OEH_SL_PCT = 0.30               # 30% of premium as stop-loss
+OEH_TARGET_MULT = 2.0           # target = 2x entry premium
+OEH_TOLERANCE = 0.05            # ₹0.05 tolerance for high <= open check
+OEH_UNIVERSE = [
+    "RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK", "BHARTIARTL",
+    "SBIN", "ITC", "BAJFINANCE", "LT", "KOTAKBANK", "AXISBANK",
+    "TITAN", "MARUTI", "SUNPHARMA", "HCLTECH", "WIPRO", "TATASTEEL",
+    "ADANIENT", "CIPLA", "DRREDDY", "M&M", "ASIANPAINT", "HINDUNILVR",
+    "NESTLEIND", "GRASIM", "ONGC", "ULTRACEMCO", "JSWSTEEL", "TRENT",
+    "BAJAJFINSV", "VEDL", "HINDALCO", "BPCL", "HEROMOTOCO", "EICHERMOT",
+    "TATAPOWER", "BEL", "NTPC", "POWERGRID", "COALINDIA", "PIDILITIND",
+    "SHREECEM", "DABUR", "COLPAL", "GODREJCP", "AMBUJACEM", "BHEL",
+    "DIVISLAB", "BRITANNIA",
+]
+
+# ---------------------------------------------------------------------------
 # Follow-up / exit message classification
 # ---------------------------------------------------------------------------
 _RE_CLOSE_NEAR_COST = re.compile(r'(?:CLOSE|CUT|EXIT)\s+(?:NEAR|AT)\s+COST|COST\s+TO\s+COST', re.I)
@@ -971,6 +992,139 @@ async def _run_scanner_once():
 
 
 # ---------------------------------------------------------------------------
+# OEH Scanner — Open=High bearish signal scanner
+# ---------------------------------------------------------------------------
+async def _run_oeh_scan():
+    """Scan F&O universe at 9:30 AM for OEH (Open=High) stocks, buy PEs."""
+    import time as _t
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from src.broker.upstox_data import UpstoxData, load_cached_token
+
+    IST = ZoneInfo(config.TIMEZONE)
+    log.info("[OEH] Scanner starting...")
+
+    token = load_cached_token()
+    if not token:
+        log.error("[OEH] No valid Upstox token — scanner cannot run")
+        _notify("*[OEH] Scanner SKIPPED* — No Upstox token for today.")
+        return
+
+    _notify("*[OEH] Scanning for Open=High stocks...*")
+
+    try:
+        ud = UpstoxData(access_token=token)
+        master = ud._load_master()
+    except Exception as exc:
+        log.error("[OEH] Failed to load instrument master: %s", exc)
+        _notify(f"[OEH] Scanner error: {exc}")
+        return
+
+    eq_keys = {}
+    for inst in master:
+        if inst.get("segment") == "NSE_EQ":
+            tsym = (inst.get("trading_symbol") or "").upper()
+            if tsym:
+                eq_keys[tsym] = inst.get("instrument_key")
+
+    today = datetime.now(IST).date()
+    from_dt = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=15)
+    to_dt = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=35)
+
+    candidates = []
+    scanned = 0
+
+    for sym in OEH_UNIVERSE:
+        inst_key = eq_keys.get(sym)
+        if not inst_key:
+            continue
+
+        try:
+            candles = ud.historical_data(inst_key, from_dt, to_dt, "5minute")
+            _t.sleep(0.3)
+        except Exception as exc:
+            err = str(exc)
+            if "429" in err or "rate" in err.lower():
+                _t.sleep(3)
+                try:
+                    candles = ud.historical_data(inst_key, from_dt, to_dt, "5minute")
+                except Exception:
+                    continue
+            else:
+                continue
+
+        scanned += 1
+        if not candles or len(candles) < 3:
+            continue
+
+        open_price = candles[0]["open"]
+        if open_price <= 0:
+            continue
+
+        first_3 = candles[:3]
+        max_high = max(c["high"] for c in first_3)
+
+        if max_high > open_price + OEH_TOLERANCE:
+            continue
+
+        entry_price = first_3[-1]["close"]
+        drop_pct = (open_price - entry_price) / open_price * 100
+
+        candidates.append({
+            "symbol": sym,
+            "open": open_price,
+            "entry": entry_price,
+            "max_high": max_high,
+            "drop_pct": drop_pct,
+        })
+
+    log.info("[OEH] Scanned %d stocks, found %d OEH candidates", scanned, len(candidates))
+
+    if not candidates:
+        _notify(f"[OEH] No OEH candidates found today (scanned {scanned} stocks)")
+        return
+
+    candidates.sort(key=lambda x: x["drop_pct"], reverse=True)
+    top = candidates[:OEH_MAX_TRADES]
+
+    summary_lines = []
+    executed = 0
+
+    for c in top:
+        parsed = _resolve_atm_strike(c["symbol"], "PE")
+        if parsed is None:
+            summary_lines.append(f"SKIP {c['symbol']} PE — could not resolve ATM")
+            continue
+
+        parsed.stop_loss = round(parsed.trigger_price * (1 - OEH_SL_PCT), 2)
+        parsed.targets = [round(parsed.trigger_price * OEH_TARGET_MULT, 2)]
+
+        result = execute_signal(parsed, channel="oeh", max_lots=1)
+        if result["placed"]:
+            executed += 1
+            summary_lines.append(
+                f"BUY {result['symbol']} x{result['qty']} @ {result['entry']:.2f} "
+                f"(OEH drop={c['drop_pct']:.1f}%)"
+            )
+            _notify(
+                f"*[OEH] Trade placed*\n"
+                f"{result['symbol']} x{result['qty']}\n"
+                f"Entry: {result['entry']} | SL: {result['sl']} | Target: {result['target']}\n"
+                f"Signal: {c['symbol']} Open={c['open']:.2f} Hi={c['max_high']:.2f} "
+                f"(drop {c['drop_pct']:.1f}% in 15min)"
+            )
+        else:
+            summary_lines.append(f"FAIL {c['symbol']} PE — {result['reason']}")
+
+    summary = "\n".join(summary_lines)
+    log.info("[OEH] Scan done: %d/%d executed\n%s", executed, len(top), summary)
+    _notify(
+        f"*[OEH] Scan complete: {executed}/{len(top)} trades placed*\n"
+        f"Candidates found: {len(candidates)} | Scanned: {scanned}\n{summary}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Telegram listener — tri-channel
 # ---------------------------------------------------------------------------
 def _normalize_channel_id(raw: str) -> int | None:
@@ -1172,6 +1326,50 @@ async def start_listener() -> None:
 
     asyncio.get_event_loop().create_task(_scanner_scheduler())
     log.info("Scanner (ch5) scheduler started — runs daily at %s IST", SCANNER_RUN_TIME)
+
+    # --- OEH Scanner: run once daily at OEH_RUN_TIME ---
+    async def _oeh_scheduler():
+        """Wait until OEH_RUN_TIME IST each day, then scan for OEH stocks."""
+        from zoneinfo import ZoneInfo
+        from datetime import datetime, timedelta
+        IST = ZoneInfo(config.TIMEZONE)
+
+        h, m = map(int, OEH_RUN_TIME.split(":"))
+        first_run = True
+
+        while True:
+            if not OEH_ENABLED:
+                await asyncio.sleep(60)
+                continue
+
+            now = datetime.now(IST)
+
+            if first_run and mc.is_market_day():
+                first_run = False
+                scheduled = now.replace(hour=h, minute=m, second=0, microsecond=0)
+                if now > scheduled and now.hour < 15:
+                    log.info("[OEH] Missed scheduled %s run — catching up now", OEH_RUN_TIME)
+                    await _run_oeh_scan()
+                    continue
+            first_run = False
+
+            target = now.replace(hour=h, minute=m, second=0, microsecond=0)
+            if now >= target:
+                target += timedelta(days=1)
+
+            wait_secs = (target - now).total_seconds()
+            log.info("[OEH] Next scan at %s IST (in %.0f min)",
+                     target.strftime("%Y-%m-%d %H:%M"), wait_secs / 60)
+            await asyncio.sleep(wait_secs)
+
+            if not mc.is_market_day():
+                log.info("[OEH] Not a trading day, skipping scan")
+                continue
+
+            await _run_oeh_scan()
+
+    asyncio.get_event_loop().create_task(_oeh_scheduler())
+    log.info("OEH scanner started — runs daily at %s IST", OEH_RUN_TIME)
 
     @client.on(events.NewMessage(chats=listen_channels))
     async def on_signal(event):
