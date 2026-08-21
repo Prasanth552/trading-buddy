@@ -719,33 +719,68 @@ def parse_signal_ch2(text: str) -> ParsedSignal | None:
                      raw_sym, strike, opt_type, trigger)
             return None
 
-    if not has_symbol and _ch2_pending and (has_tgt or has_sl):
-        if _time.time() - _ch2_pending_ts > 60:
+    if not has_symbol and _ch2_pending:
+        if _time.time() - _ch2_pending_ts > 120:
             _ch2_pending = None
             return None
 
-        if has_tgt and has_sl:
-            targets = _ch2_extract_targets(tgt_match)
-            trigger = _ch2_pending["trigger"]
+        # Update entry if mentioned (e.g., "Try near 145", "Near 160 also")
+        if entry_match and not _ch2_pending.get("trigger"):
+            _ch2_pending["trigger"] = float(entry_match.group(1))
+        if not entry_match and not _ch2_pending.get("trigger"):
+            near_m = re.search(r'(?:try\s+)?near\s+(\d+)', upper)
+            if near_m:
+                _ch2_pending["trigger"] = float(near_m.group(1))
 
-            if not trigger and entry_match:
-                trigger = float(entry_match.group(1))
+        # Store TGT in buffer if we got it
+        if has_tgt and "targets" not in _ch2_pending:
+            _ch2_pending["targets"] = _ch2_extract_targets(tgt_match)
+            _ch2_pending["tgt_ts"] = _time.time()
+            log.info("[CH2] Buffer updated with targets: %s", _ch2_pending["targets"][:3])
 
-            sl = _ch2_extract_sl(sl_match, trigger)
-            if sl <= 0 or not targets:
-                return None
+        # Store SL in buffer if we got it
+        if has_sl and "sl" not in _ch2_pending:
+            trigger = _ch2_pending.get("trigger", 0)
+            _ch2_pending["sl"] = _ch2_extract_sl(sl_match, trigger)
+            log.info("[CH2] Buffer updated with SL: %s", _ch2_pending["sl"])
 
-            sig = ParsedSignal(
-                action="BUY",
-                symbol=_ch2_pending["symbol"],
-                strike=_ch2_pending["strike"],
-                option_type=_ch2_pending["opt_type"],
-                trigger_price=trigger,
-                stop_loss=sl,
-                targets=targets,
-            )
-            _ch2_pending = None
-            return sig
+        # "tight sl" → use 8% of entry as default SL
+        if "TIGHT SL" in upper and "sl" not in _ch2_pending and _ch2_pending.get("trigger"):
+            default_sl = round(_ch2_pending["trigger"] * 0.92)
+            _ch2_pending["sl"] = default_sl
+            log.info("[CH2] Buffer: tight SL → default %.0f", default_sl)
+
+        # Try to complete: need at minimum targets + (SL or default)
+        targets = _ch2_pending.get("targets")
+        trigger = _ch2_pending.get("trigger", 0)
+        sl = _ch2_pending.get("sl", 0)
+
+        if targets and trigger > 0:
+            if sl <= 0:
+                # Have TGT but no SL yet — wait for one more message unless buffer is old
+                tgt_age = _time.time() - _ch2_pending.get("tgt_ts", _ch2_pending_ts)
+                if tgt_age < 8:
+                    return None  # give SL message a chance to arrive
+                # Timeout — use default SL
+                idx_syms = {"NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY"}
+                if _ch2_pending["symbol"] in idx_syms:
+                    sl = round(trigger * 0.90)
+                else:
+                    sl = round(trigger * 0.85)
+                log.info("[CH2] No explicit SL after wait — using default: %.0f (entry=%.0f)", sl, trigger)
+
+            if sl > 0:
+                sig = ParsedSignal(
+                    action="BUY",
+                    symbol=_ch2_pending["symbol"],
+                    strike=_ch2_pending["strike"],
+                    option_type=_ch2_pending["opt_type"],
+                    trigger_price=trigger,
+                    stop_loss=sl,
+                    targets=targets,
+                )
+                _ch2_pending = None
+                return sig
 
     return None
 
