@@ -99,7 +99,12 @@ if not token:
 client = UpstoxData()
 master = client._load_master()
 
-opt_keys = {}
+target_dt = datetime.strptime(target_date, "%Y-%m-%d").date()
+
+# Collect ALL candidates per symbol|strike|type, then pick nearest expiry
+from collections import defaultdict
+_candidates = defaultdict(list)
+
 for inst in master:
     seg = inst.get("segment", "")
     if seg not in ("NSE_FO", "BSE_FO", "MCX_FO"):
@@ -110,13 +115,30 @@ for inst in master:
     strike = inst.get("strike_price", 0)
     opt_type = inst.get("instrument_type", "")
     inst_key = inst.get("instrument_key")
+    expiry = inst.get("expiry", "")
+
+    try:
+        exp_date = datetime.strptime(expiry[:10], "%Y-%m-%d").date() if expiry else None
+    except Exception:
+        exp_date = None
 
     sym_prefix = re.sub(r"[\s\d].*", "", tsym).strip()
     if sym_prefix:
-        opt_keys[f"{sym_prefix}|{int(strike)}|{opt_type}"] = inst_key
+        _candidates[f"{sym_prefix}|{int(strike)}|{opt_type}"].append((exp_date, inst_key, seg))
     name = inst.get("name", "").upper().replace(" ", "")
     if name:
-        opt_keys[f"{name}|{int(strike)}|{opt_type}"] = inst_key
+        _candidates[f"{name}|{int(strike)}|{opt_type}"].append((exp_date, inst_key, seg))
+
+# Pick nearest expiry >= target date for each key
+opt_keys = {}
+for key, cands in _candidates.items():
+    valid = [(e, k, s) for e, k, s in cands if e and e >= target_dt]
+    if valid:
+        valid.sort(key=lambda x: x[0])
+        opt_keys[key] = valid[0][1]
+    elif cands:
+        cands.sort(key=lambda x: (x[0] or target_dt,))
+        opt_keys[key] = cands[-1][1]
 
 print(f"Instrument lookups: {len(opt_keys)}")
 
