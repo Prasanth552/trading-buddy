@@ -300,7 +300,7 @@ def _resolve_channel_option(
     candidates: list[tuple[date, dict[str, Any]]] = []
     for inst in instruments:
         seg = inst.get("segment", "")
-        if seg not in ("NSE_FO", "BSE_FO"):
+        if seg not in ("NSE_FO", "BSE_FO", "MCX_FO"):
             continue
         if inst.get("asset_symbol", "").upper() != sym:
             continue
@@ -318,7 +318,7 @@ def _resolve_channel_option(
         fuzzy: list[tuple[date, dict[str, Any]]] = []
         for inst in instruments:
             seg = inst.get("segment", "")
-            if seg not in ("NSE_FO", "BSE_FO"):
+            if seg not in ("NSE_FO", "BSE_FO", "MCX_FO"):
                 continue
             asym = inst.get("asset_symbol", "").upper()
             if not (asym.startswith(sym) or sym.startswith(asym)):
@@ -631,7 +631,7 @@ _CH2_SL_RE = re.compile(
     r'(?:^|[^A-Z])(?:SL|Stop\s*loss)\s*(?:bel\w*\s*|use\s*)?(\d+(?:\.\d+)?(?:\s*[-–]\s*\d+)?)\s*(point)?',
     re.IGNORECASE,
 )
-_CH2_SKIP = {"CRUDEOIL", "CRUDE", "GOLD", "SILVER", "NATURALGAS", "GOLF"}
+_CH2_SKIP: set[str] = set()  # no skips — commodities enabled
 
 
 def parse_signal_ch2(text: str) -> ParsedSignal | None:
