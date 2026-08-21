@@ -22,10 +22,7 @@ IST = ZoneInfo("Asia/Kolkata")
 
 parser = argparse.ArgumentParser()
 parser.add_argument("files", nargs="+", help="Message dump files (one per day)")
-parser.add_argument("--daily-cap", type=float, default=5000, help="Stop trading after this daily profit (default: 5000)")
-parser.add_argument("--skip-before", default="09:20", help="Skip signals before this IST time (default: 09:20)")
-parser.add_argument("--max-trades", type=int, default=5, help="Max trades per day (default: 5)")
-parser.add_argument("--max-slip", type=float, default=15, help="Max %% slip from stated entry (default: 15)")
+parser.add_argument("--daily-cap", type=float, default=10000, help="Stop trading after this daily profit (default: 10000)")
 args = parser.parse_args()
 
 # --- Load instruments ---
@@ -197,17 +194,9 @@ def analyze_day(filepath, date_str):
         # --- FILTERS ---
         skip_reason = None
 
-        # Skip before time
-        if ist < args.skip_before:
-            skip_reason = f"SKIP<{args.skip_before}"
-
         # Daily cap reached
         if day_pnl >= args.daily_cap:
             skip_reason = "CAP_HIT"
-
-        # Max trades reached
-        if trades_taken >= args.max_trades:
-            skip_reason = "MAX_TRADES"
 
         if skip_reason:
             results.append({
@@ -260,18 +249,6 @@ def analyze_day(filepath, date_str):
             filtered = candles
 
         candle_open = filtered[0]["open"]
-
-        # Check slip
-        if sig_entry > 0:
-            slip_pct = abs(candle_open - sig_entry) / sig_entry * 100
-            if slip_pct > args.max_slip:
-                results.append({
-                    "idx": idx+1, "ist": ist, "sym": sym, "strike": strike,
-                    "ot": ot, "sig_entry": sig_entry, "tgt1": tgt1, "sl": sl,
-                    "candle_open": candle_open, "slip_pct": slip_pct,
-                    "skip": f"SLIP_{slip_pct:.0f}%",
-                })
-                continue
 
         slip = candle_open - sig_entry
 
@@ -326,7 +303,7 @@ def analyze_day(filepath, date_str):
 # === MAIN ===
 print()
 print("=" * 150)
-print(f"CH2 WEEKLY ANALYSIS — ₹{args.daily_cap:,.0f}/day cap, skip before {args.skip_before}, max {args.max_trades} trades/day, max {args.max_slip}% slip")
+print(f"CH2 WEEKLY ANALYSIS — ₹{args.daily_cap:,.0f}/day profit cap (only filter)")
 print("=" * 150)
 
 week_pnl = 0
@@ -408,7 +385,6 @@ if week_wins + week_losses > 0:
     print(f"  Avg P&L/trade:    ₹{week_pnl/week_trades:+,.0f}" if week_trades else "")
     print(f"  Avg P&L/day:      ₹{week_pnl/len(day_summaries):+,.0f}")
 print()
-print(f"  Rules: skip before {args.skip_before}, ₹{args.daily_cap:,.0f}/day cap, "
-      f"max {args.max_trades} trades, max {args.max_slip}% slip")
+print(f"  Rules: ₹{args.daily_cap:,.0f}/day profit cap (stop trading after cap hit)")
 print(f"  BOTH = TGT & SL in same candle → conservative (assume SL hit)")
 print("=" * 150)
