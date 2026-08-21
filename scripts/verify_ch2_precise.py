@@ -118,7 +118,12 @@ for inst in master:
     expiry = inst.get("expiry", "")
 
     try:
-        exp_date = datetime.strptime(expiry[:10], "%Y-%m-%d").date() if expiry else None
+        if isinstance(expiry, (int, float)) or (isinstance(expiry, str) and expiry.isdigit()):
+            exp_date = datetime.fromtimestamp(int(expiry) / 1000, tz=IST).date()
+        elif isinstance(expiry, str) and len(expiry) >= 10 and "-" in expiry[:10]:
+            exp_date = datetime.strptime(expiry[:10], "%Y-%m-%d").date()
+        else:
+            exp_date = None
     except Exception:
         exp_date = None
 
@@ -131,16 +136,20 @@ for inst in master:
 
 # Pick nearest expiry >= target date for each key
 opt_keys = {}
+opt_expiry = {}
 for key, cands in _candidates.items():
     valid = [(e, k, s) for e, k, s in cands if e and e >= target_dt]
     if valid:
         valid.sort(key=lambda x: x[0])
         opt_keys[key] = valid[0][1]
+        opt_expiry[key] = valid[0][0]
     elif cands:
         cands.sort(key=lambda x: (x[0] or target_dt,))
         opt_keys[key] = cands[-1][1]
+        opt_expiry[key] = cands[-1][0]
 
-print(f"Instrument lookups: {len(opt_keys)}")
+parsed_ok = sum(1 for v in opt_expiry.values() if v is not None)
+print(f"Instrument lookups: {len(opt_keys)} ({parsed_ok} with valid expiry)")
 
 # --- Parse target date ---
 dt_parts = [int(x) for x in target_date.split("-")]
@@ -153,7 +162,7 @@ print(f"CH2 SIGNAL VERIFICATION — {target_date} — PRECISE ENTRY TIMING")
 print("=" * 130)
 print()
 
-header = (f"  {'#':<3} {'IST':<6} {'Symbol':<12} {'Strike':>7} {'T':>2} "
+header = (f"  {'#':<3} {'IST':<6} {'Symbol':<12} {'Strike':>7} {'T':>2} {'Exp':>5} "
           f"{'SigEntry':>8} {'ActEntry':>8} {'TGT1':>6} {'SL':>6} "
           f"{'High':>6} {'Low':>6} {'Result':<8} {'P&L':>9}")
 print(header)
@@ -178,6 +187,7 @@ for idx, s in enumerate(signals):
     # Find instrument
     key = f"{sym}|{strike}|{opt_type}"
     inst_key = opt_keys.get(key)
+    exp = opt_expiry.get(key)
 
     if not inst_key:
         print(f"  {idx+1:<3} {ist_time:<6} {sym:<12} {strike:>7} {opt_type:>2} "
@@ -195,7 +205,7 @@ for idx, s in enumerate(signals):
         to_dt = datetime(year, month, day, 23, 30, 0, tzinfo=IST)
 
     candles = None
-    for interval in ("1minute", "30minute", "day"):
+    for interval in ("5minute", "15minute", "day"):
         try:
             candles = client.historical_data(inst_key, from_dt, to_dt, interval)
             _time.sleep(0.3)
@@ -212,8 +222,15 @@ for idx, s in enumerate(signals):
         nodata += 1
         continue
 
-    # ACTUAL entry = first candle's open
-    actual_entry = candles[0]["open"]
+    # Filter candles to those AT or AFTER signal time
+    sig_ts = f"{s['ist_h']:02d}:{s['ist_m']:02d}"
+    filtered = [c for c in candles if c["date"][11:16] >= sig_ts]
+    if not filtered:
+        filtered = candles  # fallback to all if filter empties
+
+    # ACTUAL entry = first candle at/after signal time
+    actual_entry = filtered[0]["open"]
+    candles = filtered
 
     # Walk candles to find TGT1 or SL hit
     max_high = 0
@@ -275,7 +292,8 @@ for idx, s in enumerate(signals):
     diff = actual_entry - sig_entry
     diff_str = f"({diff:+.0f})" if abs(diff) > 0.5 else ""
 
-    print(f"  {idx+1:<3} {ist_time:<6} {sym:<12} {strike:>7} {opt_type:>2} "
+    exp_str = exp.strftime("%d%b") if exp else "?"
+    print(f"  {idx+1:<3} {ist_time:<6} {sym:<12} {strike:>7} {opt_type:>2} {exp_str:>5} "
           f"{sig_entry:>8.0f} {actual_entry:>8.1f} {tgt1:>6.0f} {sl:>6.0f} "
           f"{max_high:>6.0f} {min_low:>6.0f} [{icon}] {result:<5} ₹{pnl:>+8,.0f} {diff_str}")
 
