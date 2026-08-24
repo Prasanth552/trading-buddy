@@ -1098,12 +1098,11 @@ async def _run_oeh_scan():
                 nifty_open = nifty_candles[0]["open"]
                 nifty_close = nifty_candles[0]["close"]
                 if nifty_close > nifty_open:
-                    log.info("[OEH] NIFTY is green (open=%.1f close=%.1f) — skipping OEH scan",
+                    log.info("[OEH] NIFTY is green (open=%.1f close=%.1f) — proceeding anyway (floor strategy)",
                              nifty_open, nifty_close)
-                    _notify(f"[OEH] Skipped — NIFTY is green at 9:20 "
+                    _notify(f"[OEH] NIFTY is green at 9:20 "
                             f"(open={nifty_open:.1f} → {nifty_close:.1f}). "
-                            f"OEH works best on red days.")
-                    return
+                            f"Proceeding — floor strategy handles green days.")
                 log.info("[OEH] NIFTY is red (open=%.1f close=%.1f) — proceeding with scan",
                          nifty_open, nifty_close)
         except Exception as exc:
@@ -1183,7 +1182,7 @@ async def _run_oeh_scan():
         parsed.stop_loss = round(parsed.trigger_price * (1 - OEH_SL_PCT), 2)
         parsed.targets = [round(parsed.trigger_price * OEH_TARGET_MULT, 2)]
 
-        result = execute_signal(parsed, channel="oeh", max_lots=1)
+        result = execute_signal(parsed, channel="oeh", max_lots=2)
         if result["placed"]:
             executed += 1
             summary_lines.append(
