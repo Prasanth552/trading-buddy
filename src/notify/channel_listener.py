@@ -1349,6 +1349,7 @@ def _normalize_channel_id(raw: str) -> int | None:
 async def start_listener() -> None:
     """Connect to Telegram and listen for signals in both channels."""
     from telethon import TelegramClient, events
+    from src.utils import market_calendar as mc
 
     api_id = int(os.getenv("TELEGRAM_API_ID", "0"))
     api_hash = os.getenv("TELEGRAM_API_HASH", "")
