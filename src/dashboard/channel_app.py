@@ -11,8 +11,11 @@ import os
 import sqlite3
 from typing import Any
 
+import asyncio
+import json
+
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 
 import config
@@ -21,6 +24,80 @@ from src.utils import market_calendar as mc
 
 load_dotenv()
 app = FastAPI(title="Channel Trades", docs_url=None, redoc_url=None)
+
+# ---------------------------------------------------------------------------
+# WebSocket hub — push updates to all connected clients
+# ---------------------------------------------------------------------------
+_ws_clients: set[WebSocket] = set()
+
+
+async def _ws_broadcast(data: dict) -> None:
+    msg = json.dumps(data)
+    dead: list[WebSocket] = []
+    for ws in _ws_clients:
+        try:
+            await ws.send_text(msg)
+        except Exception:
+            dead.append(ws)
+    for ws in dead:
+        _ws_clients.discard(ws)
+
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    _ws_clients.add(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        _ws_clients.discard(websocket)
+
+
+async def _ws_push_loop():
+    """Background task: push fresh data to WebSocket clients every 3s."""
+    while True:
+        await asyncio.sleep(3)
+        if not _ws_clients:
+            continue
+        try:
+            db.init_db()
+            today_iso = mc.now_ist().date().isoformat()
+            payload: dict[str, dict] = {}
+            for ch in ("ch1", "ch2", "ch3", "oeh"):
+                cf = _ch_filter(ch)
+                with db.get_conn() as conn:
+                    row = conn.execute(f"""SELECT
+                        COUNT(*) AS total,
+                        SUM(CASE WHEN status='OPEN' THEN 1 ELSE 0 END) AS open_count,
+                        SUM(CASE WHEN status LIKE 'CLOSED%' THEN 1 ELSE 0 END) AS closed,
+                        SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins,
+                        SUM(CASE WHEN pnl IS NOT NULL AND pnl <= 0 THEN 1 ELSE 0 END) AS losses,
+                        COALESCE(SUM(CASE WHEN pnl IS NOT NULL THEN pnl END),0) AS total_pnl,
+                        COALESCE(SUM(CASE WHEN pnl IS NOT NULL AND ts >= '{today_iso}' THEN pnl END),0) AS today_pnl,
+                        SUM(CASE WHEN ts >= '{today_iso}' THEN 1 ELSE 0 END) AS today_count
+                    FROM trades WHERE {cf}""").fetchone()
+                    s = dict(row)
+                    closed = s["closed"] or 0
+                    wins = s["wins"] or 0
+                    payload[ch] = {
+                        "today_pnl": round(s["today_pnl"], 2),
+                        "today_count": s["today_count"] or 0,
+                        "total_pnl": round(s["total_pnl"], 2),
+                        "wins": wins, "losses": s["losses"] or 0,
+                        "open": s["open_count"] or 0,
+                        "closed": closed,
+                        "win_rate": round(wins / closed * 100, 1) if closed > 0 else 0,
+                    }
+            await _ws_broadcast({"type": "tick", "channels": payload,
+                                 "now": mc.now_ist().strftime("%Y-%m-%d %H:%M:%S IST")})
+        except Exception:
+            pass
+
+
+@app.on_event("startup")
+async def _start_ws_push():
+    asyncio.create_task(_ws_push_loop())
 
 _CHANNEL_FILTER_BASE = "(symbol LIKE '% % CE' OR symbol LIKE '% % PE')"
 
@@ -254,6 +331,8 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
   margin-bottom:-1px;font-family:var(--sn);transition:all .15s;white-space:nowrap}
 .tab.active{color:var(--bl);border-bottom-color:var(--bl)}
 .tab .ico{margin-right:3px}
+.ws-badge{margin-left:4px;font-size:9px;font-family:var(--mn);font-weight:700;opacity:.8}
+.ws-badge.pos{color:var(--gn)}.ws-badge.neg{color:var(--rd)}
 
 /* Hero P&L card */
 .hero{padding:14px 16px;display:flex;gap:10px;align-items:center;overflow:hidden}
@@ -377,6 +456,7 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
 <div class=tabs id=tabbar>
   <button class="tab active" onclick="switchCh('ch1')" id="tab-ch1"><span class=ico>1</span> Paid</button>
   <button class="tab" onclick="switchCh('ch2')" id="tab-ch2"><span class=ico>2</span> G Prime</button>
+  <button class="tab" onclick="switchCh('ch3')" id="tab-ch3"><span class=ico>3</span> Free</button>
   <button class="tab" onclick="switchCh('oeh')" id="tab-oeh"><span class=ico>H</span> OEH</button>
 </div>
 
@@ -440,6 +520,50 @@ const $=id=>document.getElementById(id);
 let AT=[],CF='all',LTP={},CH='ch1',VIEW='trades';
 let _loading=false,_scanCache=null,_scanCacheTs=0,_refreshTimer=null;
 const REFRESH_MS=30000,SCAN_CACHE_MS=300000;
+
+// WebSocket — live push updates
+let _ws=null,_wsRetry=1000;
+function wsConnect(){
+  const proto=location.protocol==='https:'?'wss:':'ws:';
+  _ws=new WebSocket(proto+'//'+location.host+'/ws');
+  _ws.onopen=()=>{_wsRetry=1000;$('sd').className='live-dot';
+    clearInterval(_refreshTimer);_refreshTimer=null};
+  _ws.onmessage=e=>{
+    try{
+      const d=JSON.parse(e.data);
+      if(d.type==='tick'&&d.channels&&d.channels[CH]){
+        const s=d.channels[CH];
+        $('ck').textContent=d.now;
+        // Update hero P&L instantly
+        $('hv').textContent=inr(s.today_pnl);
+        $('hv').className='val '+(s.today_pnl>=0?'pos':'neg');
+        $('hs').textContent=s.today_count+' trades today | Total: '+inr(s.total_pnl);
+        // Update win rate ring
+        const wr=s.closed>0?s.win_rate:0;
+        $('rp').textContent=s.closed>0?wr+'%':'--';
+        $('rp').className='ring-pct '+(wr>=50?'pos':'neg');
+        // Update tab badges
+        for(const[ch,cs]of Object.entries(d.channels)){
+          const tab=$('tab-'+ch);
+          if(tab){
+            const badge=tab.querySelector('.ws-badge');
+            const pnl=cs.today_pnl;
+            const txt=(pnl>=0?'+':'')+'₹'+Math.abs(Math.round(pnl)).toLocaleString('en-IN');
+            if(badge){badge.textContent=txt;badge.className='ws-badge '+(pnl>=0?'pos':'neg')}
+            else{const sp=document.createElement('span');sp.className='ws-badge '+(pnl>=0?'pos':'neg');sp.textContent=txt;tab.appendChild(sp)}
+          }
+        }
+      }
+    }catch(err){}
+  };
+  _ws.onclose=()=>{
+    $('sd').className='live-dot off';
+    setTimeout(wsConnect,Math.min(_wsRetry,10000));_wsRetry*=2;
+    if(!_refreshTimer)startRefresh();
+  };
+  _ws.onerror=()=>{_ws.close()};
+}
+wsConnect();
 
 function inr(v){if(v==null||isNaN(v))return'-';return(v<0?'-':'+')+'₹'+Math.abs(Math.round(v)).toLocaleString('en-IN')}
 function inr0(v){if(v==null||isNaN(v))return'-';return'₹'+Math.abs(Math.round(v)).toLocaleString('en-IN')}
@@ -622,6 +746,8 @@ document.addEventListener('visibilitychange',()=>{
 });
 
 load();startRefresh();
+// Full data refresh every 15s (trades table, chart, open positions — WS only pushes stats)
+setInterval(()=>{if(!_loading)load()},15000);
 </script></body></html>"""
 
 
