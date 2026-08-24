@@ -274,15 +274,19 @@ def _notify(msg: str) -> None:
 # ---------------------------------------------------------------------------
 def _resolve_channel_option(
     uc: Any, symbol: str, strike: float, option_type: str,
+    *, monthly: bool = False,
 ) -> tuple[dict[str, Any] | None, int]:
     """Search the Upstox instrument master for a specific option contract.
 
-    Returns (instrument_dict, lot_size).  Searches NSE_FO and BSE_FO segments,
-    picks the nearest monthly expiry >= today.
+    Returns (instrument_dict, lot_size).  Searches NSE_FO and BSE_FO segments.
+    When monthly=True, picks the nearest month-end expiry (for stock options
+    where the channel sends monthly/September signals).
+    Otherwise picks the nearest expiry >= today.
     """
     from datetime import date, datetime
     from zoneinfo import ZoneInfo
     from src.broker.upstox_client import _expiry_to_date
+    import calendar
 
     IST = ZoneInfo(config.TIMEZONE)
     today = datetime.now(IST).date()
@@ -290,7 +294,6 @@ def _resolve_channel_option(
     sym = symbol.replace(" ", "").upper()
     instruments = uc.load_instruments()
 
-    # Known channel→Upstox symbol aliases
     _SYMBOL_ALIASES: dict[str, str] = {
         "KALYANJIL": "KALYANKJIL",
         "LIC": "LICI",
@@ -314,7 +317,6 @@ def _resolve_channel_option(
         candidates.append((exp, inst))
 
     if not candidates:
-        # Fuzzy fallback: find asset_symbols that start with or contain sym
         fuzzy: list[tuple[date, dict[str, Any]]] = []
         for inst in instruments:
             seg = inst.get("segment", "")
@@ -339,6 +341,19 @@ def _resolve_channel_option(
             lot_size = int(chosen.get("lot_size", 1)) or 1
             return chosen, lot_size
         return None, 1
+
+    if monthly and len(candidates) > 1:
+        def _is_monthly(exp_date: date) -> bool:
+            last_day = calendar.monthrange(exp_date.year, exp_date.month)[1]
+            return exp_date.day >= last_day - 7
+        monthly_cands = [(e, i) for e, i in candidates if _is_monthly(e)]
+        if monthly_cands:
+            monthly_cands.sort(key=lambda x: x[0])
+            chosen = monthly_cands[0][1]
+            exp_chosen = monthly_cands[0][0]
+            log.info("Monthly expiry selected for %s %s %s: %s", sym, strike, option_type, exp_chosen)
+            lot_size = int(chosen.get("lot_size", 1)) or 1
+            return chosen, lot_size
 
     candidates.sort(key=lambda x: x[0])
     chosen = candidates[0][1]
@@ -399,8 +414,10 @@ def execute_signal(sig: ParsedSignal, *, channel: str = "ch1", max_lots: int | N
 
     try:
         uc = UpstoxClient()
+        use_monthly = channel in ("ch1", "ch1b")
         opt, master_lot_size = _resolve_channel_option(
             uc, sig.symbol, sig.strike, sig.option_type,
+            monthly=use_monthly,
         )
     except Exception as exc:  # noqa: BLE001
         return {"placed": False, "reason": f"Option resolution failed: {exc}"}
