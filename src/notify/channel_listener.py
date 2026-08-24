@@ -1226,7 +1226,6 @@ def _build_eod_report(target_date: str | None = None) -> str:
         target_date = datetime.now(IST).strftime("%Y-%m-%d")
 
     _db.init_db()
-    conn = _db.get_conn()
 
     channels = [
         ("ch1", "CH1 Paid"),
@@ -1243,67 +1242,67 @@ def _build_eod_report(target_date: str | None = None) -> str:
     grand_losses = 0
     grand_trades = 0
     grand_charges = 0
-    channel_summaries = []
 
-    for ch_key, ch_label in channels:
-        if ch_key == "oeh":
-            ch_filter = "channel='oeh'"
-        elif ch_key == "ch1":
-            ch_filter = "channel IN ('ch1','ch1b')"
-        else:
-            ch_filter = f"channel='{ch_key}'"
+    with _db.get_conn() as conn:
+        for ch_key, ch_label in channels:
+            if ch_key == "oeh":
+                ch_filter = "channel='oeh'"
+            elif ch_key == "ch1":
+                ch_filter = "channel IN ('ch1','ch1b')"
+            else:
+                ch_filter = f"channel='{ch_key}'"
 
-        rows = conn.execute(
-            f"SELECT id, ts, symbol, price, exit_price, pnl, status, "
-            f"stop_price, target_price, qty, charges "
-            f"FROM trades WHERE {ch_filter} AND ts >= ? AND ts < ? ORDER BY ts",
-            (f"{target_date}T00:00:00", f"{target_date}T23:59:59")
-        ).fetchall()
+            rows = conn.execute(
+                f"SELECT id, ts, symbol, price, exit_price, pnl, status, "
+                f"stop_price, target_price, qty, charges "
+                f"FROM trades WHERE {ch_filter} AND ts >= ? AND ts < ? ORDER BY ts",
+                (f"{target_date}T00:00:00", f"{target_date}T23:59:59")
+            ).fetchall()
 
-        if not rows:
-            continue
+            if not rows:
+                continue
 
-        closed = [r for r in rows if r["status"] and r["status"] != "OPEN"]
-        open_trades = [r for r in rows if r["status"] == "OPEN"]
+            closed = [r for r in rows if r["status"] and r["status"] != "OPEN"]
+            open_trades = [r for r in rows if r["status"] == "OPEN"]
 
-        ch_pnl = sum((r["pnl"] or 0) for r in closed)
-        ch_charges = sum((r["charges"] or 0) for r in closed)
-        ch_wins = sum(1 for r in closed if (r["pnl"] or 0) > 0)
-        ch_losses = sum(1 for r in closed if (r["pnl"] or 0) <= 0)
-        ch_best = max((r["pnl"] or 0) for r in closed) if closed else 0
-        ch_worst = min((r["pnl"] or 0) for r in closed) if closed else 0
+            ch_pnl = sum((r["pnl"] or 0) for r in closed)
+            ch_charges = sum((r["charges"] or 0) for r in closed)
+            ch_wins = sum(1 for r in closed if (r["pnl"] or 0) > 0)
+            ch_losses = sum(1 for r in closed if (r["pnl"] or 0) <= 0)
+            ch_best = max((r["pnl"] or 0) for r in closed) if closed else 0
+            ch_worst = min((r["pnl"] or 0) for r in closed) if closed else 0
 
-        grand_pnl += ch_pnl
-        grand_wins += ch_wins
-        grand_losses += ch_losses
-        grand_trades += len(closed)
-        grand_charges += ch_charges
+            grand_pnl += ch_pnl
+            grand_wins += ch_wins
+            grand_losses += ch_losses
+            grand_trades += len(closed)
+            grand_charges += ch_charges
 
-        wr = f"{ch_wins / len(closed) * 100:.0f}%" if closed else "—"
-        icon = "🟢" if ch_pnl >= 0 else "🔴"
+            wr = f"{ch_wins / len(closed) * 100:.0f}%" if closed else "—"
+            icon = "🟢" if ch_pnl >= 0 else "🔴"
 
-        lines.append(f"{icon} *{ch_label}*")
-        lines.append(f"  Trades: {len(closed)} ({ch_wins}W / {ch_losses}L) | WR: {wr}")
-        lines.append(f"  P&L: ₹{ch_pnl:+,.0f} | Charges: ₹{ch_charges:,.0f}")
-        lines.append(f"  Best: ₹{ch_best:+,.0f} | Worst: ₹{ch_worst:+,.0f}")
+            lines.append(f"{icon} *{ch_label}*")
+            lines.append(f"  Trades: {len(closed)} ({ch_wins}W / {ch_losses}L) | WR: {wr}")
+            lines.append(f"  P&L: ₹{ch_pnl:+,.0f} | Charges: ₹{ch_charges:,.0f}")
+            lines.append(f"  Best: ₹{ch_best:+,.0f} | Worst: ₹{ch_worst:+,.0f}")
 
-        if open_trades:
-            lines.append(f"  ⚠️ {len(open_trades)} still OPEN")
+            if open_trades:
+                lines.append(f"  ⚠️ {len(open_trades)} still OPEN")
 
-        lines.append("")
+            lines.append("")
 
-        for r in closed:
-            pnl = r["pnl"] or 0
-            icon_t = "✅" if pnl > 0 else "❌"
-            status = (r["status"] or "").replace("CLOSED_", "").replace("_", " ").title()
-            entry_p = f"{r['price']:.1f}" if r["price"] else "—"
-            exit_p = f"{r['exit_price']:.1f}" if r["exit_price"] else "—"
-            lines.append(
-                f"  {icon_t} {r['symbol']}"
-                f"\n     Entry: {entry_p} → Exit: {exit_p} | Qty: {r['qty']}"
-                f"\n     P&L: ₹{pnl:+,.0f} | {status}"
-            )
-        lines.append("")
+            for r in closed:
+                pnl = r["pnl"] or 0
+                icon_t = "✅" if pnl > 0 else "❌"
+                status = (r["status"] or "").replace("CLOSED_", "").replace("_", " ").title()
+                entry_p = f"{r['price']:.1f}" if r["price"] else "—"
+                exit_p = f"{r['exit_price']:.1f}" if r["exit_price"] else "—"
+                lines.append(
+                    f"  {icon_t} {r['symbol']}"
+                    f"\n     Entry: {entry_p} → Exit: {exit_p} | Qty: {r['qty']}"
+                    f"\n     P&L: ₹{pnl:+,.0f} | {status}"
+                )
+            lines.append("")
 
     if grand_trades == 0:
         lines.append("No trades today.")
