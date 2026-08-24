@@ -1219,13 +1219,14 @@ def _build_eod_report(target_date: str | None = None) -> str:
     """Build a formatted EOD report for the given date (default: today)."""
     from zoneinfo import ZoneInfo
     from datetime import datetime
+    from src.storage import db as _db
     IST = ZoneInfo(config.TIMEZONE)
 
     if target_date is None:
         target_date = datetime.now(IST).strftime("%Y-%m-%d")
 
-    db.init_db()
-    conn = db.get_conn()
+    _db.init_db()
+    conn = _db.get_conn()
 
     channels = [
         ("ch1", "CH1 Paid"),
