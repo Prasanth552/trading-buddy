@@ -103,6 +103,11 @@ OEH_TARGET_MULT = 2.0           # target = 2x entry premium
 OEH_TOLERANCE = 0.05            # ₹0.05 tolerance for high <= open check
 OEH_MIN_DROP_PCT = 0.3          # skip candidates with <0.3% drop (weak signal)
 OEH_BLOCKLIST = {"GODREJCP", "GRASIM"}  # repeat losers — skip these
+
+# ---------------------------------------------------------------------------
+# EOD Report — sent to Telegram at market close
+# ---------------------------------------------------------------------------
+EOD_REPORT_TIME = "15:35"  # IST — 5 min after market close
 OEH_UNIVERSE = [
     "RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK", "BHARTIARTL",
     "SBIN", "ITC", "BAJFINANCE", "LT", "KOTAKBANK", "AXISBANK",
@@ -1208,6 +1213,124 @@ async def _run_oeh_scan():
 
 
 # ---------------------------------------------------------------------------
+# EOD Report — daily summary sent to Telegram
+# ---------------------------------------------------------------------------
+def _build_eod_report(target_date: str | None = None) -> str:
+    """Build a formatted EOD report for the given date (default: today)."""
+    from zoneinfo import ZoneInfo
+    from datetime import datetime
+    IST = ZoneInfo(config.TIMEZONE)
+
+    if target_date is None:
+        target_date = datetime.now(IST).strftime("%Y-%m-%d")
+
+    db.init_db()
+    conn = db.get_conn()
+
+    channels = [
+        ("ch1", "CH1 Paid"),
+        ("ch2", "CH2 G Prime"),
+        ("oeh", "OEH Scanner"),
+    ]
+
+    lines = []
+    lines.append(f"📊 *DAY END REPORT — {target_date}*")
+    lines.append("")
+
+    grand_pnl = 0
+    grand_wins = 0
+    grand_losses = 0
+    grand_trades = 0
+    grand_charges = 0
+    channel_summaries = []
+
+    for ch_key, ch_label in channels:
+        if ch_key == "oeh":
+            ch_filter = "channel='oeh'"
+        elif ch_key == "ch1":
+            ch_filter = "channel IN ('ch1','ch1b')"
+        else:
+            ch_filter = f"channel='{ch_key}'"
+
+        rows = conn.execute(
+            f"SELECT id, ts, symbol, price, exit_price, pnl, status, "
+            f"stop_price, target_price, qty, charges "
+            f"FROM trades WHERE {ch_filter} AND ts >= ? AND ts < ? ORDER BY ts",
+            (f"{target_date}T00:00:00", f"{target_date}T23:59:59")
+        ).fetchall()
+
+        if not rows:
+            continue
+
+        closed = [r for r in rows if r["status"] and r["status"] != "OPEN"]
+        open_trades = [r for r in rows if r["status"] == "OPEN"]
+
+        ch_pnl = sum((r["pnl"] or 0) for r in closed)
+        ch_charges = sum((r["charges"] or 0) for r in closed)
+        ch_wins = sum(1 for r in closed if (r["pnl"] or 0) > 0)
+        ch_losses = sum(1 for r in closed if (r["pnl"] or 0) <= 0)
+        ch_best = max((r["pnl"] or 0) for r in closed) if closed else 0
+        ch_worst = min((r["pnl"] or 0) for r in closed) if closed else 0
+
+        grand_pnl += ch_pnl
+        grand_wins += ch_wins
+        grand_losses += ch_losses
+        grand_trades += len(closed)
+        grand_charges += ch_charges
+
+        wr = f"{ch_wins / len(closed) * 100:.0f}%" if closed else "—"
+        icon = "🟢" if ch_pnl >= 0 else "🔴"
+
+        lines.append(f"{icon} *{ch_label}*")
+        lines.append(f"  Trades: {len(closed)} ({ch_wins}W / {ch_losses}L) | WR: {wr}")
+        lines.append(f"  P&L: ₹{ch_pnl:+,.0f} | Charges: ₹{ch_charges:,.0f}")
+        lines.append(f"  Best: ₹{ch_best:+,.0f} | Worst: ₹{ch_worst:+,.0f}")
+
+        if open_trades:
+            lines.append(f"  ⚠️ {len(open_trades)} still OPEN")
+
+        lines.append("")
+
+        for r in closed:
+            pnl = r["pnl"] or 0
+            icon_t = "✅" if pnl > 0 else "❌"
+            status = (r["status"] or "").replace("CLOSED_", "").replace("_", " ").title()
+            entry_p = f"{r['price']:.1f}" if r["price"] else "—"
+            exit_p = f"{r['exit_price']:.1f}" if r["exit_price"] else "—"
+            lines.append(
+                f"  {icon_t} {r['symbol']}"
+                f"\n     Entry: {entry_p} → Exit: {exit_p} | Qty: {r['qty']}"
+                f"\n     P&L: ₹{pnl:+,.0f} | {status}"
+            )
+        lines.append("")
+
+    if grand_trades == 0:
+        lines.append("No trades today.")
+        return "\n".join(lines)
+
+    net_pnl = grand_pnl - grand_charges
+    grand_icon = "🟢" if grand_pnl >= 0 else "🔴"
+    grand_wr = f"{grand_wins / grand_trades * 100:.0f}%" if grand_trades else "—"
+
+    lines.append("━" * 28)
+    lines.append(f"{grand_icon} *TOTAL: ₹{grand_pnl:+,.0f}*")
+    lines.append(f"  Trades: {grand_trades} ({grand_wins}W / {grand_losses}L) | WR: {grand_wr}")
+    lines.append(f"  Charges: ₹{grand_charges:,.0f} | Net: ₹{net_pnl:+,.0f}")
+    lines.append("")
+    lines.append("_Trading Buddy • Auto-generated_")
+
+    return "\n".join(lines)
+
+
+def send_eod_report(target_date: str | None = None) -> None:
+    """Build and send the EOD report via Telegram."""
+    report = _build_eod_report(target_date)
+    log.info("[EOD] Sending day-end report...")
+    _notify(report)
+    log.info("[EOD] Report sent.")
+
+
+# ---------------------------------------------------------------------------
 # Telegram listener — tri-channel
 # ---------------------------------------------------------------------------
 def _normalize_channel_id(raw: str) -> int | None:
@@ -1453,6 +1576,37 @@ async def start_listener() -> None:
 
     asyncio.get_event_loop().create_task(_oeh_scheduler())
     log.info("OEH scanner started — runs daily at %s IST", OEH_RUN_TIME)
+
+    # --- EOD Report: send daily at 15:35 IST ---
+    async def _eod_report_scheduler():
+        from zoneinfo import ZoneInfo
+        from datetime import datetime, timedelta
+        IST = ZoneInfo(config.TIMEZONE)
+
+        h, m = map(int, EOD_REPORT_TIME.split(":"))
+
+        while True:
+            now = datetime.now(IST)
+            target = now.replace(hour=h, minute=m, second=0, microsecond=0)
+            if now >= target:
+                target += timedelta(days=1)
+
+            wait_secs = (target - now).total_seconds()
+            log.info("[EOD] Next report at %s IST (in %.0f min)",
+                     target.strftime("%Y-%m-%d %H:%M"), wait_secs / 60)
+            await asyncio.sleep(wait_secs)
+
+            if not mc.is_market_day():
+                log.info("[EOD] Not a trading day, skipping report")
+                continue
+
+            try:
+                send_eod_report()
+            except Exception as exc:
+                log.error("[EOD] Failed to send report: %s", exc)
+
+    asyncio.get_event_loop().create_task(_eod_report_scheduler())
+    log.info("EOD report scheduler started — runs daily at %s IST", EOD_REPORT_TIME)
 
     @client.on(events.NewMessage(chats=listen_channels))
     async def on_signal(event):
