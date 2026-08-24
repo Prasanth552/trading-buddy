@@ -1507,7 +1507,7 @@ async def start_listener() -> None:
 
             # Catch-up: if process started after scheduled time but before 15:00,
             # run the scanner immediately on first iteration
-            if first_run and mc.is_market_day():
+            if first_run and mc.is_trading_day():
                 first_run = False
                 scheduled = now.replace(hour=h, minute=m, second=0, microsecond=0)
                 if now > scheduled and now.hour < 15:
@@ -1525,7 +1525,7 @@ async def start_listener() -> None:
                      target.strftime("%Y-%m-%d %H:%M"), wait_secs / 60)
             await asyncio.sleep(wait_secs)
 
-            if not mc.is_market_day():
+            if not mc.is_trading_day():
                 log.info("[CH5] Not a trading day, skipping scanner")
                 continue
 
@@ -1551,7 +1551,7 @@ async def start_listener() -> None:
 
             now = datetime.now(IST)
 
-            if first_run and mc.is_market_day():
+            if first_run and mc.is_trading_day():
                 first_run = False
                 scheduled = now.replace(hour=h, minute=m, second=0, microsecond=0)
                 if now > scheduled and now.hour < 15:
@@ -1569,7 +1569,7 @@ async def start_listener() -> None:
                      target.strftime("%Y-%m-%d %H:%M"), wait_secs / 60)
             await asyncio.sleep(wait_secs)
 
-            if not mc.is_market_day():
+            if not mc.is_trading_day():
                 log.info("[OEH] Not a trading day, skipping scan")
                 continue
 
@@ -1597,7 +1597,7 @@ async def start_listener() -> None:
                      target.strftime("%Y-%m-%d %H:%M"), wait_secs / 60)
             await asyncio.sleep(wait_secs)
 
-            if not mc.is_market_day():
+            if not mc.is_trading_day():
                 log.info("[EOD] Not a trading day, skipping report")
                 continue
 
