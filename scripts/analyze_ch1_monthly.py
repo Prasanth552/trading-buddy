@@ -54,9 +54,10 @@ if not token:
 client = UpstoxData()
 master = client._load_master()
 
+from datetime import timedelta
+
 def is_monthly(exp_date):
-    last_day = calendar.monthrange(exp_date.year, exp_date.month)[1]
-    return exp_date.day >= last_day - 7
+    return exp_date >= today + timedelta(days=7)
 
 def resolve_monthly(symbol_str):
     """Parse 'MUTHOOTFIN 3000 CE' and find monthly expiry instrument."""

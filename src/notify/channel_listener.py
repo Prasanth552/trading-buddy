@@ -343,15 +343,15 @@ def _resolve_channel_option(
         return None, 1
 
     if monthly and len(candidates) > 1:
-        def _is_monthly(exp_date: date) -> bool:
-            last_day = calendar.monthrange(exp_date.year, exp_date.month)[1]
-            return exp_date.day >= last_day - 7
-        monthly_cands = [(e, i) for e, i in candidates if _is_monthly(e)]
+        from datetime import timedelta
+        min_expiry = today + timedelta(days=7)
+        monthly_cands = [(e, i) for e, i in candidates if e >= min_expiry]
         if monthly_cands:
             monthly_cands.sort(key=lambda x: x[0])
             chosen = monthly_cands[0][1]
             exp_chosen = monthly_cands[0][0]
-            log.info("Monthly expiry selected for %s %s %s: %s", sym, strike, option_type, exp_chosen)
+            log.info("Monthly expiry selected for %s %s %s: %s (skipped weeklies before %s)",
+                     sym, strike, option_type, exp_chosen, min_expiry)
             lot_size = int(chosen.get("lot_size", 1)) or 1
             return chosen, lot_size
 
