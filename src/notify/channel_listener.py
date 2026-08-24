@@ -1245,7 +1245,7 @@ async def start_listener() -> None:
     ch2_int = _normalize_channel_id(ch2_id) if ch2_id else None
     ch3_int = _normalize_channel_id(ch3_id) if ch3_id else None
 
-    listen_channels = [c for c in [ch1_int or ch1_id, ch1b_int, ch2_int, ch3_int] if c]
+    listen_channels = [c for c in [ch1_int or ch1_id, ch1b_int, ch2_int] if c]
     ch1b_ids = {ch1b_int} if ch1b_int else set()
     ch2_ids = {ch2_int} if ch2_int else set()
     ch3_ids = {ch3_int} if ch3_int else set()
