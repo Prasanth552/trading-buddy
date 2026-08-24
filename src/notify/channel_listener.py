@@ -1329,10 +1329,10 @@ async def start_listener() -> None:
                     prev_peak = _peak_net.get(tid, 0)
                     _peak_net[tid] = max(prev_peak, net_pnl)
 
-                    if net_pnl >= PROFIT_TARGET:
-                        log.info("FIXED PROFIT TARGET hit for %s: net_pnl=₹%.0f >= ₹%d",
-                                 trade["symbol"], net_pnl, PROFIT_TARGET)
-                        _close_trade_by_id(tid, ltp, "profit_target")
+                    if trade["target_price"] and ltp >= trade["target_price"]:
+                        log.info("CHANNEL TARGET hit for %s: LTP=%.2f >= target=%.2f net=₹%.0f",
+                                 trade["symbol"], ltp, trade["target_price"], net_pnl)
+                        _close_trade_by_id(tid, ltp, "target_hit")
                         _peak_net.pop(tid, None)
                     elif trade["stop_price"] and ltp <= trade["stop_price"]:
                         log.info("SL HIT for %s: LTP=%.2f <= SL=%.2f",
@@ -1349,6 +1349,11 @@ async def start_listener() -> None:
                             f"Loss hit ₹{abs(net_pnl):,.0f} (cap: ₹{MAX_LOSS_PER_TRADE:,})\n"
                             f"Auto-closed to protect capital."
                         )
+                    elif _peak_net[tid] >= PROFIT_TARGET and net_pnl <= PROFIT_TARGET:
+                        log.info("FLOOR EXIT for %s: peak=₹%.0f dipped to ₹%.0f (floor=₹%d)",
+                                 trade["symbol"], _peak_net[tid], net_pnl, PROFIT_TARGET)
+                        _close_trade_by_id(tid, ltp, "profit_floor")
+                        _peak_net.pop(tid, None)
             except Exception as exc:  # noqa: BLE001
                 _monitor_fail_count += 1
                 if _monitor_fail_count % 60 == 0:
