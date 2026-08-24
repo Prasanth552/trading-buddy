@@ -384,7 +384,9 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
 
 /* Trade history cards */
 .trade-card{background:var(--sf);border:1px solid var(--bd);border-radius:10px;
-  padding:10px 12px;margin-bottom:6px;display:flex;align-items:center;gap:10px}
+  padding:10px 12px;margin-bottom:6px;cursor:pointer;transition:border-color .15s}
+.trade-card:hover{border-color:var(--ac)}
+.tc-top{display:flex;align-items:center;gap:10px}
 .tc-icon{width:32px;height:32px;border-radius:8px;display:flex;align-items:center;
   justify-content:center;font-size:14px;font-weight:800;flex-shrink:0}
 .tc-icon.w{background:var(--gd);color:var(--gn)}
@@ -394,6 +396,17 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
   overflow:hidden;text-overflow:ellipsis}
 .tc-meta{font-size:10px;color:var(--mt)}
 .tc-pnl{font-size:14px;font-weight:800;font-family:var(--mn);text-align:right;flex-shrink:0}
+.tc-detail{display:none;margin-top:8px;padding-top:8px;border-top:1px solid var(--bd)}
+.trade-card.expanded .tc-detail{display:block}
+.tc-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px 12px}
+.tc-item{font-size:11px;color:var(--mt)}
+.tc-item b{color:var(--fg);font-weight:600;font-family:var(--mn)}
+.tc-reason{display:inline-block;margin-top:6px;font-size:10px;font-weight:700;
+  padding:2px 8px;border-radius:4px;text-transform:uppercase;letter-spacing:.5px}
+.tc-reason.tgt{background:var(--gd);color:var(--gn)}
+.tc-reason.sl{background:var(--rdd);color:var(--rd)}
+.tc-reason.floor{background:#f0ad4e22;color:#f0ad4e}
+.tc-reason.eod{background:var(--bd);color:var(--mt)}
 
 /* Filter pills */
 .fpills{display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap}
@@ -663,6 +676,26 @@ function rO(T){
   }).join('');
 }
 
+function exitLabel(s){
+  if(!s)return{t:'closed',c:'eod'};
+  const sl=s.toLowerCase();
+  if(sl.includes('target'))return{t:'Target Hit',c:'tgt'};
+  if(sl.includes('profit_floor')||sl.includes('floor'))return{t:'Profit Floor',c:'floor'};
+  if(sl.includes('sl_hit')||sl.includes('stop'))return{t:'SL Hit',c:'sl'};
+  if(sl.includes('max_loss'))return{t:'Max Loss',c:'sl'};
+  if(sl.includes('eod')||sl.includes('square'))return{t:'EOD',c:'eod'};
+  if(sl.includes('manual'))return{t:'Manual',c:'eod'};
+  return{t:s.replace(/CLOSED_?/i,'').replace(/_/g,' ')||'Closed',c:'eod'};
+}
+function dur(entry,exit){
+  if(!entry||!exit)return'-';
+  const ms=new Date(exit)-new Date(entry);
+  if(ms<0)return'-';
+  const m=Math.floor(ms/60000),h=Math.floor(m/60),rm=m%60;
+  return h>0?h+'h '+rm+'m':rm+'m';
+}
+function togCard(el){el.classList.toggle('expanded')}
+
 function rH(T){
   const C=T.filter(t=>t.status!=='OPEN');
   let F=C;if(CF==='w')F=C.filter(t=>t.pnl>0);else if(CF==='l')F=C.filter(t=>t.pnl!==null&&t.pnl<=0);
@@ -674,11 +707,34 @@ function rH(T){
   if(!F.length){$('hw').innerHTML='<div class=empty>No trades yet</div>';return}
   $('hw').innerHTML=F.map(t=>{
     const isW=t.pnl>0;
-    return '<div class=trade-card>'+
-      '<div class="tc-icon '+(isW?'w':'l')+'">'+(isW?'W':'L')+'</div>'+
-      '<div class=tc-body><div class=tc-sym>'+t.symbol+'</div>'+
-        '<div class=tc-meta>'+tf(t.ts)+' | Qty '+t.qty+'</div></div>'+
-      '<div class="tc-pnl '+pc(t.pnl)+'">'+inr(t.pnl)+'</div>'+
+    const ex=exitLabel(t.status);
+    const entryP=t.price!=null?t.price.toFixed(2):'-';
+    const exitP=t.exit_price!=null?t.exit_price.toFixed(2):'-';
+    const slP=t.stop_price!=null?t.stop_price.toFixed(2):'-';
+    const tgtP=t.target_price!=null?t.target_price.toFixed(2):'-';
+    const ch=t.charges!=null?'₹'+Math.abs(Math.round(t.charges)).toLocaleString('en-IN'):'-';
+    const netPnl=t.pnl!=null&&t.charges!=null?t.pnl-t.charges:t.pnl;
+    return '<div class=trade-card onclick="togCard(this)">'+
+      '<div class=tc-top>'+
+        '<div class="tc-icon '+(isW?'w':'l')+'">'+(isW?'W':'L')+'</div>'+
+        '<div class=tc-body><div class=tc-sym>'+t.symbol+'</div>'+
+          '<div class=tc-meta>'+tf(t.ts)+' | Qty '+t.qty+'</div></div>'+
+        '<div class="tc-pnl '+pc(t.pnl)+'">'+inr(t.pnl)+'</div>'+
+      '</div>'+
+      '<div class=tc-detail>'+
+        '<div class=tc-grid>'+
+          '<div class=tc-item>Entry <b>'+entryP+'</b></div>'+
+          '<div class=tc-item>Exit <b>'+exitP+'</b></div>'+
+          '<div class=tc-item>Duration <b>'+dur(t.ts,t.exit_ts||t.ts)+'</b></div>'+
+          '<div class=tc-item>SL <b>'+slP+'</b></div>'+
+          '<div class=tc-item>TGT <b>'+tgtP+'</b></div>'+
+          '<div class=tc-item>Qty <b>'+t.qty+'</b></div>'+
+          '<div class=tc-item>Charges <b>'+ch+'</b></div>'+
+          '<div class=tc-item>Net P&L <b class="'+pc(netPnl)+'">'+inr(netPnl)+'</b></div>'+
+          '<div class=tc-item>Broker <b style="font-size:9px;word-break:break-all">'+(t.broker_key||'-')+'</b></div>'+
+        '</div>'+
+        '<div class="tc-reason '+ex.c+'">'+ex.t+'</div>'+
+      '</div>'+
     '</div>'
   }).join('');
 }
