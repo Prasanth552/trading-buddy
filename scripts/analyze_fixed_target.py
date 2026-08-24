@@ -108,7 +108,9 @@ for row in rows:
 
     base_sym = get_base_symbol(symbol)
     lot_size = LOT_SIZES.get(base_sym, DEFAULT_LOT)
-    qty = lot_size * args.lots
+    is_index = base_sym in ("NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY")
+    trade_lots = 3 if is_index else args.lots
+    qty = lot_size * trade_lots
     need_pts = args.target / qty
 
     my_tgt = entry + need_pts
@@ -224,7 +226,7 @@ if total > 0:
     print(f"  Losers:           {losses}")
     print(f"  Win Rate:         {wins}/{total} = {wins/total*100:.0f}%")
     print()
-    print(f"  Fixed TGT P&L:    ₹{total_pnl:+,.0f}  (₹{args.target:,.0f}/trade, {args.lots} lots)")
+    print(f"  Fixed TGT P&L:    ₹{total_pnl:+,.0f}  (₹{args.target:,.0f}/trade, {args.lots} lots / 3 lots for index)")
     print(f"  Actual DB P&L:    ₹{total_db_pnl:+,.0f}  (channel targets, 3 lots)")
     print(f"  Difference:       ₹{total_pnl - total_db_pnl:+,.0f}")
     print()
