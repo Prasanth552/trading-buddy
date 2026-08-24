@@ -25,6 +25,8 @@ IST = ZoneInfo("Asia/Kolkata")
 parser = argparse.ArgumentParser()
 parser.add_argument("--date", default=None)
 parser.add_argument("--skip-filter", action="store_true", help="Skip NIFTY trend filter")
+parser.add_argument("--lots", type=int, default=1, help="Number of lots (default: 1)")
+parser.add_argument("--floor", type=float, default=0, help="Profit floor in ₹ (0=use SL/TGT only)")
 args = parser.parse_args()
 
 target_date = args.date or datetime.now(IST).strftime("%Y-%m-%d")
@@ -196,14 +198,18 @@ def resolve_atm_pe(sym):
     return inst.get("instrument_key"), atm_strike, fo_candidates[0][0]
 
 
+FLOOR = args.floor
+LOTS = args.lots
+floor_label = f"₹{FLOOR:,.0f} floor" if FLOOR > 0 else "no floor"
+
 print()
-print("=" * 150)
-print(f"  OEH SIMULATION — {target_date} — SL={OEH_SL_PCT*100:.0f}% | TGT={OEH_TARGET_MULT:.0f}x | 1 lot")
-print("=" * 150)
+print("=" * 160)
+print(f"  OEH SIMULATION — {target_date} — SL={OEH_SL_PCT*100:.0f}% | TGT={OEH_TARGET_MULT:.0f}x | {LOTS} lot(s) | {floor_label}")
+print("=" * 160)
 print(f"  {'#':<3} {'Symbol':<14} {'EqOpen':>8} {'EqHigh':>8} {'EqClose':>8} {'Drop%':>6} "
       f"{'Strike':>8} {'PEentry':>8} {'SL':>8} {'TGT':>8} {'Qty':>5} "
       f"{'PEpeak':>8} {'PElow':>8} {'Result':<8} {'P&L':>10}")
-print("  " + "─" * 148)
+print("  " + "─" * 158)
 
 total_pnl = 0
 wins = losses = nodata = 0
@@ -241,11 +247,13 @@ for i, c in enumerate(top, 1):
     tgt = round(pe_entry * OEH_TARGET_MULT, 2)
 
     lot_size = LOT_SIZES.get(sym, DEFAULT_LOT)
-    qty = lot_size * 1
+    qty = lot_size * LOTS
 
-    # Walk candles
+    # Walk candles with floor logic
     max_high = 0
     min_low = 999999
+    peak_pnl = 0
+    floor_armed = False
     result = "OPEN"
     exit_price = pe_entry
 
@@ -253,12 +261,19 @@ for i, c in enumerate(top, 1):
         max_high = max(max_high, cd["high"])
         min_low = min(min_low, cd["low"])
 
+        candle_peak = (cd["high"] - pe_entry) * qty
+        peak_pnl = max(peak_pnl, candle_peak)
+
+        if FLOOR > 0 and peak_pnl >= FLOOR:
+            floor_armed = True
+
         t_hit = cd["high"] >= tgt
         s_hit = cd["low"] <= sl
+        low_pnl = (cd["low"] - pe_entry) * qty
 
         if t_hit and s_hit:
-            result = "BOTH"
-            exit_price = sl
+            result = "BOTH_TGT"
+            exit_price = tgt
             break
         elif t_hit:
             result = "TGT"
@@ -267,6 +282,10 @@ for i, c in enumerate(top, 1):
         elif s_hit:
             result = "SL"
             exit_price = sl
+            break
+        elif floor_armed and low_pnl <= FLOOR:
+            exit_price = pe_entry + (FLOOR / qty)
+            result = "FLOOR"
             break
 
     if result == "OPEN":
@@ -290,12 +309,12 @@ for i, c in enumerate(top, 1):
           f"{max_high:>8.1f} {min_low:>8.1f} [{icon}] {result:<5} {pnl:>+10,.0f}")
 
 print()
-print("=" * 150)
+print("=" * 160)
 total = wins + losses
 if total > 0:
     print(f"  Trades: {total} ({nodata} no data) | Wins: {wins} | Losses: {losses} | Win Rate: {wins/total*100:.0f}%")
     print(f"  Total P&L: ₹{total_pnl:+,.0f}")
 else:
     print("  No trades could be simulated.")
-print(f"  Strategy: Buy ATM PE on OEH stocks | SL={OEH_SL_PCT*100:.0f}% | TGT={OEH_TARGET_MULT:.0f}x | 1 lot")
-print("=" * 150)
+print(f"  Strategy: Buy ATM PE on OEH stocks | SL={OEH_SL_PCT*100:.0f}% | TGT={OEH_TARGET_MULT:.0f}x | {LOTS} lot(s) | {floor_label}")
+print("=" * 160)
