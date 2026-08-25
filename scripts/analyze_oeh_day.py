@@ -27,7 +27,7 @@ OEH_TOLERANCE = 0.05
 OEH_MIN_DROP_PCT = 0.3
 OEH_SL_PCT = 0.30
 OEH_TARGET_MULT = 2.0
-LOTS = 2
+MAX_LOSS_PER_TRADE = 1500
 
 OEH_UNIVERSE = [
     "RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK", "BHARTIARTL",
@@ -260,7 +260,7 @@ for i, c in enumerate(candidates, 1):
 
 # Step 2: Backtest PE trades
 print(f"\n{'─' * 120}")
-print(f"  STEP 2: PE Trade Backtest ({LOTS} lots, ₹{PROFIT_FLOOR:,} floor, SL={OEH_SL_PCT*100:.0f}%, TGT={OEH_TARGET_MULT}x)")
+print(f"  STEP 2: PE Trade Backtest (max loss ₹{MAX_LOSS_PER_TRADE:,}, ₹{PROFIT_FLOOR:,} floor, SL={OEH_SL_PCT*100:.0f}%, TGT={OEH_TARGET_MULT}x)")
 print(f"{'─' * 120}\n")
 
 from_dt_opt = datetime(year, month, day, 9, 15, tzinfo=IST)
@@ -285,7 +285,6 @@ for i, c in enumerate(candidates, 1):
         continue
 
     lot_size_used = LOT_SIZES.get(sym, lot_size or DEFAULT_LOT)
-    qty = lot_size_used * LOTS
 
     try:
         candles = ud.historical_data(opt_key, from_dt_opt, to_dt_opt, "5minute")
@@ -315,6 +314,15 @@ for i, c in enumerate(candidates, 1):
     sl = round(entry * (1 - OEH_SL_PCT), 2)
     tgt = round(entry * OEH_TARGET_MULT, 2)
 
+    sl_per_unit = entry - sl
+    if sl_per_unit > 0:
+        raw_qty = MAX_LOSS_PER_TRADE / sl_per_unit
+        lots = max(1, int(raw_qty / lot_size_used))
+        qty = lots * lot_size_used
+    else:
+        lots = 1
+        qty = lot_size_used
+
     exit_price, result, max_high, min_low = walk_candles_floor(filtered, entry, sl, tgt, qty)
     pnl = (exit_price - entry) * qty
 
@@ -327,12 +335,12 @@ for i, c in enumerate(candidates, 1):
 
     exp_str = exp_date.strftime("%d%b") if exp_date else ""
     print(f"  {i:<4} {sym:<14} {atm_strike:>8.0f} {entry:>8.1f} {sl:>8.1f} {tgt:>8.1f} "
-          f"{LOTS:>5} {qty:>6} {max_high:>8.1f} {min_low:>8.1f} [{icon}] {result:<5} {pnl:>+10,.0f}")
+          f"{lots:>5} {qty:>6} {max_high:>8.1f} {min_low:>8.1f} [{icon}] {result:<5} {pnl:>+10,.0f}")
 
 print(f"\n{'─' * 120}")
 print(f"  RESULTS: {wins}W/{losses}L ({no_data} no data)")
 print(f"  Total P&L: ₹{total_pnl:+,.0f}")
-print(f"  Settings: {LOTS} lots, ₹{PROFIT_FLOOR:,} floor, SL {OEH_SL_PCT*100:.0f}%, TGT {OEH_TARGET_MULT}x")
+print(f"  Settings: max loss ₹{MAX_LOSS_PER_TRADE:,}, ₹{PROFIT_FLOOR:,} floor, SL {OEH_SL_PCT*100:.0f}%, TGT {OEH_TARGET_MULT}x")
 print(f"{'─' * 120}")
 
 # Save results
@@ -343,7 +351,7 @@ with open(out_path, "w") as f:
     f.write(f"OEH Analysis — {target_date}\n")
     f.write(f"Candidates: {len(candidates)} | Trades: {wins + losses} ({wins}W/{losses}L)\n")
     f.write(f"Total P&L: ₹{total_pnl:+,.0f}\n")
-    f.write(f"Settings: {LOTS} lots, ₹{PROFIT_FLOOR:,} floor, SL {OEH_SL_PCT*100:.0f}%, TGT {OEH_TARGET_MULT}x\n\n")
+    f.write(f"Settings: max loss ₹{MAX_LOSS_PER_TRADE:,}, ₹{PROFIT_FLOOR:,} floor, SL {OEH_SL_PCT*100:.0f}%, TGT {OEH_TARGET_MULT}x\n\n")
     f.write("Candidates:\n")
     for i, c in enumerate(candidates, 1):
         f.write(f"  {i}. {c['symbol']} — Open {c['open']:.2f}, Drop {c['drop_pct']:.1f}%\n")
