@@ -641,6 +641,10 @@ def _handle_followup(action: str, exit_price: float | None, channel: str, ch_lab
 _ch2_pending: dict[str, Any] | None = None
 _ch2_pending_ts: float = 0.0
 
+_ch2_queued_signal: ParsedSignal | None = None
+_ch2_queued_task: Any = None
+_ch2_trigger_held: ParsedSignal | None = None
+
 _CH2_SYMBOL_RE = re.compile(
     r'(?:(?:Intra|positional|Note)[/\s]*)*'
     r'((?:BANK\s*NIFTY|NIFTY|SENSEX|FINNIFTY|MIDCPNIFTY|[A-Za-z&]{2,20}))'
@@ -660,6 +664,50 @@ _CH2_SL_RE = re.compile(
     re.IGNORECASE,
 )
 _CH2_SKIP: set[str] = set()  # no skips — commodities enabled
+
+
+def _execute_and_notify(sig: ParsedSignal, channel: str, ch_label: str) -> None:
+    """Execute a channel signal with filter scoring and notifications."""
+    filt = None
+    filter_score = None
+    try:
+        from src.signals.smart_filter import evaluate_signal
+        filt = evaluate_signal(sig.symbol, sig.option_type, channel, sig.trigger_price)
+        filter_score = filt.score
+        log.info("[%s] FILTER: score=%d action=%s reasons=%s",
+                 ch_label, filt.score, filt.action, filt.reasons)
+    except Exception as exc:
+        log.warning("Smart filter failed: %s", exc)
+
+    filter_line = f"Filter: {filt.action} (score {filt.score}/100)" if filt else "Filter: unavailable"
+    reason_lines = "\n".join(f"  • {r}" for r in filt.reasons[:5]) if filt else ""
+    filter_tag = ""
+    if filt and filt.action == "SKIP":
+        filter_tag = " (filter: SKIP)"
+    elif filt and filt.action == "REDUCE":
+        filter_tag = " (filter: REDUCE)"
+
+    _notify(
+        f"*[{ch_label}] Signal received — executing{filter_tag}*\n"
+        f"{sig.action} {sig.symbol} {int(sig.strike)} {sig.option_type}\n"
+        f"Entry ABOVE {sig.trigger_price} | SL: {sig.stop_loss} | "
+        f"Targets: {', '.join(str(t) for t in sig.targets)}\n"
+        f"{filter_line}\n{reason_lines}"
+    )
+
+    result = execute_signal(sig, channel=channel, filter_score=filter_score)
+    if result["placed"]:
+        _notify(
+            f"*[{ch_label}] Order placed*\n"
+            f"{result['symbol']} x{result['qty']}\n"
+            f"Entry: {result['entry']} | SL: {result['sl']} | "
+            f"Target: {result['target']} | Floor: ₹{PROFIT_TARGET}\n"
+            f"{filter_line}"
+        )
+        log.info("[%s] Order placed: %s", ch_label, result)
+    else:
+        _notify(f"[{ch_label}] Signal not executed: {result['reason']}")
+        log.warning("[%s] Signal not executed: %s", ch_label, result["reason"])
 
 
 def parse_signal_ch2(text: str) -> ParsedSignal | None:
@@ -1612,6 +1660,8 @@ async def start_listener() -> None:
 
     @client.on(events.NewMessage(chats=listen_channels))
     async def on_signal(event):
+        global _ch2_queued_signal, _ch2_queued_task, _ch2_trigger_held
+
         text = event.message.text or ""
         if not text.strip():
             return
@@ -1628,6 +1678,105 @@ async def start_listener() -> None:
 
         log.info("[%s] Channel message: %s", ch_label, text[:120])
 
+        # --- CH2: handle control messages before parsing ---
+        if channel == "ch2":
+            upper_ctl = text.strip().upper()
+
+            # "WAIT FOR TRIGGER" — hold the queued signal, don't execute yet
+            if re.search(r'WAIT\s+FOR\s+TRIGGER', upper_ctl):
+                if _ch2_queued_task and _ch2_queued_signal:
+                    _ch2_queued_task.cancel()
+                    _ch2_trigger_held = _ch2_queued_signal
+                    _ch2_queued_signal = None
+                    _ch2_queued_task = None
+                    log.info("[CH2] WAIT FOR TRIGGER — held: %s %s %s",
+                             _ch2_trigger_held.symbol, int(_ch2_trigger_held.strike),
+                             _ch2_trigger_held.option_type)
+                    _notify(f"[CH2] Signal held — waiting for trigger:\n"
+                            f"{_ch2_trigger_held.symbol} {int(_ch2_trigger_held.strike)} "
+                            f"{_ch2_trigger_held.option_type}")
+                else:
+                    log.info("[CH2] WAIT FOR TRIGGER — no queued signal to hold")
+                return
+
+            # "Active"/"Actt" — execute the held signal
+            if re.search(r'\bACTIVE\b|\bACTT\b', upper_ctl) and _ch2_trigger_held:
+                sig = _ch2_trigger_held
+                _ch2_trigger_held = None
+                log.info("[CH2] ACTIVE — executing held: %s %s %s",
+                         sig.symbol, int(sig.strike), sig.option_type)
+                _notify(f"[CH2] Trigger ACTIVE — executing:\n"
+                        f"{sig.symbol} {int(sig.strike)} {sig.option_type}")
+                _execute_and_notify(sig, channel, ch_label)
+                return
+
+            # "Not active avoid" — cancel queued or held signal
+            if re.search(r'NOT\s+ACTIVE', upper_ctl):
+                cancelled = []
+                if _ch2_queued_task:
+                    _ch2_queued_task.cancel()
+                    if _ch2_queued_signal:
+                        cancelled.append(f"{_ch2_queued_signal.symbol} "
+                                         f"{int(_ch2_queued_signal.strike)} "
+                                         f"{_ch2_queued_signal.option_type}")
+                    _ch2_queued_signal = None
+                    _ch2_queued_task = None
+                if _ch2_trigger_held:
+                    cancelled.append(f"{_ch2_trigger_held.symbol} "
+                                     f"{int(_ch2_trigger_held.strike)} "
+                                     f"{_ch2_trigger_held.option_type}")
+                    _ch2_trigger_held = None
+                if cancelled:
+                    log.info("[CH2] NOT ACTIVE — cancelled: %s", cancelled)
+                    _notify(f"[CH2] Signal cancelled (not active): {', '.join(cancelled)}")
+                else:
+                    log.info("[CH2] NOT ACTIVE — nothing queued to cancel")
+                return
+
+            # Re-entry via reply: "same range again" / "again focus" / "again"
+            if (event.message.reply_to and event.message.reply_to.reply_to_msg_id
+                    and re.search(r'\bAGAIN\b', upper_ctl)):
+                try:
+                    reply_id = event.message.reply_to.reply_to_msg_id
+                    orig_msg = await client.get_messages(event.chat_id, ids=reply_id)
+                    if orig_msg and orig_msg.text:
+                        sym_m = _CH2_SYMBOL_RE.search(orig_msg.text)
+                        if sym_m:
+                            raw_sym = sym_m.group(1).upper().strip()
+                            raw_sym = re.sub(r'\s+', ' ', raw_sym)
+                            if raw_sym == "BANK NIFTY":
+                                raw_sym = "BANKNIFTY"
+                            strike = float(sym_m.group(2))
+                            opt_type = sym_m.group(3).upper()
+                            trade_sym = f"{raw_sym} {int(strike)} {opt_type}"
+
+                            from src.storage import db as _reentry_db
+                            with _reentry_db.get_conn() as conn:
+                                last = conn.execute(
+                                    "SELECT price, stop_price, target_price FROM trades "
+                                    "WHERE symbol=? AND channel='ch2' ORDER BY ts DESC LIMIT 1",
+                                    (trade_sym,)
+                                ).fetchone()
+
+                            if last:
+                                re_sig = ParsedSignal(
+                                    action="BUY", symbol=raw_sym, strike=strike,
+                                    option_type=opt_type,
+                                    trigger_price=float(last["price"]),
+                                    stop_loss=float(last["stop_price"]),
+                                    targets=[float(last["target_price"])],
+                                )
+                                log.info("[CH2] RE-ENTRY: %s (reply to #%d)",
+                                         trade_sym, reply_id)
+                                _notify(f"[CH2] Re-entry signal:\n{trade_sym}")
+                                _execute_and_notify(re_sig, channel, ch_label)
+                                return
+                            else:
+                                log.info("[CH2] Re-entry: no prior trade found for %s", trade_sym)
+                except Exception as exc:
+                    log.warning("[CH2] Re-entry fetch failed: %s", exc)
+
+        # --- Parse signal ---
         if channel == "ch3":
             sig = parse_signal_ch3(text)
         elif channel == "ch2":
@@ -1640,53 +1789,37 @@ async def start_listener() -> None:
                      ch_label, sig.action, sig.symbol, sig.strike, sig.option_type,
                      sig.trigger_price, sig.stop_loss, sig.targets)
 
-            # --- Smart Filter: score signal (always execute, save score for comparison) ---
-            filt = None
-            filter_score = None
-            try:
-                from src.signals.smart_filter import evaluate_signal
-                filt = evaluate_signal(sig.symbol, sig.option_type, channel, sig.trigger_price)
-                filter_score = filt.score
-                log.info("[%s] FILTER: score=%d action=%s reasons=%s",
-                         ch_label, filt.score, filt.action, filt.reasons)
-            except Exception as exc:
-                log.warning("Smart filter failed: %s", exc)
+            if channel == "ch2":
+                # Queue with 8s delay — allows WAIT FOR TRIGGER to intervene
+                if _ch2_queued_task:
+                    _ch2_queued_task.cancel()
+                _ch2_queued_signal = sig
+                _frozen_ch = channel
+                _frozen_lbl = ch_label
 
-            filter_line = f"Filter: {filt.action} (score {filt.score}/100)" if filt else "Filter: unavailable"
-            reason_lines = "\n".join(f"  • {r}" for r in filt.reasons[:5]) if filt else ""
-            filter_tag = ""
-            if filt and filt.action == "SKIP":
-                filter_tag = " (filter: SKIP)"
-            elif filt and filt.action == "REDUCE":
-                filter_tag = " (filter: REDUCE)"
+                async def _ch2_delayed_exec():
+                    global _ch2_queued_signal, _ch2_queued_task
+                    await asyncio.sleep(8)
+                    if _ch2_queued_signal is sig:
+                        _ch2_queued_signal = None
+                        _ch2_queued_task = None
+                        _execute_and_notify(sig, _frozen_ch, _frozen_lbl)
 
-            _notify(
-                f"*[{ch_label}] Signal received — executing{filter_tag}*\n"
-                f"{sig.action} {sig.symbol} {int(sig.strike)} {sig.option_type}\n"
-                f"Entry ABOVE {sig.trigger_price} | SL: {sig.stop_loss} | "
-                f"Targets: {', '.join(str(t) for t in sig.targets)}\n"
-                f"{filter_line}\n{reason_lines}"
-            )
+                _ch2_queued_task = asyncio.create_task(_ch2_delayed_exec())
+                log.info("[CH2] Signal queued (8s delay): %s %s %s trigger=%.0f",
+                         sig.symbol, int(sig.strike), sig.option_type, sig.trigger_price)
+                _notify(f"[CH2] Signal queued (8s):\n"
+                        f"{sig.symbol} {int(sig.strike)} {sig.option_type} @ {sig.trigger_price}\n"
+                        f"SL: {sig.stop_loss} | TGT: {sig.targets[0]}")
+                return
 
-            result = execute_signal(sig, channel=channel, filter_score=filter_score)
-            if result["placed"]:
-                _notify(
-                    f"*[{ch_label}] Order placed*\n"
-                    f"{result['symbol']} x{result['qty']}\n"
-                    f"Entry: {result['entry']} | SL: {result['sl']} | "
-                    f"Target: {result['target']} | Floor: ₹{PROFIT_TARGET}\n"
-                    f"{filter_line}"
-                )
-                log.info("[%s] Order placed: %s", ch_label, result)
-            else:
-                _notify(f"[{ch_label}] Signal not executed: {result['reason']}")
-                log.warning("[%s] Signal not executed: %s", ch_label, result["reason"])
+            # --- Non-CH2: execute immediately ---
+            _execute_and_notify(sig, channel, ch_label)
             return
 
         # --- Follow-up: "close near cost" → exit the tagged trade at current LTP ---
         action, exit_price = _classify_followup(text)
         if action == "book":
-            # Try to identify which trade by parsing the replied-to message
             original_sig = None
             if event.message.reply_to and event.message.reply_to.reply_to_msg_id:
                 try:
