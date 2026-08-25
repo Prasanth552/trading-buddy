@@ -1759,16 +1759,24 @@ async def start_listener() -> None:
                                 ).fetchone()
 
                             if last:
+                                entry_est = float(last["price"])
+                                orig_tgt = float(last["target_price"])
+                                is_idx = raw_sym in ("NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY")
+                                sl_pct = 0.10 if is_idx else 0.15
+                                re_sl = round(entry_est * (1 - sl_pct))
+                                re_tgt = orig_tgt if orig_tgt > entry_est else round(entry_est * 1.15)
+
                                 re_sig = ParsedSignal(
                                     action="BUY", symbol=raw_sym, strike=strike,
                                     option_type=opt_type,
-                                    trigger_price=float(last["price"]),
-                                    stop_loss=float(last["stop_price"]),
-                                    targets=[float(last["target_price"])],
+                                    trigger_price=entry_est,
+                                    stop_loss=re_sl,
+                                    targets=[re_tgt],
                                 )
-                                log.info("[CH2] RE-ENTRY: %s (reply to #%d)",
-                                         trade_sym, reply_id)
-                                _notify(f"[CH2] Re-entry signal:\n{trade_sym}")
+                                log.info("[CH2] RE-ENTRY: %s SL=%.0f TGT=%.0f (reply to #%d)",
+                                         trade_sym, re_sl, re_tgt, reply_id)
+                                _notify(f"[CH2] Re-entry signal:\n{trade_sym}\n"
+                                        f"SL: {re_sl} | TGT: {re_tgt}")
                                 _execute_and_notify(re_sig, channel, ch_label)
                                 return
                             else:
@@ -1790,7 +1798,22 @@ async def start_listener() -> None:
                      sig.trigger_price, sig.stop_loss, sig.targets)
 
             if channel == "ch2":
-                # Queue with 8s delay — allows WAIT FOR TRIGGER to intervene
+                is_above = bool(re.search(r'\bABOVE\b', text, re.I))
+                if is_above:
+                    _ch2_trigger_held = sig
+                    _ch2_queued_signal = None
+                    if _ch2_queued_task:
+                        _ch2_queued_task.cancel()
+                        _ch2_queued_task = None
+                    log.info("[CH2] ABOVE signal — auto-held until Active: %s %s %s trigger=%.0f",
+                             sig.symbol, int(sig.strike), sig.option_type, sig.trigger_price)
+                    _notify(f"[CH2] Signal held (ABOVE trigger):\n"
+                            f"{sig.symbol} {int(sig.strike)} {sig.option_type} ABOVE {sig.trigger_price}\n"
+                            f"SL: {sig.stop_loss} | TGT: {sig.targets[0]}\n"
+                            f"Waiting for Active...")
+                    return
+
+                # NEAR / immediate signal — queue with short delay for cancel protection
                 if _ch2_queued_task:
                     _ch2_queued_task.cancel()
                 _ch2_queued_signal = sig
@@ -1799,16 +1822,16 @@ async def start_listener() -> None:
 
                 async def _ch2_delayed_exec():
                     global _ch2_queued_signal, _ch2_queued_task
-                    await asyncio.sleep(8)
+                    await asyncio.sleep(5)
                     if _ch2_queued_signal is sig:
                         _ch2_queued_signal = None
                         _ch2_queued_task = None
                         _execute_and_notify(sig, _frozen_ch, _frozen_lbl)
 
                 _ch2_queued_task = asyncio.create_task(_ch2_delayed_exec())
-                log.info("[CH2] Signal queued (8s delay): %s %s %s trigger=%.0f",
+                log.info("[CH2] NEAR signal queued (5s): %s %s %s trigger=%.0f",
                          sig.symbol, int(sig.strike), sig.option_type, sig.trigger_price)
-                _notify(f"[CH2] Signal queued (8s):\n"
+                _notify(f"[CH2] Signal detected:\n"
                         f"{sig.symbol} {int(sig.strike)} {sig.option_type} @ {sig.trigger_price}\n"
                         f"SL: {sig.stop_loss} | TGT: {sig.targets[0]}")
                 return

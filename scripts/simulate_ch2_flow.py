@@ -239,7 +239,7 @@ async def main():
     _cl._ch2_pending = None
     _cl._ch2_pending_ts = 0.0
 
-    DELAY_SECS = 8
+    DELAY_SECS = 5
 
     out_lines = []
     def out(s=""):
@@ -247,8 +247,8 @@ async def main():
         print(s)
 
     out(f"{'='*120}")
-    out(f"  CH2 Parser Simulation — {target_date}")
-    out(f"  Messages: {len(messages)} | 8s delay | WAIT/Active/Cancel/Re-entry")
+    out(f"  CH2 Parser Simulation v2 — {target_date}")
+    out(f"  ABOVE → auto-hold until Active | NEAR → 5s delay | Re-entry: tight SL, validated TGT")
     out(f"{'='*120}")
     out()
 
@@ -262,13 +262,13 @@ async def main():
         ts_epoch = ts.timestamp()
         upper = text.upper()
 
-        # --- Check if queued signal's 8s delay has expired ---
+        # --- Check if queued signal's delay has expired ---
         if queued_signal and (ts_epoch - queued_ts) > DELAY_SECS:
-            out(f"  ⏱  8s elapsed — executing queued signal:")
+            out(f"  ⏱  {DELAY_SECS}s elapsed — executing queued signal:")
             out(f"      {queued_signal.symbol} {int(queued_signal.strike)} {queued_signal.option_type} "
                 f"trigger={queued_signal.trigger_price} SL={queued_signal.stop_loss} "
                 f"TGT={queued_signal.targets[0]}")
-            executed.append({"signal": queued_signal, "ts": queued_ts, "reason": "8s_delay",
+            executed.append({"signal": queued_signal, "ts": queued_ts, "reason": "near_exec",
                              "entry_time": datetime.fromtimestamp(queued_ts, IST).strftime("%H:%M")})
             queued_signal = None
 
@@ -281,6 +281,8 @@ async def main():
                 held_sym = f"{queued_signal.symbol} {int(queued_signal.strike)} {queued_signal.option_type}"
                 out(f"  ⏸  #{msg.id} @ {ts_str}: WAIT FOR TRIGGER — holding {held_sym}")
                 queued_signal = None
+            elif trigger_held:
+                out(f"  ⏸  #{msg.id} @ {ts_str}: WAIT FOR TRIGGER (already holding)")
             else:
                 out(f"  ⏸  #{msg.id} @ {ts_str}: WAIT FOR TRIGGER (nothing queued)")
             continue
@@ -332,15 +334,22 @@ async def main():
                     ).fetchone()
 
                     if last:
+                        entry_est = float(last["price"])
+                        orig_tgt = float(last["target_price"])
+                        is_idx = raw_sym in INDEX_SYMS
+                        sl_pct = 0.10 if is_idx else 0.15
+                        re_sl = round(entry_est * (1 - sl_pct))
+                        re_tgt = orig_tgt if orig_tgt > entry_est else round(entry_est * 1.15)
+
                         re_sig = ParsedSignal(
                             action="BUY", symbol=raw_sym, strike=strike,
                             option_type=opt_type,
-                            trigger_price=float(last["price"]),
-                            stop_loss=float(last["stop_price"]),
-                            targets=[float(last["target_price"])],
+                            trigger_price=entry_est,
+                            stop_loss=re_sl,
+                            targets=[re_tgt],
                         )
                         out(f"  🔄 #{msg.id} @ {ts_str}: RE-ENTRY {trade_sym} (reply to #{reply_id})")
-                        out(f"      \"{text[:80]}\"")
+                        out(f"      entry~{entry_est:.0f} SL={re_sl} TGT={re_tgt} \"{text[:60]}\"")
                         executed.append({"signal": re_sig, "ts": ts_epoch, "reason": "re_entry",
                                          "entry_time": ts.strftime("%H:%M")})
                         reentries.append(trade_sym)
@@ -351,18 +360,30 @@ async def main():
 
         if sig:
             sym = f"{sig.symbol} {int(sig.strike)} {sig.option_type}"
-            out(f"  📊 #{msg.id} @ {ts_str}: SIGNAL {sym} trigger={sig.trigger_price} "
+            is_above = bool(re.search(r'\bABOVE\b', text, re.I))
+
+            if is_above:
+                # ABOVE signal → auto-hold until Active
+                if trigger_held:
+                    old = f"{trigger_held.symbol} {int(trigger_held.strike)} {trigger_held.option_type}"
+                    out(f"  ⚠  Replacing held {old}")
+                trigger_held = sig
+                trigger_held_msg_id = msg.id
+                out(f"  🔒 #{msg.id} @ {ts_str}: ABOVE SIGNAL (auto-held) {sym} "
+                    f"trigger={sig.trigger_price} SL={sig.stop_loss} TGT={sig.targets[0]}")
+                continue
+
+            # NEAR signal → queue with short delay
+            out(f"  📊 #{msg.id} @ {ts_str}: NEAR SIGNAL {sym} trigger={sig.trigger_price} "
                 f"SL={sig.stop_loss} TGT={sig.targets[0]}")
 
             if queued_signal:
                 old = f"{queued_signal.symbol} {int(queued_signal.strike)} {queued_signal.option_type}"
                 out(f"      (replacing queued {old})")
-                # Execute the old one since new signal arrived after 8s concept
-                # Actually: new signal replaces old in queue
             queued_signal = sig
             queued_ts = ts_epoch
             queued_msg_id = msg.id
-            out(f"      → Queued (8s delay)")
+            out(f"      → Queued ({DELAY_SECS}s delay)")
             continue
 
         # Anything else — skip silently (LTP updates, commentary, etc.)
