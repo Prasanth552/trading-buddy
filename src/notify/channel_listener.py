@@ -1738,7 +1738,7 @@ async def start_listener() -> None:
                     log.info("[CH2] NOT ACTIVE — nothing queued to cancel")
                 return
 
-            # Re-entry via reply: "same range again" / "again focus" / "again"
+            # Re-entry via reply: log only (disabled — re-entries need LTP validation)
             if (event.message.reply_to and event.message.reply_to.reply_to_msg_id
                     and re.search(r'\bAGAIN\b', upper_ctl)):
                 try:
@@ -1751,57 +1751,14 @@ async def start_listener() -> None:
                             raw_sym = re.sub(r'\s+', ' ', raw_sym)
                             if raw_sym == "BANK NIFTY":
                                 raw_sym = "BANKNIFTY"
-                            strike = float(sym_m.group(2))
-                            opt_type = sym_m.group(3).upper()
-                            trade_sym = f"{raw_sym} {int(strike)} {opt_type}"
-
-                            from src.storage import db as _reentry_db
-                            with _reentry_db.get_conn() as conn:
-                                last = conn.execute(
-                                    "SELECT price, stop_price, target_price FROM trades "
-                                    "WHERE symbol=? AND channel='ch2' ORDER BY ts DESC LIMIT 1",
-                                    (trade_sym,)
-                                ).fetchone()
-
-                            if last:
-                                entry_est = float(last["price"])
-                                orig_sl = float(last["stop_price"])
-                                orig_tgt = float(last["target_price"])
-                                orig_risk_pts = entry_est - orig_sl
-                                if orig_risk_pts <= 0:
-                                    orig_risk_pts = entry_est * 0.08
-                                re_sl = round(entry_est - orig_risk_pts)
-                                re_tgt = orig_tgt if orig_tgt > entry_est * 1.02 else round(entry_est + orig_risk_pts * 2)
-
-                                is_idx = raw_sym in ("NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY")
-                                lot_key = raw_sym.replace(" ", "").upper()
-                                re_lot_size = getattr(config, "LOT_SIZES", {}).get(lot_key, 50)
-                                re_lots = 3 if is_idx else 2
-                                re_qty = re_lot_size * re_lots
-                                max_risk = orig_risk_pts * re_qty
-                                if max_risk > 3000:
-                                    log.info("[CH2] RE-ENTRY skipped — risk ₹%.0f > ₹3,000 cap: %s",
-                                             max_risk, trade_sym)
-                                    _notify(f"[CH2] Re-entry skipped (risk ₹{max_risk:,.0f} too high):\n"
-                                            f"{trade_sym}")
-                                else:
-                                    re_sig = ParsedSignal(
-                                        action="BUY", symbol=raw_sym, strike=strike,
-                                        option_type=opt_type,
-                                        trigger_price=entry_est,
-                                        stop_loss=re_sl,
-                                        targets=[re_tgt],
-                                    )
-                                    log.info("[CH2] RE-ENTRY: %s SL=%.0f TGT=%.0f risk=₹%.0f (reply #%d)",
-                                             trade_sym, re_sl, re_tgt, max_risk, reply_id)
-                                    _notify(f"[CH2] Re-entry signal:\n{trade_sym}\n"
-                                            f"SL: {re_sl} | TGT: {re_tgt} | Risk: ₹{max_risk:,.0f}")
-                                    _execute_and_notify(re_sig, channel, ch_label)
-                                return
-                            else:
-                                log.info("[CH2] Re-entry: no prior trade found for %s", trade_sym)
+                            trade_sym = f"{raw_sym} {int(float(sym_m.group(2)))} {sym_m.group(3).upper()}"
+                            log.info("[CH2] RE-ENTRY detected (log only): %s — \"%s\"",
+                                     trade_sym, text[:80])
+                            _notify(f"[CH2] Re-entry detected (not executing):\n"
+                                    f"{trade_sym}\n\"{text[:80]}\"")
+                            return
                 except Exception as exc:
-                    log.warning("[CH2] Re-entry fetch failed: %s", exc)
+                    log.warning("[CH2] Re-entry parse failed: %s", exc)
 
         # --- Parse signal ---
         if channel == "ch3":
