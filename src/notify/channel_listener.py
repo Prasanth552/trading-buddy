@@ -716,7 +716,7 @@ def parse_signal_ch2(text: str) -> ParsedSignal | None:
 
     Handles single-message and split-message signals with a buffer.
     """
-    global _ch2_pending, _ch2_pending_ts
+    global _ch2_pending, _ch2_pending_ts, _ch2_last_is_above
     text = text.strip()
     clean = text.replace("**", "")
     clean = re.sub(r'[\U0001F600-\U0001FAFF☀-➿❤️‍]+', ' ', clean).strip()
@@ -769,7 +769,6 @@ def parse_signal_ch2(text: str) -> ParsedSignal | None:
         has_above = bool(re.search(r'\bABOVE\b', upper))
 
         if has_tgt and has_sl:
-            global _ch2_last_is_above
             targets = _ch2_extract_targets(tgt_match)
             sl = _ch2_extract_sl(sl_match, trigger)
             if sl <= 0 or not targets:
@@ -851,7 +850,6 @@ def parse_signal_ch2(text: str) -> ParsedSignal | None:
                 log.info("[CH2] No explicit SL after wait — using default: %.0f (entry=%.0f)", sl, trigger)
 
             if sl > 0:
-                global _ch2_last_is_above
                 _ch2_last_is_above = _ch2_pending.get("is_above", False)
                 sig = ParsedSignal(
                     action="BUY",
