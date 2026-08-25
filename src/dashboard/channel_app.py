@@ -25,6 +25,8 @@ from src.utils import market_calendar as mc
 load_dotenv()
 app = FastAPI(title="Channel Trades", docs_url=None, redoc_url=None)
 
+_db_ready = False
+
 # ---------------------------------------------------------------------------
 # WebSocket hub — push updates to all connected clients
 # ---------------------------------------------------------------------------
@@ -61,7 +63,7 @@ async def _ws_push_loop():
         if not _ws_clients:
             continue
         try:
-            db.init_db()
+            _ensure_db()
             today_iso = mc.now_ist().date().isoformat()
             payload: dict[str, dict] = {}
             for ch in ("ch1", "ch2", "ch3", "oeh"):
@@ -117,14 +119,26 @@ def _ch_filter(channel: str) -> str:
     return _CH_FILTERS.get(channel, _CH_FILTERS["ch1"])
 
 
+def _ensure_db():
+    global _db_ready
+    if not _db_ready:
+        _ensure_db()
+        with db.get_conn() as conn:
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_channel ON trades(channel)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_ts ON trades(ts)")
+        _db_ready = True
+
+
 def _rows(query: str, params: tuple = ()) -> list[dict[str, Any]]:
+    _ensure_db()
     with db.get_conn() as conn:
         return [dict(r) for r in conn.execute(query, params).fetchall()]
 
 
 @app.get("/api/trades")
 def api_trades(channel: str = "ch1") -> JSONResponse:
-    db.init_db()
+    _ensure_db()
     cf = _ch_filter(channel)
     rows = _rows(
         f"SELECT id, ts, symbol, side, qty, price, exit_price, pnl, mode, status, "
@@ -135,7 +149,7 @@ def api_trades(channel: str = "ch1") -> JSONResponse:
 
 @app.get("/api/stats")
 def api_stats(channel: str = "ch1") -> JSONResponse:
-    db.init_db()
+    _ensure_db()
     cf = _ch_filter(channel)
     today_iso = mc.now_ist().date().isoformat()
     with db.get_conn() as conn:
@@ -182,10 +196,68 @@ def api_stats(channel: str = "ch1") -> JSONResponse:
     })
 
 
+@app.get("/api/all")
+def api_all(channel: str = "ch1") -> JSONResponse:
+    """Combined stats + trades in one call to reduce round trips."""
+    _ensure_db()
+    cf = _ch_filter(channel)
+    today_iso = mc.now_ist().date().isoformat()
+    with db.get_conn() as conn:
+        stats_row = conn.execute(f"""SELECT
+            COUNT(*) AS total,
+            SUM(CASE WHEN status='OPEN' THEN 1 ELSE 0 END) AS open_count,
+            SUM(CASE WHEN status LIKE 'CLOSED%' THEN 1 ELSE 0 END) AS closed,
+            SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins,
+            SUM(CASE WHEN pnl IS NOT NULL AND pnl <= 0 THEN 1 ELSE 0 END) AS losses,
+            COALESCE(SUM(CASE WHEN pnl IS NOT NULL THEN pnl END),0) AS total_pnl,
+            COALESCE(MAX(pnl),0) AS best,
+            COALESCE(MIN(CASE WHEN pnl IS NOT NULL THEN pnl END),0) AS worst,
+            COALESCE(AVG(CASE WHEN pnl IS NOT NULL THEN pnl END),0) AS avg_pnl,
+            COALESCE(SUM(CASE WHEN pnl IS NOT NULL AND ts >= '{today_iso}' THEN pnl END),0) AS today_pnl,
+            SUM(CASE WHEN ts >= '{today_iso}' THEN 1 ELSE 0 END) AS today_count,
+            COALESCE(SUM(CASE WHEN charges IS NOT NULL THEN charges END),0) AS total_charges,
+            COALESCE(SUM(CASE WHEN charges IS NOT NULL AND ts >= '{today_iso}' THEN charges END),0) AS today_charges,
+            COALESCE(SUM(CASE WHEN status='OPEN' THEN price * qty END),0) AS utilized
+        FROM trades WHERE {cf}""").fetchone()
+        s = dict(stats_row)
+        pnl_series = [dict(r) for r in conn.execute(
+            f"SELECT ts, pnl FROM trades WHERE {cf} AND pnl IS NOT NULL ORDER BY id"
+        ).fetchall()]
+        trades = [dict(r) for r in conn.execute(
+            f"SELECT id, ts, symbol, side, qty, price, exit_price, pnl, mode, status, "
+            f"stop_price, target_price, index_entry, broker_key, charges "
+            f"FROM trades WHERE {cf} ORDER BY id DESC LIMIT 100"
+        ).fetchall()]
+
+    closed = s["closed"] or 0
+    wins = s["wins"] or 0
+    win_rate = (wins / closed * 100) if closed > 0 else 0
+    cumulative = []
+    running = 0
+    for r in pnl_series:
+        running += r["pnl"]
+        cumulative.append({"ts": r["ts"], "pnl": r["pnl"], "cumulative": round(running, 2)})
+
+    return JSONResponse({
+        "stats": {
+            "total": s["total"], "open": s["open_count"] or 0, "closed": closed,
+            "wins": wins, "losses": s["losses"] or 0, "win_rate": round(win_rate, 1),
+            "total_pnl": round(s["total_pnl"], 2), "best_trade": round(s["best"], 2),
+            "worst_trade": round(s["worst"], 2), "avg_pnl": round(s["avg_pnl"], 2),
+            "today_pnl": round(s["today_pnl"], 2), "today_count": s["today_count"] or 0,
+            "total_charges": round(s["total_charges"], 2), "today_charges": round(s["today_charges"], 2),
+            "capital": 100000, "utilized": round(s["utilized"], 2),
+            "pnl_curve": cumulative,
+            "now": mc.now_ist().strftime("%Y-%m-%d %H:%M:%S IST"),
+        },
+        "trades": trades,
+    })
+
+
 @app.get("/api/ltp")
 def api_ltp(channel: str = "ch1") -> JSONResponse:
     """Fetch live LTP for all open channel trades that have a broker_key."""
-    db.init_db()
+    _ensure_db()
     cf = _ch_filter(channel)
     with db.get_conn() as conn:
         rows = conn.execute(
@@ -238,7 +310,7 @@ def api_scan() -> JSONResponse:
 
 @app.post("/api/close/{trade_id}")
 def api_close_trade(trade_id: int) -> JSONResponse:
-    db.init_db()
+    _ensure_db()
     with db.get_conn() as conn:
         row = conn.execute(
             "SELECT id, price, qty FROM trades WHERE id = ? AND status = 'OPEN'",
@@ -779,12 +851,12 @@ async function load(){
   _loading=true;
   try{
     const q='?channel='+CH;
-    const [s,t]=await Promise.all([fetch('/api/stats'+q).then(r=>r.json()),fetch('/api/trades'+q).then(r=>r.json())]);
+    const d=await fetch('/api/all'+q).then(r=>r.json());
+    const s=d.stats,t=d.trades;
     AT=t;$('ck').textContent=s.now;$('sd').className='live-dot';
     rHero(s);rRing(s);rChips(s);rC(s.pnl_curve);rH(t);
-    // LTP fetch is fire-and-forget — don't block render
-    fetch('/api/ltp'+q).then(r=>r.json()).then(ltp=>{if(!ltp.error){LTP=ltp;rO(t)}}).catch(()=>{});
     rO(t);
+    fetch('/api/ltp'+q).then(r=>r.json()).then(ltp=>{if(!ltp.error){LTP=ltp;rO(t)}}).catch(()=>{});
   }catch(e){$('sd').className='live-dot off'}
   finally{_loading=false}
 }
@@ -801,8 +873,6 @@ document.addEventListener('visibilitychange',()=>{
 });
 
 load();startRefresh();
-// Full data refresh every 15s (trades table, chart, open positions — WS only pushes stats)
-setInterval(()=>{if(!_loading)load()},15000);
 </script></body></html>"""
 
 
