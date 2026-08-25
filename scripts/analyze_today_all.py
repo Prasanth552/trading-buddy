@@ -135,12 +135,6 @@ def walk_candles_floor(candles, entry, sl, ch_tgt, qty):
         max_high = max(max_high, c["high"])
         min_low = min(min_low, c["low"])
 
-        candle_peak_pnl = (c["high"] - entry) * qty
-        peak_pnl = max(peak_pnl, candle_peak_pnl)
-
-        if peak_pnl >= PROFIT_FLOOR:
-            floor_armed = True
-
         tgt_hit = tgt_valid and c["high"] >= ch_tgt
         sl_hit = sl_valid and c["low"] <= sl
         low_pnl = (c["low"] - entry) * qty
@@ -154,6 +148,11 @@ def walk_candles_floor(candles, entry, sl, ch_tgt, qty):
         elif floor_armed and low_pnl <= PROFIT_FLOOR:
             floor_price = entry + (PROFIT_FLOOR / qty)
             return floor_price, "FLOOR", max_high, min_low, inverted
+
+        candle_peak_pnl = (c["high"] - entry) * qty
+        peak_pnl = max(peak_pnl, candle_peak_pnl)
+        if peak_pnl >= PROFIT_FLOOR:
+            floor_armed = True
 
     return candles[-1]["close"], "EOD", max_high, min_low, inverted
 
