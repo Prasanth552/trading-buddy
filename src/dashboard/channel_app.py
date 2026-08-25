@@ -469,6 +469,7 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
 <div class=tabs id=tabbar>
   <button class="tab active" onclick="switchCh('ch1')" id="tab-ch1"><span class=ico>1</span> Paid</button>
   <button class="tab" onclick="switchCh('ch2')" id="tab-ch2"><span class=ico>2</span> G Prime</button>
+  <button class="tab" onclick="switchCh('oeh')" id="tab-oeh"><span class=ico>O</span> OEH</button>
 </div>
 
 <div class=wrap>
