@@ -95,7 +95,7 @@ SCANNER_TARGET_MULT = 2.0        # target = 2x entry premium
 # ---------------------------------------------------------------------------
 # OEH Scanner (Open=High) — auto-execute config
 # ---------------------------------------------------------------------------
-OEH_ENABLED = True
+OEH_ENABLED = False
 OEH_RUN_TIME = "09:20"          # IST — check after first 5-min candle
 OEH_MAX_TRADES = 5              # max trades per scan
 OEH_SL_PCT = 0.30               # 30% of premium as stop-loss
@@ -1230,7 +1230,6 @@ def _build_eod_report(target_date: str | None = None) -> str:
     channels = [
         ("ch1", "CH1 Paid"),
         ("ch2", "CH2 G Prime"),
-        ("oeh", "OEH Scanner"),
     ]
 
     lines = []
