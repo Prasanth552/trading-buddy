@@ -97,18 +97,39 @@ from_dt_eq = datetime(year, month, day, 9, 15, tzinfo=IST)
 to_dt_eq = datetime(year, month, day, 9, 16, tzinfo=IST)
 
 
-def get_strike_step(sym):
-    spec = config.OPTION_SPECS.get(f"NSE:{sym}")
-    if spec:
-        return spec.get("strike_step", 50)
-    return 50
+def _build_strike_steps():
+    """Auto-detect strike step per symbol from the instrument master."""
+    sym_strikes = {}
+    for inst in master:
+        seg = inst.get("segment", "")
+        if seg not in ("NSE_FO", "BSE_FO"):
+            continue
+        asym = (inst.get("asset_symbol") or "").upper()
+        if not asym or inst.get("instrument_type") not in ("CE", "PE"):
+            continue
+        sp = float(inst.get("strike_price", 0))
+        if sp > 0:
+            sym_strikes.setdefault(asym, set()).add(sp)
+
+    steps = {}
+    for sym, strikes in sym_strikes.items():
+        sorted_strikes = sorted(strikes)
+        if len(sorted_strikes) >= 2:
+            gaps = [sorted_strikes[i+1] - sorted_strikes[i] for i in range(min(10, len(sorted_strikes)-1))]
+            steps[sym] = min(gaps)
+        else:
+            steps[sym] = 50
+    return steps
+
+STRIKE_STEPS = _build_strike_steps()
 
 
 def resolve_pe_option(sym, stock_open):
-    strike_step = get_strike_step(sym)
+    strike_step = STRIKE_STEPS.get(sym, 50)
     atm_strike = round(stock_open / strike_step) * strike_step
 
-    candidates = []
+    # Find nearest PE option to ATM
+    all_pe = []
     for inst in master:
         seg = inst.get("segment", "")
         if seg not in ("NSE_FO", "BSE_FO"):
@@ -119,20 +140,24 @@ def resolve_pe_option(sym, stock_open):
         if inst.get("instrument_type") != "PE":
             continue
         sp = float(inst.get("strike_price", -1))
-        if abs(sp - atm_strike) > 0.01:
-            continue
         exp = _expiry_to_date(inst.get("expiry"))
         if exp is None or exp < today_d:
             continue
-        candidates.append((exp, inst))
+        all_pe.append((sp, exp, inst))
 
-    if not candidates:
+    if not all_pe:
         return None, None, None, None
 
-    candidates.sort(key=lambda x: x[0])
-    inst = candidates[0][1]
+    # Pick nearest strike to ATM, then nearest expiry
+    all_pe.sort(key=lambda x: (abs(x[0] - atm_strike), x[1]))
+    best_strike = all_pe[0][0]
+    # Among same strike, pick nearest expiry
+    same_strike = [(sp, exp, inst) for sp, exp, inst in all_pe if abs(sp - best_strike) < 0.01]
+    same_strike.sort(key=lambda x: x[1])
+
+    inst = same_strike[0][2]
     lot_size = int(inst.get("lot_size", 1)) or 1
-    return inst.get("instrument_key"), lot_size, candidates[0][0], atm_strike
+    return inst.get("instrument_key"), lot_size, same_strike[0][1], best_strike
 
 
 def walk_candles_floor(candles, entry, sl, tgt, qty):

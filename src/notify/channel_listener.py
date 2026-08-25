@@ -999,8 +999,21 @@ def _resolve_atm_strike(symbol: str, option_type: str) -> ParsedSignal | None:
             log.warning("[CH5] Could not get LTP for %s", symbol)
             return None
 
-        # Step 2: find ATM strike (round to nearest strike step)
-        strike_step = config.OPTION_SPECS.get(f"NSE:{sym_upper}", {}).get("strike_step", 50)
+        # Step 2: find ATM strike — auto-detect strike step from master
+        strike_step = config.OPTION_SPECS.get(f"NSE:{sym_upper}", {}).get("strike_step", None)
+        if strike_step is None:
+            fo_strikes = sorted({
+                float(i.get("strike_price", 0))
+                for i in instruments
+                if (i.get("asset_symbol") or "").upper() == sym_upper
+                and i.get("segment") in ("NSE_FO", "BSE_FO")
+                and i.get("instrument_type") in ("CE", "PE")
+                and float(i.get("strike_price", 0)) > 0
+            })
+            if len(fo_strikes) >= 2:
+                strike_step = min(fo_strikes[j+1] - fo_strikes[j] for j in range(min(10, len(fo_strikes)-1)))
+            else:
+                strike_step = 50
         atm_strike = round(stock_ltp / strike_step) * strike_step
 
         # Step 3: resolve the option contract and get its premium
