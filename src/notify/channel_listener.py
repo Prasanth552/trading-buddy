@@ -97,6 +97,7 @@ SCANNER_TARGET_MULT = 2.0        # target = 2x entry premium
 # ---------------------------------------------------------------------------
 OEH_ENABLED = False
 OEH_RUN_TIME = "09:20"          # IST — check after first 5-min candle
+OEH_LIST_TIME = "09:16"         # IST — early list using 1-min candle
 OEH_MAX_TRADES = 5              # max trades per scan
 OEH_SL_PCT = 0.30               # 30% of premium as stop-loss
 OEH_TARGET_MULT = 2.0           # target = 2x entry premium
@@ -1110,6 +1111,113 @@ async def _run_scanner_once():
 
 
 # ---------------------------------------------------------------------------
+# OEH Early List — 1-min candle scan at 09:16, list only (no trades)
+# ---------------------------------------------------------------------------
+async def _run_oeh_list():
+    """Scan OEH universe at 9:16 using the first 1-min candle, send list only."""
+    import time as _t
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from src.broker.upstox_data import UpstoxData, load_cached_token
+
+    IST = ZoneInfo(config.TIMEZONE)
+    log.info("[OEH-LIST] Early scan starting (1-min candle)...")
+
+    token = load_cached_token()
+    if not token:
+        log.error("[OEH-LIST] No Upstox token")
+        _notify("*[OEH] Early list SKIPPED* — No Upstox token.")
+        return
+
+    try:
+        ud = UpstoxData(access_token=token)
+        master = ud._load_master()
+    except Exception as exc:
+        log.error("[OEH-LIST] Master load failed: %s", exc)
+        _notify(f"[OEH] Early list error: {exc}")
+        return
+
+    eq_keys = {}
+    for inst in master:
+        if inst.get("segment") == "NSE_EQ":
+            tsym = (inst.get("trading_symbol") or "").upper()
+            if tsym:
+                eq_keys[tsym] = inst.get("instrument_key")
+
+    today = datetime.now(IST).date()
+    from_dt = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=15)
+    to_dt = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=16)
+
+    candidates = []
+    scanned = 0
+
+    for sym in OEH_UNIVERSE:
+        if sym in OEH_BLOCKLIST:
+            continue
+        inst_key = eq_keys.get(sym)
+        if not inst_key:
+            continue
+        try:
+            candles = ud.historical_data(inst_key, from_dt, to_dt, "1minute")
+            _t.sleep(0.3)
+        except Exception as exc:
+            err = str(exc)
+            if "429" in err or "rate" in err.lower():
+                _t.sleep(3)
+                try:
+                    candles = ud.historical_data(inst_key, from_dt, to_dt, "1minute")
+                except Exception:
+                    continue
+            else:
+                continue
+
+        scanned += 1
+        if not candles or len(candles) < 1:
+            continue
+
+        open_price = candles[0]["open"]
+        if open_price <= 0:
+            continue
+
+        max_high = candles[0]["high"]
+        if max_high > open_price + OEH_TOLERANCE:
+            continue
+
+        entry_price = candles[0]["close"]
+        drop_pct = (open_price - entry_price) / open_price * 100
+        if drop_pct < OEH_MIN_DROP_PCT:
+            continue
+
+        candidates.append({
+            "symbol": sym,
+            "open": open_price,
+            "close": entry_price,
+            "high": max_high,
+            "drop_pct": drop_pct,
+        })
+
+    candidates.sort(key=lambda x: x["drop_pct"], reverse=True)
+
+    if not candidates:
+        _notify(f"📋 *[OEH] No Open=High stocks at 9:16* (scanned {scanned})")
+        log.info("[OEH-LIST] No candidates (scanned %d)", scanned)
+        return
+
+    lines = [f"📋 *[OEH] Open=High Stocks — {today.strftime('%d %b %Y')}*", ""]
+    for i, c in enumerate(candidates, 1):
+        lines.append(
+            f"{i}. *{c['symbol']}* — Open {c['open']:.2f}, "
+            f"CMP {c['close']:.2f} (↓{c['drop_pct']:.1f}%)"
+        )
+    lines.append(f"\nScanned {scanned} stocks, {len(candidates)} OEH candidates")
+    lines.append("_(1-min candle — early detection, verify at 9:20)_")
+
+    msg = "\n".join(lines)
+    _notify(msg)
+    log.info("[OEH-LIST] Sent %d candidates:\n%s", len(candidates), msg)
+
+
+# ---------------------------------------------------------------------------
 # OEH Scanner — Open=High bearish signal scanner
 # ---------------------------------------------------------------------------
 async def _run_oeh_scan():
@@ -1631,6 +1739,34 @@ async def start_listener() -> None:
 
     asyncio.get_event_loop().create_task(_oeh_scheduler())
     log.info("OEH scanner started — runs daily at %s IST", OEH_RUN_TIME)
+
+    # --- OEH Early List: send stock list at 09:16 IST ---
+    async def _oeh_list_scheduler():
+        from zoneinfo import ZoneInfo
+        from datetime import datetime, timedelta
+        IST = ZoneInfo(config.TIMEZONE)
+
+        h, m = map(int, OEH_LIST_TIME.split(":"))
+
+        while True:
+            now = datetime.now(IST)
+            target = now.replace(hour=h, minute=m, second=0, microsecond=0)
+            if now >= target:
+                target += timedelta(days=1)
+
+            wait_secs = (target - now).total_seconds()
+            log.info("[OEH-LIST] Next early list at %s IST (in %.0f min)",
+                     target.strftime("%Y-%m-%d %H:%M"), wait_secs / 60)
+            await asyncio.sleep(wait_secs)
+
+            if not mc.is_trading_day():
+                log.info("[OEH-LIST] Not a trading day, skipping")
+                continue
+
+            await _run_oeh_list()
+
+    asyncio.get_event_loop().create_task(_oeh_list_scheduler())
+    log.info("OEH early list scheduler started — runs daily at %s IST", OEH_LIST_TIME)
 
     # --- EOD Report: send daily at 15:35 IST ---
     async def _eod_report_scheduler():
