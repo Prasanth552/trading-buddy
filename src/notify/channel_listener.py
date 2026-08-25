@@ -1774,6 +1774,12 @@ async def start_listener() -> None:
                      sig.trigger_price, sig.stop_loss, sig.targets)
 
             if channel == "ch2":
+                ch2_sym = sig.symbol.replace(" ", "").upper()
+                if ch2_sym not in ("NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY"):
+                    log.info("[CH2] Skipping non-index: %s %s %s",
+                             sig.symbol, int(sig.strike), sig.option_type)
+                    return
+
                 is_above = bool(re.search(r'\bABOVE\b', text, re.I)) or _ch2_last_is_above
                 if is_above:
                     _ch2_trigger_held = sig
