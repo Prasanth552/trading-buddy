@@ -110,8 +110,11 @@ def resolve_instrument(symbol_str, monthly=False):
 def walk_candles_floor(candles, entry, sl, ch_tgt, qty):
     """Walk candles with ₹1,500 profit floor logic.
 
-    1. Channel TGT hit → exit at TGT
-    2. SL hit → exit at SL
+    Detects inverted SL/TGT (TGT < entry or SL > entry) and skips
+    those levels — only uses floor + EOD exit in that case.
+
+    1. Channel TGT hit → exit at TGT (only if TGT > entry)
+    2. SL hit → exit at SL (only if SL < entry)
     3. Peak P&L crossed ₹1,500 then low dips back → floor exit
     4. EOD → exit at last close
     """
@@ -119,6 +122,14 @@ def walk_candles_floor(candles, entry, sl, ch_tgt, qty):
     max_high = 0
     min_low = 999999
     floor_armed = False
+
+    tgt_valid = ch_tgt and ch_tgt > entry
+    sl_valid = sl and sl < entry
+    inverted = ""
+    if ch_tgt and ch_tgt <= entry:
+        inverted += "TGT<E "
+    if sl and sl >= entry:
+        inverted += "SL>E"
 
     for c in candles:
         max_high = max(max_high, c["high"])
@@ -130,21 +141,21 @@ def walk_candles_floor(candles, entry, sl, ch_tgt, qty):
         if peak_pnl >= PROFIT_FLOOR:
             floor_armed = True
 
-        tgt_hit = ch_tgt and c["high"] >= ch_tgt
-        sl_hit = sl and c["low"] <= sl
+        tgt_hit = tgt_valid and c["high"] >= ch_tgt
+        sl_hit = sl_valid and c["low"] <= sl
         low_pnl = (c["low"] - entry) * qty
 
         if tgt_hit and sl_hit:
-            return ch_tgt, "BOTH_TGT", max_high, min_low
+            return ch_tgt, "BOTH_TGT", max_high, min_low, inverted
         elif tgt_hit:
-            return ch_tgt, "TGT", max_high, min_low
+            return ch_tgt, "TGT", max_high, min_low, inverted
         elif sl_hit:
-            return sl, "SL", max_high, min_low
+            return sl, "SL", max_high, min_low, inverted
         elif floor_armed and low_pnl <= PROFIT_FLOOR:
             floor_price = entry + (PROFIT_FLOOR / qty)
-            return floor_price, "FLOOR", max_high, min_low
+            return floor_price, "FLOOR", max_high, min_low, inverted
 
-    return candles[-1]["close"], "EOD", max_high, min_low
+    return candles[-1]["close"], "EOD", max_high, min_low, inverted
 
 
 # ===== MAIN =====
@@ -165,7 +176,7 @@ for ch in ("ch1", "ch2", "ch3"):
 
     print()
     print("=" * 160)
-    ch_label = {"ch1": "CH1 Paid (Sep expiry, 1 lot)", "ch2": "CH2 G Prime (3L idx / 2L stk)",
+    ch_label = {"ch1": "CH1 Paid (Sep expiry, 2 lots)", "ch2": "CH2 G Prime (3L idx / 2L stk)",
                 "ch3": "CH3 Free (3L idx / 2L stk)"}.get(ch, ch.upper())
     print(f"  {ch_label} — {target_date} — ₹{PROFIT_FLOOR:,} profit floor")
     print("=" * 160)
@@ -196,7 +207,7 @@ for ch in ("ch1", "ch2", "ch3"):
 
         # Determine lots
         if ch == "ch1":
-            lots = 1
+            lots = 2
         elif ch in ("ch2", "ch3"):
             lots = 3 if is_index else 2
         else:
@@ -246,7 +257,7 @@ for ch in ("ch1", "ch2", "ch3"):
         entry = filtered[0]["open"]
 
         # Walk with floor logic
-        exit_price, result, max_high, min_low = walk_candles_floor(filtered, entry, sl, ch_tgt, qty)
+        exit_price, result, max_high, min_low, inverted = walk_candles_floor(filtered, entry, sl, ch_tgt, qty)
         pnl = (exit_price - entry) * qty
 
         if pnl >= 0:
@@ -259,9 +270,10 @@ for ch in ("ch1", "ch2", "ch3"):
         ch_pnl += pnl
 
         exp_str = f" ({exp_date.strftime('%d%b')})" if exp_date and is_monthly else ""
+        warn = f" ⚠{inverted.strip()}" if inverted else ""
 
         print(f"  {trade_id:<4} {entry_time:<6} {symbol:<24} {entry:>7.1f} {sl:>7.1f} {ch_tgt:>7.1f} "
-              f"{lots:>4} {qty:>5} {max_high:>7.1f} {min_low:>7.1f} [{icon}] {result:<5} {pnl:>+10,.0f} {db_pnl:>+8,.0f}{exp_str}")
+              f"{lots:>4} {qty:>5} {max_high:>7.1f} {min_low:>7.1f} [{icon}] {result:<5} {pnl:>+10,.0f} {db_pnl:>+8,.0f}{exp_str}{warn}")
 
     total = ch_wins + ch_losses
     print(f"\n  {ch.upper()}: {ch_wins}W/{ch_losses}L ({ch_nodata} no data), "
@@ -280,5 +292,5 @@ print(f"  With correct settings:  ₹{grand_total:+,.0f}")
 print(f"  Actual DB result:       ₹{grand_db_total:+,.0f}")
 print(f"  Missed profit:          ₹{grand_total - grand_db_total:+,.0f}")
 print()
-print(f"  Floor = ₹{PROFIT_FLOOR:,} | CH1 = 1 lot Sep expiry | CH2/CH3 = 3L index, 2L stocks")
+print(f"  Floor = ₹{PROFIT_FLOOR:,} | CH1 = 2 lots Sep expiry | CH2/CH3 = 3L index, 2L stocks")
 print("=" * 160)

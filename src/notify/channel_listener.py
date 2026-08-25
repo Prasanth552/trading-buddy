@@ -436,6 +436,8 @@ def execute_signal(sig: ParsedSignal, *, channel: str = "ch1", max_lots: int | N
     is_index = lot_key in ("NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY")
     if channel in ("ch2", "ch3"):
         lots = 3 if is_index else 2
+    elif channel in ("ch1", "ch1b"):
+        lots = 2
     else:
         lots = 1
     if max_lots is not None:
