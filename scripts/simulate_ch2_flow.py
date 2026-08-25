@@ -333,6 +333,11 @@ async def main():
         sig = parse_signal_ch2(text)
 
         if sig:
+            ch2_sym = sig.symbol.replace(" ", "").upper()
+            if ch2_sym not in INDEX_SYMS:
+                out(f"  ⊘  #{msg.id} @ {ts_str}: SKIP non-index {sig.symbol} {int(sig.strike)} {sig.option_type}")
+                continue
+
             sym = f"{sig.symbol} {int(sig.strike)} {sig.option_type}"
             is_above = bool(re.search(r'\bABOVE\b', text, re.I)) or _cl._ch2_last_is_above
 
