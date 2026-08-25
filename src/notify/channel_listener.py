@@ -644,6 +644,7 @@ _ch2_pending_ts: float = 0.0
 _ch2_queued_signal: ParsedSignal | None = None
 _ch2_queued_task: Any = None
 _ch2_trigger_held: ParsedSignal | None = None
+_ch2_last_is_above: bool = False
 
 _CH2_SYMBOL_RE = re.compile(
     r'(?:(?:Intra|positional|Note)[/\s]*)*'
@@ -765,7 +766,10 @@ def parse_signal_ch2(text: str) -> ParsedSignal | None:
         opt_type = sym_match.group(3).upper()
         trigger = float(entry_match.group(1)) if entry_match else 0.0
 
+        has_above = bool(re.search(r'\bABOVE\b', upper))
+
         if has_tgt and has_sl:
+            global _ch2_last_is_above
             targets = _ch2_extract_targets(tgt_match)
             sl = _ch2_extract_sl(sl_match, trigger)
             if sl <= 0 or not targets:
@@ -775,6 +779,7 @@ def parse_signal_ch2(text: str) -> ParsedSignal | None:
             if is_swing and "INTRA" not in upper:
                 return None
 
+            _ch2_last_is_above = has_above
             _ch2_pending = None
             return ParsedSignal(
                 action="BUY",
@@ -788,11 +793,11 @@ def parse_signal_ch2(text: str) -> ParsedSignal | None:
         else:
             _ch2_pending = {
                 "symbol": raw_sym, "strike": strike, "opt_type": opt_type,
-                "trigger": trigger,
+                "trigger": trigger, "is_above": has_above,
             }
             _ch2_pending_ts = _time.time()
-            log.info("[CH2] Buffered partial signal: %s %s %s trigger=%.0f (waiting for TGT/SL)",
-                     raw_sym, strike, opt_type, trigger)
+            log.info("[CH2] Buffered partial signal: %s %s %s trigger=%.0f above=%s (waiting for TGT/SL)",
+                     raw_sym, strike, opt_type, trigger, has_above)
             return None
 
     if not has_symbol and _ch2_pending:
@@ -846,6 +851,8 @@ def parse_signal_ch2(text: str) -> ParsedSignal | None:
                 log.info("[CH2] No explicit SL after wait — using default: %.0f (entry=%.0f)", sl, trigger)
 
             if sl > 0:
+                global _ch2_last_is_above
+                _ch2_last_is_above = _ch2_pending.get("is_above", False)
                 sig = ParsedSignal(
                     action="BUY",
                     symbol=_ch2_pending["symbol"],
@@ -1760,24 +1767,38 @@ async def start_listener() -> None:
 
                             if last:
                                 entry_est = float(last["price"])
+                                orig_sl = float(last["stop_price"])
                                 orig_tgt = float(last["target_price"])
-                                is_idx = raw_sym in ("NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY")
-                                sl_pct = 0.10 if is_idx else 0.15
-                                re_sl = round(entry_est * (1 - sl_pct))
-                                re_tgt = orig_tgt if orig_tgt > entry_est else round(entry_est * 1.15)
+                                orig_risk_pts = entry_est - orig_sl
+                                if orig_risk_pts <= 0:
+                                    orig_risk_pts = entry_est * 0.08
+                                re_sl = round(entry_est - orig_risk_pts)
+                                re_tgt = orig_tgt if orig_tgt > entry_est * 1.02 else round(entry_est + orig_risk_pts * 2)
 
-                                re_sig = ParsedSignal(
-                                    action="BUY", symbol=raw_sym, strike=strike,
-                                    option_type=opt_type,
-                                    trigger_price=entry_est,
-                                    stop_loss=re_sl,
-                                    targets=[re_tgt],
-                                )
-                                log.info("[CH2] RE-ENTRY: %s SL=%.0f TGT=%.0f (reply to #%d)",
-                                         trade_sym, re_sl, re_tgt, reply_id)
-                                _notify(f"[CH2] Re-entry signal:\n{trade_sym}\n"
-                                        f"SL: {re_sl} | TGT: {re_tgt}")
-                                _execute_and_notify(re_sig, channel, ch_label)
+                                is_idx = raw_sym in ("NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY")
+                                lot_key = raw_sym.replace(" ", "").upper()
+                                re_lot_size = getattr(config, "LOT_SIZES", {}).get(lot_key, 50)
+                                re_lots = 3 if is_idx else 2
+                                re_qty = re_lot_size * re_lots
+                                max_risk = orig_risk_pts * re_qty
+                                if max_risk > 3000:
+                                    log.info("[CH2] RE-ENTRY skipped — risk ₹%.0f > ₹3,000 cap: %s",
+                                             max_risk, trade_sym)
+                                    _notify(f"[CH2] Re-entry skipped (risk ₹{max_risk:,.0f} too high):\n"
+                                            f"{trade_sym}")
+                                else:
+                                    re_sig = ParsedSignal(
+                                        action="BUY", symbol=raw_sym, strike=strike,
+                                        option_type=opt_type,
+                                        trigger_price=entry_est,
+                                        stop_loss=re_sl,
+                                        targets=[re_tgt],
+                                    )
+                                    log.info("[CH2] RE-ENTRY: %s SL=%.0f TGT=%.0f risk=₹%.0f (reply #%d)",
+                                             trade_sym, re_sl, re_tgt, max_risk, reply_id)
+                                    _notify(f"[CH2] Re-entry signal:\n{trade_sym}\n"
+                                            f"SL: {re_sl} | TGT: {re_tgt} | Risk: ₹{max_risk:,.0f}")
+                                    _execute_and_notify(re_sig, channel, ch_label)
                                 return
                             else:
                                 log.info("[CH2] Re-entry: no prior trade found for %s", trade_sym)
@@ -1798,7 +1819,7 @@ async def start_listener() -> None:
                      sig.trigger_price, sig.stop_loss, sig.targets)
 
             if channel == "ch2":
-                is_above = bool(re.search(r'\bABOVE\b', text, re.I))
+                is_above = bool(re.search(r'\bABOVE\b', text, re.I)) or _ch2_last_is_above
                 if is_above:
                     _ch2_trigger_held = sig
                     _ch2_queued_signal = None

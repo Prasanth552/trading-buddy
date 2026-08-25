@@ -335,11 +335,25 @@ async def main():
 
                     if last:
                         entry_est = float(last["price"])
+                        orig_sl = float(last["stop_price"])
                         orig_tgt = float(last["target_price"])
+                        orig_risk_pts = entry_est - orig_sl
+                        if orig_risk_pts <= 0:
+                            orig_risk_pts = entry_est * 0.08
+                        re_sl = round(entry_est - orig_risk_pts)
+                        re_tgt = orig_tgt if orig_tgt > entry_est * 1.02 else round(entry_est + orig_risk_pts * 2)
+
                         is_idx = raw_sym in INDEX_SYMS
-                        sl_pct = 0.10 if is_idx else 0.15
-                        re_sl = round(entry_est * (1 - sl_pct))
-                        re_tgt = orig_tgt if orig_tgt > entry_est else round(entry_est * 1.15)
+                        base = raw_sym.replace(" ", "").upper()
+                        re_lot_size = LOT_SIZES.get(base, DEFAULT_LOT)
+                        re_lots = 3 if is_idx else 2
+                        re_qty = re_lot_size * re_lots
+                        max_risk = orig_risk_pts * re_qty
+
+                        if max_risk > 3000:
+                            out(f"  ⛔ #{msg.id} @ {ts_str}: RE-ENTRY SKIPPED {trade_sym} "
+                                f"risk=₹{max_risk:,.0f} > ₹3,000 cap")
+                            continue
 
                         re_sig = ParsedSignal(
                             action="BUY", symbol=raw_sym, strike=strike,
@@ -349,7 +363,8 @@ async def main():
                             targets=[re_tgt],
                         )
                         out(f"  🔄 #{msg.id} @ {ts_str}: RE-ENTRY {trade_sym} (reply to #{reply_id})")
-                        out(f"      entry~{entry_est:.0f} SL={re_sl} TGT={re_tgt} \"{text[:60]}\"")
+                        out(f"      entry~{entry_est:.0f} SL={re_sl} TGT={re_tgt} risk=₹{max_risk:,.0f} "
+                            f"\"{text[:50]}\"")
                         executed.append({"signal": re_sig, "ts": ts_epoch, "reason": "re_entry",
                                          "entry_time": ts.strftime("%H:%M")})
                         reentries.append(trade_sym)
@@ -360,7 +375,7 @@ async def main():
 
         if sig:
             sym = f"{sig.symbol} {int(sig.strike)} {sig.option_type}"
-            is_above = bool(re.search(r'\bABOVE\b', text, re.I))
+            is_above = bool(re.search(r'\bABOVE\b', text, re.I)) or _cl._ch2_last_is_above
 
             if is_above:
                 # ABOVE signal → auto-hold until Active
