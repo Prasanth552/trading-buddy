@@ -122,7 +122,7 @@ def _ch_filter(channel: str) -> str:
 def _ensure_db():
     global _db_ready
     if not _db_ready:
-        _ensure_db()
+        db.init_db()
         with db.get_conn() as conn:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_channel ON trades(channel)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status)")
