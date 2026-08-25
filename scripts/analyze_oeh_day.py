@@ -315,13 +315,19 @@ for i, c in enumerate(candidates, 1):
     tgt = round(entry * OEH_TARGET_MULT, 2)
 
     sl_per_unit = entry - sl
-    if sl_per_unit > 0:
+    if sl_per_unit <= 0:
+        lots = 1
+        qty = lot_size_used
+    else:
+        min_1lot_loss = sl_per_unit * lot_size_used
+        if min_1lot_loss > MAX_LOSS_PER_TRADE:
+            print(f"  {i:<4} {sym:<14} {atm_strike:>8.0f} {entry:>8.1f} {sl:>8.1f} {tgt:>8.1f} "
+                  f"{'—':>5} {lot_size_used:>6} {'':>8} {'':>8} SKIP     {'1L SL=₹' + f'{min_1lot_loss:,.0f}':>10}")
+            no_data += 1
+            continue
         raw_qty = MAX_LOSS_PER_TRADE / sl_per_unit
         lots = max(1, int(raw_qty / lot_size_used))
         qty = lots * lot_size_used
-    else:
-        lots = 1
-        qty = lot_size_used
 
     exit_price, result, max_high, min_low = walk_candles_floor(filtered, entry, sl, tgt, qty)
     pnl = (exit_price - entry) * qty

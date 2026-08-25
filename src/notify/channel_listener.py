@@ -95,7 +95,7 @@ SCANNER_TARGET_MULT = 2.0        # target = 2x entry premium
 # ---------------------------------------------------------------------------
 # OEH Scanner (Open=High) — auto-execute config
 # ---------------------------------------------------------------------------
-OEH_ENABLED = False
+OEH_ENABLED = True
 OEH_RUN_TIME = "09:20"          # IST — check after first 5-min candle
 OEH_LIST_TIME = "09:16"         # IST — early list using 1-min candle
 OEH_MAX_TRADES = 5              # max trades per scan
@@ -435,13 +435,15 @@ def execute_signal(sig: ParsedSignal, *, channel: str = "ch1", max_lots: int | N
     lot_size = config.LOT_SIZES.get(lot_key, master_lot_size)
 
     is_index = lot_key in ("NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY")
-    if channel in ("ch2", "ch3"):
+    if channel == "oeh" and max_lots is not None:
+        lots = max_lots
+    elif channel in ("ch2", "ch3"):
         lots = 3 if is_index else 2
     elif channel in ("ch1", "ch1b"):
         lots = 2
     else:
         lots = 1
-    if max_lots is not None:
+    if max_lots is not None and channel != "oeh":
         lots = min(lots, max_lots)
     qty = lots * lot_size
 
@@ -1354,6 +1356,8 @@ async def _run_oeh_scan():
     summary_lines = []
     executed = 0
 
+    OEH_MAX_LOSS = 1500
+
     for c in top:
         parsed = _resolve_atm_strike(c["symbol"], "PE")
         if parsed is None:
@@ -1363,7 +1367,21 @@ async def _run_oeh_scan():
         parsed.stop_loss = round(parsed.trigger_price * (1 - OEH_SL_PCT), 2)
         parsed.targets = [round(parsed.trigger_price * OEH_TARGET_MULT, 2)]
 
-        result = execute_signal(parsed, channel="oeh", max_lots=2)
+        sl_per_unit = parsed.trigger_price - parsed.stop_loss
+        lot_key = c["symbol"].replace(" ", "").upper()
+        lot_sz = config.LOT_SIZES.get(lot_key, 400)
+        if sl_per_unit > 0:
+            min_1lot_loss = sl_per_unit * lot_sz
+            if min_1lot_loss > OEH_MAX_LOSS:
+                summary_lines.append(
+                    f"SKIP {c['symbol']} PE — 1-lot SL ₹{min_1lot_loss:,.0f} > ₹{OEH_MAX_LOSS:,}")
+                log.info("[OEH] SKIP %s: 1-lot SL ₹%.0f > ₹%d", c["symbol"], min_1lot_loss, OEH_MAX_LOSS)
+                continue
+            oeh_lots = max(1, int(OEH_MAX_LOSS / sl_per_unit / lot_sz))
+        else:
+            oeh_lots = 1
+
+        result = execute_signal(parsed, channel="oeh", max_lots=oeh_lots)
         if result["placed"]:
             executed += 1
             summary_lines.append(
@@ -1406,6 +1424,7 @@ def _build_eod_report(target_date: str | None = None) -> str:
     channels = [
         ("ch1", "CH1 Paid"),
         ("ch2", "CH2 G Prime"),
+        ("oeh", "OEH Scanner"),
     ]
 
     lines = []
