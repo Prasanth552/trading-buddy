@@ -46,7 +46,12 @@ api_id = int(os.getenv("TELEGRAM_API_ID", "0"))
 api_hash = os.getenv("TELEGRAM_API_HASH", "")
 ch1_id = int(os.getenv("SIGNAL_CHANNEL_ID", "0"))
 ch2_id = int(os.getenv("SIGNAL_CHANNEL2_ID", "0"))
-session_path = os.path.join(os.path.dirname(__file__), "..", "data", "telegram_user.session")
+import shutil
+_data_dir = os.path.join(os.path.dirname(__file__), "..", "data")
+session_path = os.path.join(_data_dir, "telegram_reader.session")
+_main_session = os.path.join(_data_dir, "telegram_user.session")
+if not os.path.exists(session_path) and os.path.exists(_main_session):
+    shutil.copy2(_main_session, session_path)
 
 # --- DB ---
 db_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
