@@ -407,15 +407,21 @@ async def main():
             reply_id = msg.reply_to.reply_to_msg_id
             orig = msg_by_id.get(reply_id)
             if orig and orig.text:
-                sym_m = _CH2_SYMBOL_RE.search(orig.text)
-                if sym_m:
-                    raw_sym = sym_m.group(1).upper().strip()
-                    raw_sym = re.sub(r'\s+', ' ', raw_sym)
-                    if raw_sym == "BANK NIFTY":
-                        raw_sym = "BANKNIFTY"
-                    trade_sym = f"{raw_sym} {int(float(sym_m.group(2)))} {sym_m.group(3).upper()}"
-                    out(f"  ℹ  #{msg.id} @ {ts_str}: RE-ENTRY (not executing) {trade_sym}")
-                    reentries.append(trade_sym)
+                orig_sig = parse_signal_ch2(orig.text)
+                if orig_sig:
+                    re_sym = orig_sig.symbol.replace(" ", "").upper()
+                    sym_label = f"{orig_sig.symbol} {int(orig_sig.strike)} {orig_sig.option_type}"
+                    if re_sym not in INDEX_SYMS:
+                        out(f"  ⊘  #{msg.id} @ {ts_str}: RE-ENTRY SKIP non-index {sym_label}")
+                        continue
+                    reply_sig = parse_signal_ch2(text)
+                    if reply_sig and reply_sig.stop_loss and reply_sig.targets:
+                        orig_sig = reply_sig
+                    out(f"  🔄 #{msg.id} @ {ts_str}: RE-ENTRY {sym_label} "
+                        f"SL={orig_sig.stop_loss} TGT={orig_sig.targets[0]}")
+                    executed.append({"signal": orig_sig, "ts": ts_epoch, "reason": "re-entry",
+                                     "entry_time": ts.strftime("%H:%M")})
+                    reentries.append(sym_label)
                     continue
 
         sig = parse_signal_ch2(text)
