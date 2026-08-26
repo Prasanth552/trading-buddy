@@ -1370,8 +1370,6 @@ async def _run_oeh_scan():
     summary_lines = []
     executed = 0
 
-    OEH_MAX_LOSS = 1500
-
     for c in top:
         parsed = _resolve_atm_strike(c["symbol"], "PE")
         if parsed is None:
@@ -1381,21 +1379,7 @@ async def _run_oeh_scan():
         parsed.stop_loss = round(parsed.trigger_price * (1 - OEH_SL_PCT), 2)
         parsed.targets = [round(parsed.trigger_price * OEH_TARGET_MULT, 2)]
 
-        sl_per_unit = parsed.trigger_price - parsed.stop_loss
-        lot_key = c["symbol"].replace(" ", "").upper()
-        lot_sz = config.LOT_SIZES.get(lot_key, 400)
-        if sl_per_unit > 0:
-            min_1lot_loss = sl_per_unit * lot_sz
-            if min_1lot_loss > OEH_MAX_LOSS:
-                summary_lines.append(
-                    f"SKIP {c['symbol']} PE — 1-lot SL ₹{min_1lot_loss:,.0f} > ₹{OEH_MAX_LOSS:,}")
-                log.info("[OEH] SKIP %s: 1-lot SL ₹%.0f > ₹%d", c["symbol"], min_1lot_loss, OEH_MAX_LOSS)
-                continue
-            oeh_lots = max(1, int(OEH_MAX_LOSS / sl_per_unit / lot_sz))
-        else:
-            oeh_lots = 1
-
-        result = execute_signal(parsed, channel="oeh", max_lots=oeh_lots)
+        result = execute_signal(parsed, channel="oeh", max_lots=1)
         if result["placed"]:
             executed += 1
             summary_lines.append(
@@ -1648,8 +1632,6 @@ async def _run_oel_scan():
     summary_lines = []
     executed = 0
 
-    OEL_MAX_LOSS = 1500
-
     for c in top:
         parsed = _resolve_atm_strike(c["symbol"], "CE")
         if parsed is None:
@@ -1659,21 +1641,7 @@ async def _run_oel_scan():
         parsed.stop_loss = round(parsed.trigger_price * (1 - OEL_SL_PCT), 2)
         parsed.targets = [round(parsed.trigger_price * OEL_TARGET_MULT, 2)]
 
-        sl_per_unit = parsed.trigger_price - parsed.stop_loss
-        lot_key = c["symbol"].replace(" ", "").upper()
-        lot_sz = config.LOT_SIZES.get(lot_key, 400)
-        if sl_per_unit > 0:
-            min_1lot_loss = sl_per_unit * lot_sz
-            if min_1lot_loss > OEL_MAX_LOSS:
-                summary_lines.append(
-                    f"SKIP {c['symbol']} CE — 1-lot SL ₹{min_1lot_loss:,.0f} > ₹{OEL_MAX_LOSS:,}")
-                log.info("[OEL] SKIP %s: 1-lot SL ₹%.0f > ₹%d", c["symbol"], min_1lot_loss, OEL_MAX_LOSS)
-                continue
-            oel_lots = max(1, int(OEL_MAX_LOSS / sl_per_unit / lot_sz))
-        else:
-            oel_lots = 1
-
-        result = execute_signal(parsed, channel="oel", max_lots=oel_lots)
+        result = execute_signal(parsed, channel="oel", max_lots=1)
         if result["placed"]:
             executed += 1
             summary_lines.append(

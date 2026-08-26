@@ -163,9 +163,14 @@ def walk_candles_floor(candles, entry, sl, tgt, qty):
     for c in candles:
         max_high = max(max_high, c["high"])
         min_low = min(min_low, c["low"])
+        low_pnl = (c["low"] - entry) * qty
+
+        if low_pnl <= -MAX_LOSS_PER_TRADE:
+            exit_price = entry - (MAX_LOSS_PER_TRADE / qty)
+            return exit_price, "MAX_SL", max_high, min_low
+
         tgt_hit = tgt_valid and c["high"] >= tgt
         sl_hit = sl_valid and c["low"] <= sl
-        low_pnl = (c["low"] - entry) * qty
 
         if tgt_hit and sl_hit:
             return tgt, "BOTH_TGT", max_high, min_low
@@ -347,20 +352,8 @@ def backtest_candidates(candidates, opt_type, label):
 
         sl = round(entry * (1 - SL_PCT), 2)
         tgt = round(entry * TARGET_MULT, 2)
-
-        sl_per_unit = entry - sl
-        if sl_per_unit <= 0:
-            lots = 1
-            qty = lot_size_used
-        else:
-            min_1lot_loss = sl_per_unit * lot_size_used
-            if min_1lot_loss > MAX_LOSS_PER_TRADE:
-                print(f"  {i:<4} {sym:<14} {atm_strike:>8.0f} {entry:>8.1f} {sl:>8.1f} {tgt:>8.1f} "
-                      f"{'—':>5} {lot_size_used:>6} {'':>8} {'':>8} SKIP     {'1L=₹'+f'{min_1lot_loss:,.0f}':>10}")
-                no_data += 1
-                continue
-            lots = max(1, int(MAX_LOSS_PER_TRADE / sl_per_unit / lot_size_used))
-            qty = lots * lot_size_used
+        lots = 1
+        qty = lot_size_used
 
         exit_price, result, max_high, min_low = walk_candles_floor(filtered, entry, sl, tgt, qty)
         pnl = (exit_price - entry) * qty
