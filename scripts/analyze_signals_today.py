@@ -5,7 +5,7 @@ Must kill channel_listener first (Telethon session lock).
 
 Usage: .venv/bin/python3 scripts/analyze_signals_today.py [--date 2026-08-26]
 """
-import sys, os, re, asyncio, argparse, sqlite3, time as _time, calendar
+import sys, os, re, asyncio, argparse, sqlite3, time as _time
 from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 
@@ -117,20 +117,13 @@ def resolve_instrument(symbol_str, use_monthly=False):
         return None, None, None
     candidates.sort(key=lambda x: x[0])
 
-    if use_monthly:
-        monthly_cands = []
-        for exp, inst in candidates:
-            last_day = calendar.monthrange(exp.year, exp.month)[1]
-            last_thur = None
-            for d in range(last_day, last_day - 7, -1):
-                dt = date(exp.year, exp.month, d)
-                if dt.weekday() == 3:
-                    last_thur = dt
-                    break
-            if last_thur and abs((exp - last_thur).days) <= 2:
-                monthly_cands.append((exp, inst))
+    if use_monthly and len(candidates) > 1:
+        min_exp = today_d + timedelta(days=7)
+        monthly_cands = [(e, i) for e, i in candidates if e >= min_exp]
         if monthly_cands:
-            candidates = monthly_cands
+            monthly_cands.sort(key=lambda x: x[0])
+            inst = monthly_cands[0][1]
+            return inst.get("instrument_key"), int(inst.get("lot_size", 1)) or 1, monthly_cands[0][0]
 
     inst = candidates[0][1]
     return inst.get("instrument_key"), int(inst.get("lot_size", 1)) or 1, candidates[0][0]
