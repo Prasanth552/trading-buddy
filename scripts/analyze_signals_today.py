@@ -19,7 +19,10 @@ PROFIT_FLOOR = 1500
 parser = argparse.ArgumentParser()
 parser.add_argument("--date", default=None)
 parser.add_argument("--limit", type=int, default=600)
+parser.add_argument("--max-loss", type=float, default=0,
+                    help="Cap max loss per trade (dynamic qty sizing). 0 = fixed lots")
 args = parser.parse_args()
+MAX_LOSS = args.max_loss
 
 target_date = args.date or datetime.now(IST).strftime("%Y-%m-%d")
 year, month, day = [int(x) for x in target_date.split("-")]
@@ -178,6 +181,14 @@ def simulate_trade(sig, entry_time_str, lots_override=None, use_monthly=False):
         return None, "NO_INST", 0, "", exp_date
 
     lot_size = LOT_SIZES.get(base_sym, master_lot or DEFAULT_LOT)
+
+    if MAX_LOSS > 0 and sig.stop_loss and sig.trigger_price:
+        sl_per_unit = abs(sig.trigger_price - sig.stop_loss)
+        if sl_per_unit > 0:
+            min_1lot_loss = sl_per_unit * lot_size
+            if min_1lot_loss > MAX_LOSS:
+                return None, "SL_TOO_BIG", 0, f"1lot={min_1lot_loss:.0f}", exp_date
+            lots = max(1, int(MAX_LOSS / sl_per_unit / lot_size))
     qty = lot_size * lots
 
     from_dt = datetime(year, month, day, 9, 15, 0, tzinfo=IST)
@@ -257,7 +268,8 @@ async def main():
     # CH1 Analysis — parse each message, simulate with monthly expiry, 2 lots
     # ============================================================
     out(f"\n{'='*130}")
-    out(f"  CH1 SIGNALS — {target_date} — Monthly expiry, 2 lots, ₹{PROFIT_FLOOR:,} floor")
+    sl_label = f", max loss ₹{MAX_LOSS:,.0f}" if MAX_LOSS else ", 2 lots"
+    out(f"  CH1 SIGNALS — {target_date} — Monthly expiry{sl_label}, ₹{PROFIT_FLOOR:,} floor")
     out(f"{'='*130}")
 
     ch1_signals = []
@@ -324,7 +336,8 @@ async def main():
     # CH2 Analysis — full state machine (ABOVE/NEAR/WAIT/Active)
     # ============================================================
     out(f"\n{'='*130}")
-    out(f"  CH2 SIGNALS — {target_date} — Index only, 3 lots, ₹{PROFIT_FLOOR:,} floor")
+    sl_label2 = f", max loss ₹{MAX_LOSS:,.0f}" if MAX_LOSS else ", 3L idx / 2L stk"
+    out(f"  CH2 SIGNALS — {target_date} — Index only{sl_label2}, ₹{PROFIT_FLOOR:,} floor")
     out(f"  ABOVE → auto-hold until Active | NEAR → 5s delay")
     out(f"{'='*130}")
 
