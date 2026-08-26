@@ -117,7 +117,6 @@ OEL_TARGET_MULT = 2.0
 OEL_TOLERANCE = 0.05
 OEL_MIN_RISE_PCT = 0.3
 OEL_BLOCKLIST: set[str] = set()
-OEL_UNIVERSE = OEH_UNIVERSE  # same F&O stock universe
 
 # ---------------------------------------------------------------------------
 # EOD Report — sent to Telegram at market close
@@ -134,6 +133,7 @@ OEH_UNIVERSE = [
     "SHREECEM", "DABUR", "COLPAL", "AMBUJACEM", "BHEL",
     "DIVISLAB", "BRITANNIA",
 ]
+OEL_UNIVERSE = OEH_UNIVERSE
 
 # ---------------------------------------------------------------------------
 # Follow-up / exit message classification
