@@ -1906,24 +1906,34 @@ async def start_listener() -> None:
                     log.info("[CH2] NOT ACTIVE — nothing queued to cancel")
                 return
 
-            # Re-entry via reply: log only (disabled — re-entries need LTP validation)
+            # Re-entry via reply with "AGAIN" — parse original signal, execute
             if (event.message.reply_to and event.message.reply_to.reply_to_msg_id
                     and re.search(r'\bAGAIN\b', upper_ctl)):
                 try:
                     reply_id = event.message.reply_to.reply_to_msg_id
                     orig_msg = await client.get_messages(event.chat_id, ids=reply_id)
                     if orig_msg and orig_msg.text:
-                        sym_m = _CH2_SYMBOL_RE.search(orig_msg.text)
-                        if sym_m:
-                            raw_sym = sym_m.group(1).upper().strip()
-                            raw_sym = re.sub(r'\s+', ' ', raw_sym)
-                            if raw_sym == "BANK NIFTY":
-                                raw_sym = "BANKNIFTY"
-                            trade_sym = f"{raw_sym} {int(float(sym_m.group(2)))} {sym_m.group(3).upper()}"
-                            log.info("[CH2] RE-ENTRY detected (log only): %s — \"%s\"",
-                                     trade_sym, text[:80])
-                            _notify(f"[CH2] Re-entry detected (not executing):\n"
-                                    f"{trade_sym}\n\"{text[:80]}\"")
+                        orig_sig = parse_signal_ch2(orig_msg.text)
+                        if orig_sig:
+                            re_sym = orig_sig.symbol.replace(" ", "").upper()
+                            trade_sym = f"{orig_sig.symbol} {int(orig_sig.strike)} {orig_sig.option_type}"
+                            if re_sym not in ("NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY"):
+                                log.info("[CH2] RE-ENTRY skip non-index: %s", trade_sym)
+                                _notify(f"[CH2] Re-entry skip (non-index): {trade_sym}")
+                                return
+                            reply_sig = parse_signal_ch2(text)
+                            if reply_sig and reply_sig.stop_loss and reply_sig.targets:
+                                orig_sig = reply_sig
+                            log.info("[CH2] RE-ENTRY executing: %s SL=%.1f TGT=%.1f",
+                                     trade_sym, orig_sig.stop_loss, orig_sig.targets[0])
+                            _notify(f"*[CH2] Re-entry executing:*\n{trade_sym}\n"
+                                    f"SL: {orig_sig.stop_loss} | TGT: {orig_sig.targets[0]}")
+                            result = execute_signal(orig_sig, channel="ch2")
+                            if result["placed"]:
+                                _notify(f"*[CH2] Re-entry order placed*\n"
+                                        f"{result['symbol']} x{result['qty']}\n"
+                                        f"Entry: {result['entry']} | SL: {result['sl']} | "
+                                        f"Target: {result['target']}")
                             return
                 except Exception as exc:
                     log.warning("[CH2] Re-entry parse failed: %s", exc)
