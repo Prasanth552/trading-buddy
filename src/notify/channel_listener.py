@@ -106,6 +106,20 @@ OEH_MIN_DROP_PCT = 0.3          # skip candidates with <0.3% drop (weak signal)
 OEH_BLOCKLIST = {"GODREJCP", "GRASIM"}  # repeat losers — skip these
 
 # ---------------------------------------------------------------------------
+# OEL Scanner (Open=Low) — bullish counterpart to OEH
+# ---------------------------------------------------------------------------
+OEL_ENABLED = True
+OEL_RUN_TIME = "09:20"
+OEL_LIST_TIME = "09:16"
+OEL_MAX_TRADES = 5
+OEL_SL_PCT = 0.30
+OEL_TARGET_MULT = 2.0
+OEL_TOLERANCE = 0.05
+OEL_MIN_RISE_PCT = 0.3
+OEL_BLOCKLIST: set[str] = set()
+OEL_UNIVERSE = OEH_UNIVERSE  # same F&O stock universe
+
+# ---------------------------------------------------------------------------
 # EOD Report — sent to Telegram at market close
 # ---------------------------------------------------------------------------
 EOD_REPORT_TIME = "15:35"  # IST — 5 min after market close
@@ -435,7 +449,7 @@ def execute_signal(sig: ParsedSignal, *, channel: str = "ch1", max_lots: int | N
     lot_size = config.LOT_SIZES.get(lot_key, master_lot_size)
 
     is_index = lot_key in ("NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY")
-    if channel == "oeh" and max_lots is not None:
+    if channel in ("oeh", "oel") and max_lots is not None:
         lots = max_lots
     elif channel in ("ch2", "ch3"):
         lots = 3 if is_index else 2
@@ -443,7 +457,7 @@ def execute_signal(sig: ParsedSignal, *, channel: str = "ch1", max_lots: int | N
         lots = 2
     else:
         lots = 1
-    if max_lots is not None and channel != "oeh":
+    if max_lots is not None and channel not in ("oeh", "oel"):
         lots = min(lots, max_lots)
     qty = lots * lot_size
 
@@ -1407,6 +1421,284 @@ async def _run_oeh_scan():
 
 
 # ---------------------------------------------------------------------------
+# OEL Early List — 1-min candle scan at 09:16, list only (no trades)
+# ---------------------------------------------------------------------------
+async def _run_oel_list():
+    """Scan OEL universe at 9:16 using the first 1-min candle, send list only."""
+    import time as _t
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from src.broker.upstox_data import UpstoxData, load_cached_token
+
+    IST = ZoneInfo(config.TIMEZONE)
+    log.info("[OEL-LIST] Early scan starting (1-min candle)...")
+
+    token = load_cached_token()
+    if not token:
+        log.error("[OEL-LIST] No Upstox token")
+        _notify("*[OEL] Early list SKIPPED* — No Upstox token.")
+        return
+
+    try:
+        ud = UpstoxData(access_token=token)
+        master = ud._load_master()
+    except Exception as exc:
+        log.error("[OEL-LIST] Master load failed: %s", exc)
+        _notify(f"[OEL] Early list error: {exc}")
+        return
+
+    eq_keys = {}
+    for inst in master:
+        if inst.get("segment") == "NSE_EQ":
+            tsym = (inst.get("trading_symbol") or "").upper()
+            if tsym:
+                eq_keys[tsym] = inst.get("instrument_key")
+
+    today = datetime.now(IST).date()
+    from_dt = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=15)
+    to_dt = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=16)
+
+    candidates = []
+    scanned = 0
+
+    for sym in OEL_UNIVERSE:
+        if sym in OEL_BLOCKLIST:
+            continue
+        inst_key = eq_keys.get(sym)
+        if not inst_key:
+            continue
+        try:
+            candles = ud.historical_data(inst_key, from_dt, to_dt, "1minute")
+            _t.sleep(0.3)
+        except Exception as exc:
+            err = str(exc)
+            if "429" in err or "rate" in err.lower():
+                _t.sleep(3)
+                try:
+                    candles = ud.historical_data(inst_key, from_dt, to_dt, "1minute")
+                except Exception:
+                    continue
+            else:
+                continue
+
+        scanned += 1
+        if not candles or len(candles) < 1:
+            continue
+
+        open_price = candles[0]["open"]
+        if open_price <= 0:
+            continue
+
+        min_low = candles[0]["low"]
+        if min_low < open_price - OEL_TOLERANCE:
+            continue
+
+        entry_price = candles[0]["close"]
+        rise_pct = (entry_price - open_price) / open_price * 100
+        if rise_pct < OEL_MIN_RISE_PCT:
+            continue
+
+        candidates.append({
+            "symbol": sym,
+            "open": open_price,
+            "close": entry_price,
+            "low": min_low,
+            "rise_pct": rise_pct,
+        })
+
+    candidates.sort(key=lambda x: x["rise_pct"], reverse=True)
+
+    if not candidates:
+        _notify(f"📋 *[OEL] No Open=Low stocks at 9:16* (scanned {scanned})")
+        log.info("[OEL-LIST] No candidates (scanned %d)", scanned)
+        return
+
+    lines = [f"📋 *[OEL] Open=Low Stocks — {today.strftime('%d %b %Y')}*", ""]
+    for i, c in enumerate(candidates, 1):
+        lines.append(
+            f"{i}. *{c['symbol']}* — Open {c['open']:.2f}, "
+            f"CMP {c['close']:.2f} (↑{c['rise_pct']:.1f}%)"
+        )
+    lines.append(f"\nScanned {scanned} stocks, {len(candidates)} OEL candidates")
+    lines.append("_(1-min candle — early detection, verify at 9:20)_")
+
+    msg = "\n".join(lines)
+    _notify(msg)
+    log.info("[OEL-LIST] Sent %d candidates:\n%s", len(candidates), msg)
+
+
+# ---------------------------------------------------------------------------
+# OEL Scanner — Open=Low bullish signal scanner
+# ---------------------------------------------------------------------------
+async def _run_oel_scan():
+    """Scan F&O universe at 9:20 AM for OEL (Open=Low) stocks, buy CEs."""
+    import time as _t
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from src.broker.upstox_data import UpstoxData, load_cached_token
+
+    IST = ZoneInfo(config.TIMEZONE)
+    log.info("[OEL] Scanner starting...")
+
+    token = load_cached_token()
+    if not token:
+        log.error("[OEL] No valid Upstox token — scanner cannot run")
+        _notify("*[OEL] Scanner SKIPPED* — No Upstox token for today.")
+        return
+
+    _notify("*[OEL] Scanning for Open=Low stocks...*")
+
+    try:
+        ud = UpstoxData(access_token=token)
+        master = ud._load_master()
+    except Exception as exc:
+        log.error("[OEL] Failed to load instrument master: %s", exc)
+        _notify(f"[OEL] Scanner error: {exc}")
+        return
+
+    eq_keys = {}
+    for inst in master:
+        if inst.get("segment") == "NSE_EQ":
+            tsym = (inst.get("trading_symbol") or "").upper()
+            if tsym:
+                eq_keys[tsym] = inst.get("instrument_key")
+
+    today = datetime.now(IST).date()
+    from_dt = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=15)
+    to_dt = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=25)
+
+    # NIFTY trend filter: log only (proceed regardless with floor strategy)
+    nifty_key = config.UPSTOX_INDEX_KEYS.get("NSE:NIFTY 50")
+    if nifty_key:
+        try:
+            nifty_candles = ud.historical_data(nifty_key, from_dt, to_dt, "5minute")
+            if nifty_candles and len(nifty_candles) >= 1:
+                nifty_open = nifty_candles[0]["open"]
+                nifty_close = nifty_candles[0]["close"]
+                if nifty_close < nifty_open:
+                    log.info("[OEL] NIFTY is red (open=%.1f close=%.1f) — proceeding anyway (floor strategy)",
+                             nifty_open, nifty_close)
+                    _notify(f"[OEL] NIFTY is red at 9:20 "
+                            f"(open={nifty_open:.1f} → {nifty_close:.1f}). "
+                            f"Proceeding — floor strategy handles red days.")
+                log.info("[OEL] NIFTY is green (open=%.1f close=%.1f) — proceeding with scan",
+                         nifty_open, nifty_close)
+        except Exception as exc:
+            log.warning("[OEL] Could not fetch NIFTY data, proceeding anyway: %s", exc)
+
+    candidates = []
+    scanned = 0
+
+    for sym in OEL_UNIVERSE:
+        if sym in OEL_BLOCKLIST:
+            continue
+
+        inst_key = eq_keys.get(sym)
+        if not inst_key:
+            continue
+
+        try:
+            candles = ud.historical_data(inst_key, from_dt, to_dt, "5minute")
+            _t.sleep(0.3)
+        except Exception as exc:
+            err = str(exc)
+            if "429" in err or "rate" in err.lower():
+                _t.sleep(3)
+                try:
+                    candles = ud.historical_data(inst_key, from_dt, to_dt, "5minute")
+                except Exception:
+                    continue
+            else:
+                continue
+
+        scanned += 1
+        if not candles or len(candles) < 1:
+            continue
+
+        open_price = candles[0]["open"]
+        if open_price <= 0:
+            continue
+
+        min_low = candles[0]["low"]
+        if min_low < open_price - OEL_TOLERANCE:
+            continue
+
+        entry_price = candles[0]["close"]
+        rise_pct = (entry_price - open_price) / open_price * 100
+        if rise_pct < OEL_MIN_RISE_PCT:
+            continue
+
+        candidates.append({
+            "symbol": sym,
+            "open": open_price,
+            "entry": entry_price,
+            "min_low": min_low,
+            "rise_pct": rise_pct,
+        })
+
+    log.info("[OEL] Scanned %d stocks, found %d OEL candidates", scanned, len(candidates))
+
+    if not candidates:
+        _notify(f"[OEL] No OEL candidates found today (scanned {scanned} stocks)")
+        return
+
+    candidates.sort(key=lambda x: x["rise_pct"], reverse=True)
+    top = candidates[:OEL_MAX_TRADES]
+
+    summary_lines = []
+    executed = 0
+
+    OEL_MAX_LOSS = 1500
+
+    for c in top:
+        parsed = _resolve_atm_strike(c["symbol"], "CE")
+        if parsed is None:
+            summary_lines.append(f"SKIP {c['symbol']} CE — could not resolve ATM")
+            continue
+
+        parsed.stop_loss = round(parsed.trigger_price * (1 - OEL_SL_PCT), 2)
+        parsed.targets = [round(parsed.trigger_price * OEL_TARGET_MULT, 2)]
+
+        sl_per_unit = parsed.trigger_price - parsed.stop_loss
+        lot_key = c["symbol"].replace(" ", "").upper()
+        lot_sz = config.LOT_SIZES.get(lot_key, 400)
+        if sl_per_unit > 0:
+            min_1lot_loss = sl_per_unit * lot_sz
+            if min_1lot_loss > OEL_MAX_LOSS:
+                summary_lines.append(
+                    f"SKIP {c['symbol']} CE — 1-lot SL ₹{min_1lot_loss:,.0f} > ₹{OEL_MAX_LOSS:,}")
+                log.info("[OEL] SKIP %s: 1-lot SL ₹%.0f > ₹%d", c["symbol"], min_1lot_loss, OEL_MAX_LOSS)
+                continue
+            oel_lots = max(1, int(OEL_MAX_LOSS / sl_per_unit / lot_sz))
+        else:
+            oel_lots = 1
+
+        result = execute_signal(parsed, channel="oel", max_lots=oel_lots)
+        if result["placed"]:
+            executed += 1
+            summary_lines.append(
+                f"BUY {result['symbol']} x{result['qty']} @ {result['entry']:.2f} "
+                f"(OEL rise={c['rise_pct']:.1f}%)"
+            )
+            _notify(
+                f"*[OEL] Trade placed*\n"
+                f"{result['symbol']} x{result['qty']}\n"
+                f"Entry: {result['entry']} | SL: {result['sl']} | Target: {result['target']}\n"
+                f"Signal: {c['symbol']} Open={c['open']:.2f} Low={c['min_low']:.2f} "
+                f"(rise {c['rise_pct']:.1f}% in 15min)"
+            )
+        else:
+            summary_lines.append(f"FAIL {c['symbol']} CE — {result['reason']}")
+
+    summary = "\n".join(summary_lines)
+    log.info("[OEL] Scan done: %d/%d executed\n%s", executed, len(top), summary)
+    _notify(
+        f"*[OEL] Scan complete: {executed}/{len(top)} trades placed*\n"
+        f"Candidates found: {len(candidates)} | Scanned: {scanned}\n{summary}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # EOD Report — daily summary sent to Telegram
 # ---------------------------------------------------------------------------
 def _build_eod_report(target_date: str | None = None) -> str:
@@ -1425,6 +1717,7 @@ def _build_eod_report(target_date: str | None = None) -> str:
         ("ch1", "CH1 Paid"),
         ("ch2", "CH2 G Prime"),
         ("oeh", "OEH Scanner"),
+        ("oel", "OEL Scanner"),
     ]
 
     lines = []
@@ -1439,8 +1732,8 @@ def _build_eod_report(target_date: str | None = None) -> str:
 
     with _db.get_conn() as conn:
         for ch_key, ch_label in channels:
-            if ch_key == "oeh":
-                ch_filter = "channel='oeh'"
+            if ch_key in ("oeh", "oel"):
+                ch_filter = f"channel='{ch_key}'"
             elif ch_key == "ch1":
                 ch_filter = "channel IN ('ch1','ch1b')"
             else:
@@ -1799,6 +2092,77 @@ async def start_listener() -> None:
 
     asyncio.get_event_loop().create_task(_oeh_list_scheduler())
     log.info("OEH early list scheduler started — runs daily at %s IST", OEH_LIST_TIME)
+
+    # --- OEL Scanner: run once daily at OEL_RUN_TIME ---
+    async def _oel_scheduler():
+        from zoneinfo import ZoneInfo
+        from datetime import datetime, timedelta
+        IST = ZoneInfo(config.TIMEZONE)
+
+        h, m = map(int, OEL_RUN_TIME.split(":"))
+        first_run = True
+
+        while True:
+            if not OEL_ENABLED:
+                await asyncio.sleep(60)
+                continue
+
+            now = datetime.now(IST)
+
+            if first_run and mc.is_trading_day():
+                first_run = False
+                scheduled = now.replace(hour=h, minute=m, second=0, microsecond=0)
+                if now > scheduled and now.hour < 15:
+                    log.info("[OEL] Missed scheduled %s run — catching up now", OEL_RUN_TIME)
+                    await _run_oel_scan()
+                    continue
+            first_run = False
+
+            target = now.replace(hour=h, minute=m, second=0, microsecond=0)
+            if now >= target:
+                target += timedelta(days=1)
+
+            wait_secs = (target - now).total_seconds()
+            log.info("[OEL] Next scan at %s IST (in %.0f min)",
+                     target.strftime("%Y-%m-%d %H:%M"), wait_secs / 60)
+            await asyncio.sleep(wait_secs)
+
+            if not mc.is_trading_day():
+                log.info("[OEL] Not a trading day, skipping scan")
+                continue
+
+            await _run_oel_scan()
+
+    asyncio.get_event_loop().create_task(_oel_scheduler())
+    log.info("OEL scanner started — runs daily at %s IST", OEL_RUN_TIME)
+
+    # --- OEL Early List: send stock list at 09:16 IST ---
+    async def _oel_list_scheduler():
+        from zoneinfo import ZoneInfo
+        from datetime import datetime, timedelta
+        IST = ZoneInfo(config.TIMEZONE)
+
+        h, m = map(int, OEL_LIST_TIME.split(":"))
+
+        while True:
+            now = datetime.now(IST)
+            target = now.replace(hour=h, minute=m, second=0, microsecond=0)
+            if now >= target:
+                target += timedelta(days=1)
+
+            wait_secs = (target - now).total_seconds()
+            log.info("[OEL-LIST] Next early list at %s IST (in %.0f min)",
+                     target.strftime("%Y-%m-%d %H:%M"), wait_secs / 60)
+            await asyncio.sleep(wait_secs)
+
+            if not mc.is_trading_day():
+                log.info("[OEL-LIST] Not a trading day, skipping")
+                continue
+
+            await _run_oel_list()
+
+    asyncio.get_event_loop().create_task(_oel_list_scheduler())
+    log.info("OEL early list scheduler started — runs daily at %s IST", OEL_LIST_TIME)
 
     # --- EOD Report: send daily at 15:35 IST ---
     async def _eod_report_scheduler():
