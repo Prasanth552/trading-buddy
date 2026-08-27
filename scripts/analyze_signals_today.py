@@ -364,6 +364,9 @@ async def main():
     _cl._ch2_pending = None
     _cl._ch2_pending_ts = 0.0
     DELAY_SECS = 5
+    last_reentry_ts = 0.0
+    MARKET_CLOSE_HR = 15
+    MARKET_CLOSE_MIN = 30
 
     for msg in ch2_msgs:
         if not msg.text:
@@ -373,6 +376,9 @@ async def main():
         ts_str = ts.strftime("%H:%M:%S")
         ts_epoch = ts.timestamp()
         upper = text.upper()
+
+        if ts.hour > MARKET_CLOSE_HR or (ts.hour == MARKET_CLOSE_HR and ts.minute >= MARKET_CLOSE_MIN):
+            continue
 
         if queued_signal and (ts_epoch - queued_ts) > DELAY_SECS:
             out(f"  ⏱  {DELAY_SECS}s elapsed — executing queued signal:")
@@ -395,7 +401,9 @@ async def main():
                 out(f"  ⏸  #{msg.id} @ {ts_str}: WAIT FOR TRIGGER (nothing queued)")
             continue
 
-        if re.search(r'\bACTIVE\b|\bACTT\b', upper) and trigger_held:
+        clean_text = re.sub(r'[\U0001F600-\U0001FAFF☀-➿❤️‍\s]+', '', text).strip()
+        if (re.search(r'\bACTIVE\b|\bACTT\b', upper)
+                and len(clean_text) < 15 and trigger_held):
             held_sym = f"{trigger_held.symbol} {int(trigger_held.strike)} {trigger_held.option_type}"
             out(f"  ▶  #{msg.id} @ {ts_str}: ACTIVE — executing held {held_sym}")
             executed.append({"signal": trigger_held, "ts": ts_epoch, "reason": "active_trigger",
@@ -422,6 +430,9 @@ async def main():
         # Re-entry: "Above X again", "same range again", "new buy", "Above High again"
         reentry_m = _RE_REENTRY.search(upper)
         if reentry_m and last_executed_sig:
+            if ts_epoch - last_reentry_ts < 60:
+                out(f"  ⊘  #{msg.id} @ {ts_str}: RE-ENTRY SKIPPED (duplicate <60s)")
+                continue
             last = last_executed_sig
             re_sym = last.symbol.replace(" ", "").upper()
             if re_sym in INDEX_SYMS:
@@ -434,19 +445,21 @@ async def main():
                         break
                 side_m = re.search(r'(CE|PE)\s+SIDE', upper)
                 opt_type = side_m.group(1) if side_m else last.option_type
+                sl_ratio = last.stop_loss / last.trigger_price if last.trigger_price > 0 else 0.90
                 re_sig = ParsedSignal(
                     action="BUY", symbol=last.symbol, strike=last.strike,
                     option_type=opt_type, trigger_price=new_entry,
-                    stop_loss=round(new_entry * 0.90), targets=last.targets,
+                    stop_loss=round(new_entry * sl_ratio), targets=last.targets,
                 )
                 sym_label = f"{last.symbol} {int(last.strike)} {opt_type}"
+                last_reentry_ts = ts_epoch
                 has_above = bool(re.search(r'\bABOVE\b', upper))
                 if has_above:
                     trigger_held = re_sig
                     trigger_held_msg_id = msg.id
-                    out(f"  🔄 #{msg.id} @ {ts_str}: RE-ENTRY ABOVE (held) {sym_label} @ {new_entry}")
+                    out(f"  🔄 #{msg.id} @ {ts_str}: RE-ENTRY ABOVE (held) {sym_label} @ {new_entry} SL={re_sig.stop_loss}")
                 else:
-                    out(f"  🔄 #{msg.id} @ {ts_str}: RE-ENTRY {sym_label} @ {new_entry}")
+                    out(f"  🔄 #{msg.id} @ {ts_str}: RE-ENTRY {sym_label} @ {new_entry} SL={re_sig.stop_loss}")
                     executed.append({"signal": re_sig, "ts": ts_epoch, "reason": "re-entry",
                                      "entry_time": ts.strftime("%H:%M")})
                     last_executed_sig = re_sig

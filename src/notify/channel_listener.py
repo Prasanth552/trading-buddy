@@ -663,6 +663,7 @@ _ch2_queued_task: Any = None
 _ch2_trigger_held: ParsedSignal | None = None
 _ch2_last_is_above: bool = False
 _ch2_last_executed: ParsedSignal | None = None
+_ch2_last_reentry_ts: float = 0.0
 
 _RE_REENTRY = re.compile(
     r'(?:'
@@ -2221,8 +2222,10 @@ async def start_listener() -> None:
                     log.info("[CH2] WAIT FOR TRIGGER — no queued signal to hold")
                 return
 
-            # "Active"/"Actt" — execute the held signal
-            if re.search(r'\bACTIVE\b|\bACTT\b', upper_ctl) and _ch2_trigger_held:
+            # "Active"/"Actt" — execute the held signal (short msg only, avoid false positives)
+            clean_ctl = re.sub(r'[\U0001F600-\U0001FAFF☀-➿❤️‍\s]+', '', text).strip()
+            if (re.search(r'\bACTIVE\b|\bACTT\b', upper_ctl)
+                    and len(clean_ctl) < 15 and _ch2_trigger_held):
                 sig = _ch2_trigger_held
                 _ch2_trigger_held = None
                 log.info("[CH2] ACTIVE — executing held: %s %s %s",
@@ -2259,6 +2262,10 @@ async def start_listener() -> None:
             # "Above High again focus", "Above X pe/ce side" etc.
             reentry_m = _RE_REENTRY.search(upper_ctl)
             if reentry_m and _ch2_last_executed:
+                now_ts = _time.time()
+                if now_ts - _ch2_last_reentry_ts < 60:
+                    log.info("[CH2] RE-ENTRY skipped (duplicate within 60s)")
+                    return
                 last = _ch2_last_executed
                 re_sym = last.symbol.replace(" ", "").upper()
                 if re_sym in ("NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY"):
@@ -2271,24 +2278,29 @@ async def start_listener() -> None:
                             break
                     side_m = re.search(r'(CE|PE)\s+SIDE', upper_ctl)
                     opt_type = side_m.group(1) if side_m else last.option_type
+                    sl_ratio = last.stop_loss / last.trigger_price if last.trigger_price > 0 else 0.90
                     re_sig = ParsedSignal(
                         action="BUY",
                         symbol=last.symbol,
                         strike=last.strike,
                         option_type=opt_type,
                         trigger_price=new_entry,
-                        stop_loss=round(new_entry * 0.90),
+                        stop_loss=round(new_entry * sl_ratio),
                         targets=last.targets,
                     )
                     trade_sym = f"{last.symbol} {int(last.strike)} {opt_type}"
+                    _ch2_last_reentry_ts = now_ts
                     has_above = bool(re.search(r'\bABOVE\b', upper_ctl))
                     if has_above:
                         _ch2_trigger_held = re_sig
-                        log.info("[CH2] RE-ENTRY held (ABOVE): %s @ %.0f", trade_sym, new_entry)
+                        log.info("[CH2] RE-ENTRY held (ABOVE): %s @ %.0f SL=%.0f",
+                                 trade_sym, new_entry, re_sig.stop_loss)
                         _notify(f"[CH2] Re-entry held (ABOVE trigger):\n"
-                                f"{trade_sym} @ {new_entry}\nWaiting for Active...")
+                                f"{trade_sym} @ {new_entry} SL={re_sig.stop_loss}\n"
+                                f"Waiting for Active...")
                     else:
-                        log.info("[CH2] RE-ENTRY executing: %s @ %.0f", trade_sym, new_entry)
+                        log.info("[CH2] RE-ENTRY executing: %s @ %.0f SL=%.0f",
+                                 trade_sym, new_entry, re_sig.stop_loss)
                         _notify(f"*[CH2] Re-entry executing:*\n{trade_sym} @ {new_entry}")
                         _execute_and_notify(re_sig, channel, ch_label)
                     return
