@@ -179,7 +179,7 @@ def walk_candles_floor(candles, entry, sl, ch_tgt, qty, targets=None, channel="c
             floor_armed = True
 
     eod_pnl = (candles[-1]["close"] - entry) * qty
-    if abs(eod_pnl) > hard_loss and hard_loss > 0:
+    if eod_pnl < -hard_loss and hard_loss > 0:
         print(f"  [DEBUG] EOD loss ₹{eod_pnl:,.0f} > cap ₹{hard_loss} but MAX_SL didn't fire. "
               f"entry={entry} qty={qty} worst_low_pnl=₹{worst_low_pnl:,.0f} "
               f"candles={len(candles)} last_close={candles[-1]['close']}")
