@@ -132,32 +132,42 @@ def resolve_instrument(symbol_str, use_monthly=False):
     return inst.get("instrument_key"), int(inst.get("lot_size", 1)) or 1, candidates[0][0]
 
 
-def walk_candles_floor(candles, entry, sl, ch_tgt, qty):
+CH2_MAX_LOSS = 4000
+
+def walk_candles_floor(candles, entry, sl, ch_tgt, qty, targets=None, channel="ch2"):
     peak_pnl = 0
     floor_armed = False
-    tgt_valid = ch_tgt and ch_tgt > entry
-    sl_valid = sl and sl < entry
     inverted = ""
     if ch_tgt and ch_tgt <= entry:
         inverted += "TGT<E "
     if sl and sl >= entry:
         inverted += "SL>E"
 
+    hard_loss = CH2_MAX_LOSS if channel == "ch2" else (MAX_LOSS if MAX_LOSS > 0 else 0)
+    cur_sl = sl if sl and sl < entry else None
+
+    if targets and channel == "ch2" and len(targets) > 1:
+        remaining_tgts = [t for t in targets if t > entry]
+    else:
+        remaining_tgts = [ch_tgt] if ch_tgt and ch_tgt > entry else []
+
     for c in candles:
-        tgt_hit = tgt_valid and c["high"] >= ch_tgt
-        sl_hit = sl_valid and c["low"] <= sl
         low_pnl = (c["low"] - entry) * qty
 
-        if MAX_LOSS > 0 and low_pnl <= -MAX_LOSS:
-            exit_price = entry - (MAX_LOSS / qty)
+        if hard_loss > 0 and low_pnl <= -hard_loss:
+            exit_price = entry - (hard_loss / qty)
             return exit_price, "MAX_SL", inverted
-        if tgt_hit and sl_hit:
-            return ch_tgt, "BOTH_TGT", inverted
-        elif tgt_hit:
-            return ch_tgt, "TGT", inverted
-        elif sl_hit:
-            return sl, "SL", inverted
-        elif floor_armed and low_pnl <= PROFIT_FLOOR:
+
+        if cur_sl and c["low"] <= cur_sl:
+            return cur_sl, "SL", inverted
+
+        if remaining_tgts and c["high"] >= remaining_tgts[0]:
+            hit_tgt = remaining_tgts.pop(0)
+            if not remaining_tgts:
+                return hit_tgt, "TGT_ALL", inverted
+            cur_sl = hit_tgt
+
+        if floor_armed and low_pnl <= PROFIT_FLOOR:
             floor_price = entry + (PROFIT_FLOOR / qty)
             return floor_price, "FLOOR", inverted
 
@@ -169,7 +179,7 @@ def walk_candles_floor(candles, entry, sl, ch_tgt, qty):
     return candles[-1]["close"], "EOD", inverted
 
 
-def simulate_trade(sig, entry_time_str, lots_override=None, use_monthly=False):
+def simulate_trade(sig, entry_time_str, lots_override=None, use_monthly=False, channel="ch2"):
     sym_str = f"{sig.symbol} {int(sig.strike)} {sig.option_type}"
     base_sym = re.match(r"([A-Z&]+)", sig.symbol.upper().replace(" ", "")).group(1)
     is_index = base_sym in INDEX_SYMS
@@ -212,7 +222,10 @@ def simulate_trade(sig, entry_time_str, lots_override=None, use_monthly=False):
         filtered = candles
 
     entry = filtered[0]["open"]
-    exit_price, result, inverted = walk_candles_floor(filtered, entry, sig.stop_loss, sig.targets[0], qty)
+    exit_price, result, inverted = walk_candles_floor(
+        filtered, entry, sig.stop_loss, sig.targets[0], qty,
+        targets=sig.targets, channel=channel,
+    )
     pnl = (exit_price - entry) * qty
 
     return {
@@ -297,7 +310,7 @@ async def main():
         sym_str = f"{sig.symbol} {int(sig.strike)} {sig.option_type}"
 
         trade_info, result, pnl, inverted, exp_date = simulate_trade(
-            sig, entry_time, lots_override=2, use_monthly=True
+            sig, entry_time, lots_override=2, use_monthly=True, channel="ch1"
         )
 
         exp_str = exp_date.strftime("%d%b") if exp_date else ""

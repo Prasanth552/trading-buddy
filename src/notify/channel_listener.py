@@ -80,6 +80,7 @@ class ParsedSignal:
 # ---------------------------------------------------------------------------
 PROFIT_TARGET = 1500  # ₹1,500 net profit per trade → auto-close
 MAX_LOSS_PER_TRADE = 8000  # ₹8,000 hard cap — no trade can lose more than this
+CH2_MAX_LOSS = 4000  # ₹4,000 hard cap for CH2 trades
 MAX_DAILY_LOSS = 10000  # ₹10,000 daily loss limit — stop trading after this
 
 # ---------------------------------------------------------------------------
@@ -497,6 +498,7 @@ def execute_signal(sig: ParsedSignal, *, channel: str = "ch1", max_lots: int | N
         "exit_price": None,
         "channel": channel,
         "filter_score": filter_score,
+        "targets_remaining": ",".join(str(t) for t in sig.targets[1:]) if channel == "ch2" and len(sig.targets) > 1 else None,
     }
 
     try:
@@ -1876,7 +1878,8 @@ async def start_listener() -> None:
                 db.init_db()
                 with db.get_conn() as conn:
                     rows = conn.execute(
-                        "SELECT id, symbol, price, qty, stop_price, target_price, broker_key "
+                        "SELECT id, symbol, price, qty, stop_price, target_price, "
+                        "broker_key, channel, targets_remaining "
                         "FROM trades WHERE status = 'OPEN' AND broker_key IS NOT NULL"
                     ).fetchall()
                 if not rows:
@@ -1926,23 +1929,47 @@ async def start_listener() -> None:
                     _peak_net[tid] = max(prev_peak, net_pnl)
 
                     if trade["target_price"] and ltp >= trade["target_price"]:
-                        log.info("CHANNEL TARGET hit for %s: LTP=%.2f >= target=%.2f net=₹%.0f",
-                                 trade["symbol"], ltp, trade["target_price"], net_pnl)
-                        _close_trade_by_id(tid, ltp, "target_hit")
-                        _peak_net.pop(tid, None)
+                        ch = trade["channel"] or "ch1"
+                        remaining = trade["targets_remaining"] or ""
+                        if ch == "ch2" and remaining:
+                            next_tgts = [float(t) for t in remaining.split(",") if t.strip()]
+                            new_sl = trade["target_price"]
+                            if next_tgts:
+                                new_tgt = next_tgts.pop(0)
+                                new_remaining = ",".join(str(t) for t in next_tgts) if next_tgts else None
+                                with db.get_conn() as conn:
+                                    conn.execute(
+                                        "UPDATE trades SET stop_price=?, target_price=?, "
+                                        "targets_remaining=? WHERE id=?",
+                                        (new_sl, new_tgt, new_remaining, tid))
+                                log.info("CH2 TGT TRAIL %s: SL→%.0f TGT→%.0f remaining=%s",
+                                         trade["symbol"], new_sl, new_tgt, new_remaining)
+                                _notify(f"🎯 *[CH2] TGT hit* — {trade['symbol']}\n"
+                                        f"SL trailed → {new_sl} | Next TGT → {new_tgt}")
+                            else:
+                                log.info("CHANNEL ALL TGT hit for %s: LTP=%.2f",
+                                         trade["symbol"], ltp)
+                                _close_trade_by_id(tid, ltp, "all_tgt_hit")
+                                _peak_net.pop(tid, None)
+                        else:
+                            log.info("CHANNEL TARGET hit for %s: LTP=%.2f >= target=%.2f net=₹%.0f",
+                                     trade["symbol"], ltp, trade["target_price"], net_pnl)
+                            _close_trade_by_id(tid, ltp, "target_hit")
+                            _peak_net.pop(tid, None)
                     elif trade["stop_price"] and ltp <= trade["stop_price"]:
                         log.info("SL HIT for %s: LTP=%.2f <= SL=%.2f",
                                  trade["symbol"], ltp, trade["stop_price"])
                         _close_trade_by_id(tid, ltp, "sl_hit")
                         _peak_net.pop(tid, None)
-                    elif net_pnl <= -MAX_LOSS_PER_TRADE:
+                    elif net_pnl <= -(CH2_MAX_LOSS if (trade["channel"] or "ch1") == "ch2" else MAX_LOSS_PER_TRADE):
+                        loss_cap = CH2_MAX_LOSS if (trade["channel"] or "ch1") == "ch2" else MAX_LOSS_PER_TRADE
                         log.warning("MAX LOSS CAP for %s: net_pnl=₹%.0f hit -₹%d cap. Force closing.",
-                                    trade["symbol"], net_pnl, MAX_LOSS_PER_TRADE)
+                                    trade["symbol"], net_pnl, loss_cap)
                         _close_trade_by_id(tid, ltp, "max_loss_cap")
                         _peak_net.pop(tid, None)
                         _notify(
                             f"🛑 *MAX LOSS CAP* — {trade['symbol']}\n"
-                            f"Loss hit ₹{abs(net_pnl):,.0f} (cap: ₹{MAX_LOSS_PER_TRADE:,})\n"
+                            f"Loss hit ₹{abs(net_pnl):,.0f} (cap: ₹{loss_cap:,})\n"
                             f"Auto-closed to protect capital."
                         )
                     elif _peak_net[tid] >= PROFIT_TARGET and net_pnl <= PROFIT_TARGET:
