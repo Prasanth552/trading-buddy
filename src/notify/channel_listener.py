@@ -662,6 +662,20 @@ _ch2_queued_signal: ParsedSignal | None = None
 _ch2_queued_task: Any = None
 _ch2_trigger_held: ParsedSignal | None = None
 _ch2_last_is_above: bool = False
+_ch2_last_executed: ParsedSignal | None = None
+
+_RE_REENTRY = re.compile(
+    r'(?:'
+    r'(?:ABOVE|NEAR)\s+(?:HIGH|SAME\s+RANGE|(\d+))\s*(?:AGAIN|NEW\s+BUY|FOCUS\s+WITH)'
+    r'|SAME\s+RANGE\s+AGAIN'
+    r'|NEAR\s+SAME\s+RANGE'
+    r'|ABOVE\s+(\d+)\s+(?:NEW\s+BUY|AGAIN|FOCUS\s+WITH)'
+    r'|ABOVE\s+HIGH\s+AGAIN'
+    r'|ABOVE\s+(\d+)\s+(?:PE|CE)\s+SIDE'
+    r'|BELOW\s+DAY\s+LOW\s+NEW\s+BUY'
+    r')',
+    re.IGNORECASE,
+)
 
 _CH2_SYMBOL_RE = re.compile(
     r'(?:(?:Intra|positional|Note)[/\s]*)*'
@@ -686,6 +700,9 @@ _CH2_SKIP: set[str] = set()  # no skips — commodities enabled
 
 def _execute_and_notify(sig: ParsedSignal, channel: str, ch_label: str) -> None:
     """Execute a channel signal with filter scoring and notifications."""
+    global _ch2_last_executed
+    if channel == "ch2":
+        _ch2_last_executed = sig
     filt = None
     filter_score = None
     try:
@@ -2238,6 +2255,42 @@ async def start_listener() -> None:
                     log.info("[CH2] NOT ACTIVE — nothing queued to cancel")
                 return
 
+            # Re-entry: "Above X again", "same range again", "new buy",
+            # "Above High again focus", "Above X pe/ce side" etc.
+            reentry_m = _RE_REENTRY.search(upper_ctl)
+            if reentry_m and _ch2_last_executed:
+                last = _ch2_last_executed
+                re_sym = last.symbol.replace(" ", "").upper()
+                if re_sym in ("NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY"):
+                    new_entry = last.trigger_price
+                    for g in reentry_m.groups():
+                        if g:
+                            new_entry = float(g)
+                            break
+                    side_m = re.search(r'(CE|PE)\s+SIDE', upper_ctl)
+                    opt_type = side_m.group(1) if side_m else last.option_type
+                    re_sig = ParsedSignal(
+                        action="BUY",
+                        symbol=last.symbol,
+                        strike=last.strike,
+                        option_type=opt_type,
+                        trigger_price=new_entry,
+                        stop_loss=round(new_entry * 0.90),
+                        targets=last.targets,
+                    )
+                    trade_sym = f"{last.symbol} {int(last.strike)} {opt_type}"
+                    has_above = bool(re.search(r'\bABOVE\b', upper_ctl))
+                    if has_above:
+                        _ch2_trigger_held = re_sig
+                        log.info("[CH2] RE-ENTRY held (ABOVE): %s @ %.0f", trade_sym, new_entry)
+                        _notify(f"[CH2] Re-entry held (ABOVE trigger):\n"
+                                f"{trade_sym} @ {new_entry}\nWaiting for Active...")
+                    else:
+                        log.info("[CH2] RE-ENTRY executing: %s @ %.0f", trade_sym, new_entry)
+                        _notify(f"*[CH2] Re-entry executing:*\n{trade_sym} @ {new_entry}")
+                        _execute_and_notify(re_sig, channel, ch_label)
+                    return
+
             # Re-entry via reply with "AGAIN" — parse original signal, execute
             if (event.message.reply_to and event.message.reply_to.reply_to_msg_id
                     and re.search(r'\bAGAIN\b', upper_ctl)):
@@ -2260,6 +2313,7 @@ async def start_listener() -> None:
                                      trade_sym, orig_sig.stop_loss, orig_sig.targets[0])
                             _notify(f"*[CH2] Re-entry executing:*\n{trade_sym}\n"
                                     f"SL: {orig_sig.stop_loss} | TGT: {orig_sig.targets[0]}")
+                            _ch2_last_executed = orig_sig
                             result = execute_signal(orig_sig, channel="ch2")
                             if result["placed"]:
                                 _notify(f"*[CH2] Re-entry order placed*\n"

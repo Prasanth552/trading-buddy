@@ -343,9 +343,23 @@ async def main():
     queued_msg_id = 0
     trigger_held = None
     trigger_held_msg_id = 0
+    last_executed_sig = None
     executed = []
     cancelled = []
     reentries = []
+
+    _RE_REENTRY = re.compile(
+        r'(?:'
+        r'(?:ABOVE|NEAR)\s+(?:HIGH|SAME\s+RANGE|(\d+))\s*(?:AGAIN|NEW\s+BUY|FOCUS\s+WITH)'
+        r'|SAME\s+RANGE\s+AGAIN'
+        r'|NEAR\s+SAME\s+RANGE'
+        r'|ABOVE\s+(\d+)\s+(?:NEW\s+BUY|AGAIN|FOCUS\s+WITH)'
+        r'|ABOVE\s+HIGH\s+AGAIN'
+        r'|ABOVE\s+(\d+)\s+(?:PE|CE)\s+SIDE'
+        r'|BELOW\s+DAY\s+LOW\s+NEW\s+BUY'
+        r')',
+        re.IGNORECASE,
+    )
 
     _cl._ch2_pending = None
     _cl._ch2_pending_ts = 0.0
@@ -365,6 +379,7 @@ async def main():
             out(f"      {queued_signal.symbol} {int(queued_signal.strike)} {queued_signal.option_type}")
             executed.append({"signal": queued_signal, "ts": queued_ts, "reason": "near_exec",
                              "entry_time": datetime.fromtimestamp(queued_ts, IST).strftime("%H:%M")})
+            last_executed_sig = queued_signal
             queued_signal = None
 
         if re.search(r'WAIT\s+FOR\s+TRIGGER', upper):
@@ -385,6 +400,7 @@ async def main():
             out(f"  ▶  #{msg.id} @ {ts_str}: ACTIVE — executing held {held_sym}")
             executed.append({"signal": trigger_held, "ts": ts_epoch, "reason": "active_trigger",
                              "entry_time": ts.strftime("%H:%M")})
+            last_executed_sig = trigger_held
             trigger_held = None
             continue
 
@@ -402,6 +418,38 @@ async def main():
             else:
                 out(f"  ❌ #{msg.id} @ {ts_str}: NOT ACTIVE (nothing to cancel)")
             continue
+
+        # Re-entry: "Above X again", "same range again", "new buy", "Above High again"
+        reentry_m = _RE_REENTRY.search(upper)
+        if reentry_m and last_executed_sig:
+            last = last_executed_sig
+            re_sym = last.symbol.replace(" ", "").upper()
+            if re_sym in INDEX_SYMS:
+                new_entry = last.trigger_price
+                for g in reentry_m.groups():
+                    if g:
+                        new_entry = float(g)
+                        break
+                side_m = re.search(r'(CE|PE)\s+SIDE', upper)
+                opt_type = side_m.group(1) if side_m else last.option_type
+                re_sig = ParsedSignal(
+                    action="BUY", symbol=last.symbol, strike=last.strike,
+                    option_type=opt_type, trigger_price=new_entry,
+                    stop_loss=round(new_entry * 0.90), targets=last.targets,
+                )
+                sym_label = f"{last.symbol} {int(last.strike)} {opt_type}"
+                has_above = bool(re.search(r'\bABOVE\b', upper))
+                if has_above:
+                    trigger_held = re_sig
+                    trigger_held_msg_id = msg.id
+                    out(f"  🔄 #{msg.id} @ {ts_str}: RE-ENTRY ABOVE (held) {sym_label} @ {new_entry}")
+                else:
+                    out(f"  🔄 #{msg.id} @ {ts_str}: RE-ENTRY {sym_label} @ {new_entry}")
+                    executed.append({"signal": re_sig, "ts": ts_epoch, "reason": "re-entry",
+                                     "entry_time": ts.strftime("%H:%M")})
+                    last_executed_sig = re_sig
+                    reentries.append(sym_label)
+                continue
 
         if msg.reply_to and msg.reply_to.reply_to_msg_id and re.search(r'\bAGAIN\b', upper):
             reply_id = msg.reply_to.reply_to_msg_id
@@ -421,6 +469,7 @@ async def main():
                         f"SL={orig_sig.stop_loss} TGT={orig_sig.targets[0]}")
                     executed.append({"signal": orig_sig, "ts": ts_epoch, "reason": "re-entry",
                                      "entry_time": ts.strftime("%H:%M")})
+                    last_executed_sig = orig_sig
                     reentries.append(sym_label)
                     continue
 
@@ -459,6 +508,7 @@ async def main():
         out(f"\n  ⏱  End — executing remaining queued: {sym}")
         executed.append({"signal": queued_signal, "ts": queued_ts, "reason": "end_flush",
                          "entry_time": datetime.fromtimestamp(queued_ts, IST).strftime("%H:%M")})
+        last_executed_sig = queued_signal
 
     if trigger_held:
         sym = f"{trigger_held.symbol} {int(trigger_held.strike)} {trigger_held.option_type}"
