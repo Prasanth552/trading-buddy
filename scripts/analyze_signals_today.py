@@ -350,13 +350,13 @@ async def main():
 
     _RE_REENTRY = re.compile(
         r'(?:'
-        r'(?:ABOVE|NEAR)\s+(?:HIGH|SAME\s+RANGE|(\d+))\s*(?:AGAIN|NEW\s+BUY|FOCUS\s+WITH)'
-        r'|SAME\s+RANGE\s+AGAIN'
-        r'|NEAR\s+SAME\s+RANGE'
+        r'(?:ABOVE|NEAR)\s+(?:HIGH|SAME\s+(?:RANGE|LEVEL)|(\d+))\s*(?:AGAIN|NEW\s+BUY|FOCUS\s+WITH|ENTER)'
+        r'|SAME\s+(?:RANGE|LEVEL)\s+AGAIN'
+        r'|NEAR\s+SAME\s+(?:RANGE|LEVEL)'
         r'|ABOVE\s+(\d+)\s+(?:NEW\s+BUY|AGAIN|FOCUS\s+WITH)'
         r'|ABOVE\s+HIGH\s+AGAIN'
         r'|ABOVE\s+(\d+)\s+(?:PE|CE)\s+SIDE'
-        r'|BELOW\s+DAY\s+LOW\s+NEW\s+BUY'
+        r'|(?:BELOW|BELWO)\s+(?:DAY\s+LOW|(\d+))\s+NEW\s+BUY'
         r')',
         re.IGNORECASE,
     )
@@ -428,7 +428,9 @@ async def main():
                 new_entry = last.trigger_price
                 for g in reentry_m.groups():
                     if g:
-                        new_entry = float(g)
+                        val = float(g)
+                        if val < 1000:
+                            new_entry = val
                         break
                 side_m = re.search(r'(CE|PE)\s+SIDE', upper)
                 opt_type = side_m.group(1) if side_m else last.option_type
