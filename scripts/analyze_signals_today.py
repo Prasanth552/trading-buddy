@@ -367,14 +367,16 @@ async def main():
     executed = []
     cancelled = []
     reentries = []
+    msg_signals: dict[int, ParsedSignal] = {}  # msg_id → signal for reply tracking
 
     _RE_REENTRY = re.compile(
         r'(?:'
-        r'(?:ABOVE|NEAR)\s+(?:HIGH|SAME\s+(?:RANGE|LEVEL)|(\d+))\s*(?:AGAIN|NEW\s+BUY|FOCUS\s+WITH|ENTER)'
-        r'|SAME\s+(?:RANGE|LEVEL)\s+AGAIN'
+        r'(?:ABOVE|NEAR)\.?\s+(?:LAST\s+SWING\s+HIGH|HIGH|SAME\s+(?:RANGE|LEVEL)|THIS\s+LEVEL|(\d+))\s*'
+        r'(?:AGAIN|NEW\s+(?:BUY|TRADE)|FOCUS|(?:U\s+(?:CAN\s+)?)?PLAN|ENTER|WITH\s+TIGHT|OPEN|ALSO\s+OPEN)'
+        r'|SAME\s+(?:RANGE|LEVEL)\s+(?:AGAIN|OPEN)'
         r'|NEAR\s+SAME\s+(?:RANGE|LEVEL)'
-        r'|ABOVE\s+(\d+)\s+(?:NEW\s+BUY|AGAIN|FOCUS\s+WITH)'
-        r'|ABOVE\s+HIGH\s+AGAIN'
+        r'|ABOVE\.?\s+(\d+)\s+(?:NEW\s+(?:BUY|TRADE)|AGAIN|FOCUS|(?:U\s+(?:CAN\s+)?)?PLAN|WITH\s+TIGHT|THIS\s+LEVEL)'
+        r'|ABOVE\s+(?:HIGH|LAST\s+SWING\s+HIGH)\s+(?:AGAIN|FOCUS)'
         r'|ABOVE\s+(\d+)\s+(?:PE|CE)\s+SIDE'
         r'|(?:BELOW|BELWO)\s+(?:DAY\s+LOW|(\d+))\s+NEW\s+BUY'
         r')',
@@ -423,14 +425,48 @@ async def main():
 
         clean_text = re.sub(r'[\U0001F600-\U0001FAFF☀-➿❤️‍\s]+', '', text).strip()
         if (re.search(r'\bACTIVE\b|\bACTT\b', upper)
-                and len(clean_text) < 15 and trigger_held):
-            held_sym = f"{trigger_held.symbol} {int(trigger_held.strike)} {trigger_held.option_type}"
-            out(f"  ▶  #{msg.id} @ {ts_str}: ACTIVE — executing held {held_sym}")
-            executed.append({"signal": trigger_held, "ts": ts_epoch, "reason": "active_trigger",
-                             "entry_time": ts.strftime("%H:%M")})
-            last_executed_sig = trigger_held
-            trigger_held = None
+                and len(clean_text) < 15):
+            act_sig = None
+            # Try reply-to lookup first
+            if msg.reply_to and msg.reply_to.reply_to_msg_id:
+                act_sig = msg_signals.get(msg.reply_to.reply_to_msg_id)
+                if act_sig:
+                    out(f"  ▶  #{msg.id} @ {ts_str}: ACTIVE (reply to #{msg.reply_to.reply_to_msg_id}) — "
+                        f"executing {act_sig.symbol} {int(act_sig.strike)} {act_sig.option_type}")
+            if not act_sig and trigger_held:
+                act_sig = trigger_held
+                held_sym = f"{trigger_held.symbol} {int(trigger_held.strike)} {trigger_held.option_type}"
+                out(f"  ▶  #{msg.id} @ {ts_str}: ACTIVE — executing held {held_sym}")
+            if act_sig:
+                executed.append({"signal": act_sig, "ts": ts_epoch, "reason": "active_trigger",
+                                 "entry_time": ts.strftime("%H:%M")})
+                last_executed_sig = act_sig
+                msg_signals[msg.id] = act_sig
+                trigger_held = None
+                continue
             continue
+
+        # "Focus" as reply — hold the referenced signal
+        if (re.search(r'\bFOCUS\b', upper) and len(clean_text) < 15
+                and msg.reply_to and msg.reply_to.reply_to_msg_id):
+            ref_sig = msg_signals.get(msg.reply_to.reply_to_msg_id)
+            if ref_sig:
+                trigger_held = ref_sig
+                msg_signals[msg.id] = ref_sig
+                sym = f"{ref_sig.symbol} {int(ref_sig.strike)} {ref_sig.option_type}"
+                out(f"  🔍 #{msg.id} @ {ts_str}: FOCUS reply → holding {sym}")
+                continue
+
+        # "Avoid" as reply — cancel the referenced signal
+        if (re.search(r'\bAVOID\b', upper) and len(clean_text) < 15
+                and msg.reply_to and msg.reply_to.reply_to_msg_id):
+            ref_sig = msg_signals.get(msg.reply_to.reply_to_msg_id)
+            if ref_sig:
+                sym = f"{ref_sig.symbol} {int(ref_sig.strike)} {ref_sig.option_type}"
+                if trigger_held and trigger_held is ref_sig:
+                    trigger_held = None
+                out(f"  🚫 #{msg.id} @ {ts_str}: AVOID → cancelled {sym}")
+                continue
 
         if re.search(r'NOT\s+ACTIVE', upper):
             if queued_signal:
@@ -447,13 +483,20 @@ async def main():
                 out(f"  ❌ #{msg.id} @ {ts_str}: NOT ACTIVE (nothing to cancel)")
             continue
 
-        # Re-entry: "Above X again", "same range again", "new buy", "Above High again"
+        # Re-entry: "Above X again/focus/new buy/plan", "same range again", etc.
         reentry_m = _RE_REENTRY.search(upper)
-        if reentry_m and last_executed_sig:
+        if reentry_m:
+            # Determine reference signal: reply-to context OR last executed
+            last = None
+            if msg.reply_to and msg.reply_to.reply_to_msg_id:
+                last = msg_signals.get(msg.reply_to.reply_to_msg_id)
+            if not last:
+                last = last_executed_sig
+            if not last:
+                continue
             if ts_epoch - last_reentry_ts < 60:
                 out(f"  ⊘  #{msg.id} @ {ts_str}: RE-ENTRY SKIPPED (duplicate <60s)")
                 continue
-            last = last_executed_sig
             re_sym = last.symbol.replace(" ", "").upper()
             if re_sym in INDEX_SYMS:
                 new_entry = last.trigger_price
@@ -473,6 +516,7 @@ async def main():
                 )
                 sym_label = f"{last.symbol} {int(last.strike)} {opt_type}"
                 last_reentry_ts = ts_epoch
+                msg_signals[msg.id] = re_sig
                 has_above = bool(re.search(r'\bABOVE\b', upper))
                 if has_above:
                     trigger_held = re_sig
@@ -516,6 +560,7 @@ async def main():
                 continue
 
             sym = f"{sig.symbol} {int(sig.strike)} {sig.option_type}"
+            msg_signals[msg.id] = sig
             is_above = bool(re.search(r'\bABOVE\b', text, re.I)) or _cl._ch2_last_is_above
 
             if is_above:

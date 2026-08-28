@@ -666,14 +666,16 @@ _ch2_trigger_held: ParsedSignal | None = None
 _ch2_last_is_above: bool = False
 _ch2_last_executed: ParsedSignal | None = None
 _ch2_last_reentry_ts: float = 0.0
+_ch2_msg_signals: dict[int, ParsedSignal] = {}  # msg_id → signal for reply tracking
 
 _RE_REENTRY = re.compile(
     r'(?:'
-    r'(?:ABOVE|NEAR)\s+(?:HIGH|SAME\s+(?:RANGE|LEVEL)|(\d+))\s*(?:AGAIN|NEW\s+BUY|FOCUS\s+WITH|ENTER)'
-    r'|SAME\s+(?:RANGE|LEVEL)\s+AGAIN'
+    r'(?:ABOVE|NEAR)\.?\s+(?:LAST\s+SWING\s+HIGH|HIGH|SAME\s+(?:RANGE|LEVEL)|THIS\s+LEVEL|(\d+))\s*'
+    r'(?:AGAIN|NEW\s+(?:BUY|TRADE)|FOCUS|(?:U\s+(?:CAN\s+)?)?PLAN|ENTER|WITH\s+TIGHT|OPEN|ALSO\s+OPEN)'
+    r'|SAME\s+(?:RANGE|LEVEL)\s+(?:AGAIN|OPEN)'
     r'|NEAR\s+SAME\s+(?:RANGE|LEVEL)'
-    r'|ABOVE\s+(\d+)\s+(?:NEW\s+BUY|AGAIN|FOCUS\s+WITH)'
-    r'|ABOVE\s+HIGH\s+AGAIN'
+    r'|ABOVE\.?\s+(\d+)\s+(?:NEW\s+(?:BUY|TRADE)|AGAIN|FOCUS|(?:U\s+(?:CAN\s+)?)?PLAN|WITH\s+TIGHT|THIS\s+LEVEL)'
+    r'|ABOVE\s+(?:HIGH|LAST\s+SWING\s+HIGH)\s+(?:AGAIN|FOCUS)'
     r'|ABOVE\s+(\d+)\s+(?:PE|CE)\s+SIDE'
     r'|(?:BELOW|BELWO)\s+(?:DAY\s+LOW|(\d+))\s+NEW\s+BUY'
     r')',
@@ -2249,18 +2251,56 @@ async def start_listener() -> None:
                     log.info("[CH2] WAIT FOR TRIGGER — no queued signal to hold")
                 return
 
-            # "Active"/"Actt" — execute the held signal (short msg only, avoid false positives)
+            # "Active"/"Actt" — execute held signal OR reply-to signal
             clean_ctl = re.sub(r'[\U0001F600-\U0001FAFF☀-➿❤️‍\s]+', '', text).strip()
             if (re.search(r'\bACTIVE\b|\bACTT\b', upper_ctl)
-                    and len(clean_ctl) < 15 and _ch2_trigger_held):
-                sig = _ch2_trigger_held
-                _ch2_trigger_held = None
-                log.info("[CH2] ACTIVE — executing held: %s %s %s",
-                         sig.symbol, int(sig.strike), sig.option_type)
-                _notify(f"[CH2] Trigger ACTIVE — executing:\n"
-                        f"{sig.symbol} {int(sig.strike)} {sig.option_type}")
-                _execute_and_notify(sig, channel, ch_label)
+                    and len(clean_ctl) < 15):
+                sig = None
+                # Try reply-to lookup first: "Active" replying to a signal/re-entry msg
+                if event.message.reply_to and event.message.reply_to.reply_to_msg_id:
+                    reply_id = event.message.reply_to.reply_to_msg_id
+                    sig = _ch2_msg_signals.get(reply_id)
+                    if sig:
+                        log.info("[CH2] ACTIVE via reply to #%d: %s %s %s",
+                                 reply_id, sig.symbol, int(sig.strike), sig.option_type)
+                # Fall back to trigger_held
+                if not sig and _ch2_trigger_held:
+                    sig = _ch2_trigger_held
+                if sig:
+                    _ch2_trigger_held = None
+                    log.info("[CH2] ACTIVE — executing: %s %s %s",
+                             sig.symbol, int(sig.strike), sig.option_type)
+                    _notify(f"[CH2] Trigger ACTIVE — executing:\n"
+                            f"{sig.symbol} {int(sig.strike)} {sig.option_type}")
+                    _execute_and_notify(sig, channel, ch_label)
+                    _ch2_msg_signals[event.message.id] = sig
                 return
+
+            # "Focus" as reply — hold the replied-to signal for later activation
+            if (re.search(r'\bFOCUS\b', upper_ctl) and len(clean_ctl) < 15
+                    and event.message.reply_to and event.message.reply_to.reply_to_msg_id):
+                reply_id = event.message.reply_to.reply_to_msg_id
+                ref_sig = _ch2_msg_signals.get(reply_id)
+                if ref_sig:
+                    _ch2_trigger_held = ref_sig
+                    _ch2_msg_signals[event.message.id] = ref_sig
+                    trade_sym = f"{ref_sig.symbol} {int(ref_sig.strike)} {ref_sig.option_type}"
+                    log.info("[CH2] FOCUS reply to #%d — held: %s", reply_id, trade_sym)
+                    _notify(f"[CH2] Focus (held): {trade_sym}")
+                    return
+
+            # "Avoid" as reply — cancel the referenced signal
+            if (re.search(r'\bAVOID\b', upper_ctl) and len(clean_ctl) < 15
+                    and event.message.reply_to and event.message.reply_to.reply_to_msg_id):
+                reply_id = event.message.reply_to.reply_to_msg_id
+                ref_sig = _ch2_msg_signals.get(reply_id)
+                if ref_sig:
+                    trade_sym = f"{ref_sig.symbol} {int(ref_sig.strike)} {ref_sig.option_type}"
+                    if _ch2_trigger_held and _ch2_trigger_held is ref_sig:
+                        _ch2_trigger_held = None
+                    log.info("[CH2] AVOID reply to #%d — skipping: %s", reply_id, trade_sym)
+                    _notify(f"[CH2] Avoid (cancelled): {trade_sym}")
+                    return
 
             # "Not active avoid" — cancel queued or held signal
             if re.search(r'NOT\s+ACTIVE', upper_ctl):
@@ -2285,15 +2325,25 @@ async def start_listener() -> None:
                     log.info("[CH2] NOT ACTIVE — nothing queued to cancel")
                 return
 
-            # Re-entry: "Above X again", "same range again", "new buy",
-            # "Above High again focus", "Above X pe/ce side" etc.
+            # Re-entry: "Above X again/focus/new buy/plan", "same range again",
+            # "Above last swing high", "Above X pe/ce side", "Below day low" etc.
             reentry_m = _RE_REENTRY.search(upper_ctl)
-            if reentry_m and _ch2_last_executed:
+            if reentry_m:
+                # Determine reference signal: reply-to context OR last executed
+                last = None
+                if event.message.reply_to and event.message.reply_to.reply_to_msg_id:
+                    reply_id = event.message.reply_to.reply_to_msg_id
+                    last = _ch2_msg_signals.get(reply_id)
+                    if last:
+                        log.info("[CH2] RE-ENTRY via reply to #%d", reply_id)
+                if not last:
+                    last = _ch2_last_executed
+                if not last:
+                    return
                 now_ts = _time.time()
                 if now_ts - _ch2_last_reentry_ts < 60:
                     log.info("[CH2] RE-ENTRY skipped (duplicate within 60s)")
                     return
-                last = _ch2_last_executed
                 re_sym = last.symbol.replace(" ", "").upper()
                 if re_sym in ("NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY"):
                     new_entry = last.trigger_price
@@ -2317,6 +2367,7 @@ async def start_listener() -> None:
                     )
                     trade_sym = f"{last.symbol} {int(last.strike)} {opt_type}"
                     _ch2_last_reentry_ts = now_ts
+                    _ch2_msg_signals[event.message.id] = re_sig
                     has_above = bool(re.search(r'\bABOVE\b', upper_ctl))
                     if has_above:
                         _ch2_trigger_held = re_sig
@@ -2385,6 +2436,7 @@ async def start_listener() -> None:
                              sig.symbol, int(sig.strike), sig.option_type)
                     return
 
+                _ch2_msg_signals[event.message.id] = sig
                 is_above = bool(re.search(r'\bABOVE\b', text, re.I)) or _ch2_last_is_above
                 if is_above:
                     _ch2_trigger_held = sig
