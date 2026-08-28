@@ -116,17 +116,17 @@ def walk_candles(candles, entry, sl_rupees, floor_rupees, qty):
     for c in candles:
         low_pnl = (c["low"] - entry) * qty
         high_pnl = (c["high"] - entry) * qty
+        peak_pnl = max(peak_pnl, high_pnl)
         if low_pnl <= -sl_rupees:
             exit_price = entry - (sl_rupees / qty)
-            return exit_price, -sl_rupees, "SL"
+            return exit_price, -sl_rupees, "SL", peak_pnl
         if floor_armed and low_pnl <= floor_rupees:
             exit_price = entry + (floor_rupees / qty)
-            return exit_price, floor_rupees, "FLOOR"
-        peak_pnl = max(peak_pnl, high_pnl)
+            return exit_price, floor_rupees, "FLOOR", peak_pnl
         if peak_pnl >= floor_rupees:
             floor_armed = True
     eod_pnl = (candles[-1]["close"] - entry) * qty
-    return candles[-1]["close"], eod_pnl, "EOD"
+    return candles[-1]["close"], eod_pnl, "EOD", peak_pnl
 
 
 def scan_and_simulate(universe, scan_type, blocklist):
@@ -194,8 +194,8 @@ def scan_and_simulate(universe, scan_type, blocklist):
         return 0, 0, 0
 
     print(f"  {'#':<3} {'Symbol':<28} {'EqOpen':>7} {'EqEntry':>8} {'Chg%':>6} "
-          f"{'OptEntry':>8} {'Lots':>4} {'Qty':>5} {'Result':<5} {'P&L':>10}")
-    print(f"  {'─'*95}")
+          f"{'OptEntry':>8} {'Lots':>4} {'Qty':>5} {'Result':<5} {'P&L':>10} {'Peak':>10}")
+    print(f"  {'─'*108}")
 
     total_pnl = 0
     wins = 0
@@ -230,7 +230,7 @@ def scan_and_simulate(universe, scan_type, blocklist):
             entry_candles = opt_candles
 
         opt_entry = entry_candles[0]["open"]
-        exit_price, pnl, result = walk_candles(entry_candles, opt_entry, args.sl, args.floor, qty)
+        exit_price, pnl, result, peak = walk_candles(entry_candles, opt_entry, args.sl, args.floor, qty)
 
         if pnl >= 0:
             wins += 1
@@ -242,7 +242,7 @@ def scan_and_simulate(universe, scan_type, blocklist):
 
         print(f"  {i:<3} {opt['symbol']:<28} {c['open']:>7.1f} {c['entry_eq']:>8.1f} "
               f"{c['change_pct']:>+5.1f}% {opt_entry:>8.1f} {args.lots:>4} {qty:>5} "
-              f"[{icon}] {result:<3} {pnl:>+10,.0f}")
+              f"[{icon}] {result:<3} {pnl:>+10,.0f} {peak:>+10,.0f}")
 
     print(f"\n  {scan_type.upper()}: {wins}W/{losses}L | P&L: ₹{total_pnl:+,.0f}")
     return total_pnl, wins, losses
