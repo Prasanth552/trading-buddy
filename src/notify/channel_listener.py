@@ -1931,9 +1931,8 @@ async def start_listener() -> None:
                     _peak_net[tid] = max(prev_peak, net_pnl)
 
                     if trade["target_price"] and ltp >= trade["target_price"]:
-                        ch = trade["channel"] or "ch1"
                         remaining = trade["targets_remaining"] or ""
-                        if ch == "ch2" and remaining:
+                        if remaining:
                             next_tgts = [float(t) for t in remaining.split(",") if t.strip()]
                             new_sl = trade["target_price"]
                             if next_tgts:
@@ -1944,12 +1943,13 @@ async def start_listener() -> None:
                                         "UPDATE trades SET stop_price=?, target_price=?, "
                                         "targets_remaining=? WHERE id=?",
                                         (new_sl, new_tgt, new_remaining, tid))
-                                log.info("CH2 TGT TRAIL %s: SL→%.0f TGT→%.0f remaining=%s",
-                                         trade["symbol"], new_sl, new_tgt, new_remaining)
-                                _notify(f"🎯 *[CH2] TGT hit* — {trade['symbol']}\n"
+                                ch = trade["channel"] or "ch1"
+                                log.info("[%s] TGT TRAIL %s: SL→%.0f TGT→%.0f remaining=%s",
+                                         ch.upper(), trade["symbol"], new_sl, new_tgt, new_remaining)
+                                _notify(f"🎯 *TGT hit* — {trade['symbol']}\n"
                                         f"SL trailed → {new_sl} | Next TGT → {new_tgt}")
                             else:
-                                log.info("CHANNEL ALL TGT hit for %s: LTP=%.2f",
+                                log.info("ALL TGT hit for %s: LTP=%.2f",
                                          trade["symbol"], ltp)
                                 _close_trade_by_id(tid, ltp, "all_tgt_hit")
                                 _peak_net.pop(tid, None)
@@ -2344,44 +2344,42 @@ async def start_listener() -> None:
                 if now_ts - _ch2_last_reentry_ts < 60:
                     log.info("[CH2] RE-ENTRY skipped (duplicate within 60s)")
                     return
-                re_sym = last.symbol.replace(" ", "").upper()
-                if re_sym in ("NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY"):
-                    new_entry = last.trigger_price
-                    for g in reentry_m.groups():
-                        if g:
-                            val = float(g)
-                            if val < 1000:
-                                new_entry = val
-                            break
-                    side_m = re.search(r'(CE|PE)\s+SIDE', upper_ctl)
-                    opt_type = side_m.group(1) if side_m else last.option_type
-                    sl_ratio = last.stop_loss / last.trigger_price if last.trigger_price > 0 else 0.90
-                    re_sig = ParsedSignal(
-                        action="BUY",
-                        symbol=last.symbol,
-                        strike=last.strike,
-                        option_type=opt_type,
-                        trigger_price=new_entry,
-                        stop_loss=round(new_entry * sl_ratio),
-                        targets=last.targets,
-                    )
-                    trade_sym = f"{last.symbol} {int(last.strike)} {opt_type}"
-                    _ch2_last_reentry_ts = now_ts
-                    _ch2_msg_signals[event.message.id] = re_sig
-                    has_above = bool(re.search(r'\bABOVE\b', upper_ctl))
-                    if has_above:
-                        _ch2_trigger_held = re_sig
-                        log.info("[CH2] RE-ENTRY held (ABOVE): %s @ %.0f SL=%.0f",
-                                 trade_sym, new_entry, re_sig.stop_loss)
-                        _notify(f"[CH2] Re-entry held (ABOVE trigger):\n"
-                                f"{trade_sym} @ {new_entry} SL={re_sig.stop_loss}\n"
-                                f"Waiting for Active...")
-                    else:
-                        log.info("[CH2] RE-ENTRY executing: %s @ %.0f SL=%.0f",
-                                 trade_sym, new_entry, re_sig.stop_loss)
-                        _notify(f"*[CH2] Re-entry executing:*\n{trade_sym} @ {new_entry}")
-                        _execute_and_notify(re_sig, channel, ch_label)
-                    return
+                new_entry = last.trigger_price
+                for g in reentry_m.groups():
+                    if g:
+                        val = float(g)
+                        if val < 1000:
+                            new_entry = val
+                        break
+                side_m = re.search(r'(CE|PE)\s+SIDE', upper_ctl)
+                opt_type = side_m.group(1) if side_m else last.option_type
+                sl_ratio = last.stop_loss / last.trigger_price if last.trigger_price > 0 else 0.90
+                re_sig = ParsedSignal(
+                    action="BUY",
+                    symbol=last.symbol,
+                    strike=last.strike,
+                    option_type=opt_type,
+                    trigger_price=new_entry,
+                    stop_loss=round(new_entry * sl_ratio),
+                    targets=last.targets,
+                )
+                trade_sym = f"{last.symbol} {int(last.strike)} {opt_type}"
+                _ch2_last_reentry_ts = now_ts
+                _ch2_msg_signals[event.message.id] = re_sig
+                has_above = bool(re.search(r'\bABOVE\b', upper_ctl))
+                if has_above:
+                    _ch2_trigger_held = re_sig
+                    log.info("[CH2] RE-ENTRY held (ABOVE): %s @ %.0f SL=%.0f",
+                             trade_sym, new_entry, re_sig.stop_loss)
+                    _notify(f"[CH2] Re-entry held (ABOVE trigger):\n"
+                            f"{trade_sym} @ {new_entry} SL={re_sig.stop_loss}\n"
+                            f"Waiting for Active...")
+                else:
+                    log.info("[CH2] RE-ENTRY executing: %s @ %.0f SL=%.0f",
+                             trade_sym, new_entry, re_sig.stop_loss)
+                    _notify(f"*[CH2] Re-entry executing:*\n{trade_sym} @ {new_entry}")
+                    _execute_and_notify(re_sig, channel, ch_label)
+                return
 
             # Re-entry via reply with "AGAIN" — parse original signal, execute
             if (event.message.reply_to and event.message.reply_to.reply_to_msg_id
@@ -2392,12 +2390,7 @@ async def start_listener() -> None:
                     if orig_msg and orig_msg.text:
                         orig_sig = parse_signal_ch2(orig_msg.text)
                         if orig_sig:
-                            re_sym = orig_sig.symbol.replace(" ", "").upper()
                             trade_sym = f"{orig_sig.symbol} {int(orig_sig.strike)} {orig_sig.option_type}"
-                            if re_sym not in ("NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY"):
-                                log.info("[CH2] RE-ENTRY skip non-index: %s", trade_sym)
-                                _notify(f"[CH2] Re-entry skip (non-index): {trade_sym}")
-                                return
                             reply_sig = parse_signal_ch2(text)
                             if reply_sig and reply_sig.stop_loss and reply_sig.targets:
                                 orig_sig = reply_sig
@@ -2430,12 +2423,6 @@ async def start_listener() -> None:
                      sig.trigger_price, sig.stop_loss, sig.targets)
 
             if channel == "ch2":
-                ch2_sym = sig.symbol.replace(" ", "").upper()
-                if ch2_sym not in ("NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY"):
-                    log.info("[CH2] Skipping non-index: %s %s %s",
-                             sig.symbol, int(sig.strike), sig.option_type)
-                    return
-
                 _ch2_msg_signals[event.message.id] = sig
                 is_above = bool(re.search(r'\bABOVE\b', text, re.I)) or _ch2_last_is_above
                 if is_above:

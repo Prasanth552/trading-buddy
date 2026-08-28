@@ -146,7 +146,7 @@ def walk_candles_floor(candles, entry, sl, ch_tgt, qty, targets=None, channel="c
     hard_loss = CH2_MAX_LOSS if channel == "ch2" else (MAX_LOSS if MAX_LOSS > 0 else 0)
     cur_sl = sl if sl and sl < entry else None
 
-    if targets and channel == "ch2" and len(targets) > 1:
+    if targets and len(targets) > 1:
         remaining_tgts = [t for t in targets if t > entry]
     else:
         remaining_tgts = [ch_tgt] if ch_tgt and ch_tgt > entry else []
@@ -205,7 +205,7 @@ def simulate_trade(sig, entry_time_str, lots_override=None, use_monthly=False, c
     qty = lot_size * lots
 
     from_dt = datetime(year, month, day, 9, 15, 0, tzinfo=IST)
-    if base_sym in ("CRUDEOIL", "CRUDE", "GOLD", "SILVER", "NATURALGAS"):
+    if base_sym in ("CRUDEOIL", "CRUDE", "GOLD", "GOLDM", "SILVER", "SILVERM", "NATURALGAS", "COPPER"):
         to_dt = datetime(year, month, day, 23, 30, 0, tzinfo=IST)
     else:
         to_dt = datetime(year, month, day, 15, 30, 0, tzinfo=IST)
@@ -387,9 +387,6 @@ async def main():
     _cl._ch2_pending_ts = 0.0
     DELAY_SECS = 5
     last_reentry_ts = 0.0
-    MARKET_CLOSE_HR = 15
-    MARKET_CLOSE_MIN = 30
-
     for msg in ch2_msgs:
         if not msg.text:
             continue
@@ -398,9 +395,6 @@ async def main():
         ts_str = ts.strftime("%H:%M:%S")
         ts_epoch = ts.timestamp()
         upper = text.upper()
-
-        if ts.hour > MARKET_CLOSE_HR or (ts.hour == MARKET_CLOSE_HR and ts.minute >= MARKET_CLOSE_MIN):
-            continue
 
         if queued_signal and (ts_epoch - queued_ts) > DELAY_SECS:
             out(f"  ⏱  {DELAY_SECS}s elapsed — executing queued signal:")
@@ -497,38 +491,36 @@ async def main():
             if ts_epoch - last_reentry_ts < 60:
                 out(f"  ⊘  #{msg.id} @ {ts_str}: RE-ENTRY SKIPPED (duplicate <60s)")
                 continue
-            re_sym = last.symbol.replace(" ", "").upper()
-            if re_sym in INDEX_SYMS:
-                new_entry = last.trigger_price
-                for g in reentry_m.groups():
-                    if g:
-                        val = float(g)
-                        if val < 1000:
-                            new_entry = val
-                        break
-                side_m = re.search(r'(CE|PE)\s+SIDE', upper)
-                opt_type = side_m.group(1) if side_m else last.option_type
-                sl_ratio = last.stop_loss / last.trigger_price if last.trigger_price > 0 else 0.90
-                re_sig = ParsedSignal(
-                    action="BUY", symbol=last.symbol, strike=last.strike,
-                    option_type=opt_type, trigger_price=new_entry,
-                    stop_loss=round(new_entry * sl_ratio), targets=last.targets,
-                )
-                sym_label = f"{last.symbol} {int(last.strike)} {opt_type}"
-                last_reentry_ts = ts_epoch
-                msg_signals[msg.id] = re_sig
-                has_above = bool(re.search(r'\bABOVE\b', upper))
-                if has_above:
-                    trigger_held = re_sig
-                    trigger_held_msg_id = msg.id
-                    out(f"  🔄 #{msg.id} @ {ts_str}: RE-ENTRY ABOVE (held) {sym_label} @ {new_entry} SL={re_sig.stop_loss}")
-                else:
-                    out(f"  🔄 #{msg.id} @ {ts_str}: RE-ENTRY {sym_label} @ {new_entry} SL={re_sig.stop_loss}")
-                    executed.append({"signal": re_sig, "ts": ts_epoch, "reason": "re-entry",
-                                     "entry_time": ts.strftime("%H:%M")})
-                    last_executed_sig = re_sig
-                    reentries.append(sym_label)
-                continue
+            new_entry = last.trigger_price
+            for g in reentry_m.groups():
+                if g:
+                    val = float(g)
+                    if val < 1000:
+                        new_entry = val
+                    break
+            side_m = re.search(r'(CE|PE)\s+SIDE', upper)
+            opt_type = side_m.group(1) if side_m else last.option_type
+            sl_ratio = last.stop_loss / last.trigger_price if last.trigger_price > 0 else 0.90
+            re_sig = ParsedSignal(
+                action="BUY", symbol=last.symbol, strike=last.strike,
+                option_type=opt_type, trigger_price=new_entry,
+                stop_loss=round(new_entry * sl_ratio), targets=last.targets,
+            )
+            sym_label = f"{last.symbol} {int(last.strike)} {opt_type}"
+            last_reentry_ts = ts_epoch
+            msg_signals[msg.id] = re_sig
+            has_above = bool(re.search(r'\bABOVE\b', upper))
+            if has_above:
+                trigger_held = re_sig
+                trigger_held_msg_id = msg.id
+                out(f"  🔄 #{msg.id} @ {ts_str}: RE-ENTRY ABOVE (held) {sym_label} @ {new_entry} SL={re_sig.stop_loss}")
+            else:
+                out(f"  🔄 #{msg.id} @ {ts_str}: RE-ENTRY {sym_label} @ {new_entry} SL={re_sig.stop_loss}")
+                executed.append({"signal": re_sig, "ts": ts_epoch, "reason": "re-entry",
+                                 "entry_time": ts.strftime("%H:%M")})
+                last_executed_sig = re_sig
+                reentries.append(sym_label)
+            continue
 
         if msg.reply_to and msg.reply_to.reply_to_msg_id and re.search(r'\bAGAIN\b', upper):
             reply_id = msg.reply_to.reply_to_msg_id
@@ -536,11 +528,7 @@ async def main():
             if orig and orig.text:
                 orig_sig = parse_signal_ch2(orig.text)
                 if orig_sig:
-                    re_sym = orig_sig.symbol.replace(" ", "").upper()
                     sym_label = f"{orig_sig.symbol} {int(orig_sig.strike)} {orig_sig.option_type}"
-                    if re_sym not in INDEX_SYMS:
-                        out(f"  ⊘  #{msg.id} @ {ts_str}: RE-ENTRY SKIP non-index {sym_label}")
-                        continue
                     reply_sig = parse_signal_ch2(text)
                     if reply_sig and reply_sig.stop_loss and reply_sig.targets:
                         orig_sig = reply_sig
@@ -554,11 +542,6 @@ async def main():
 
         sig = parse_signal_ch2(text)
         if sig:
-            ch2_sym = sig.symbol.replace(" ", "").upper()
-            if ch2_sym not in INDEX_SYMS:
-                out(f"  ⊘  #{msg.id} @ {ts_str}: SKIP non-index {sig.symbol} {int(sig.strike)} {sig.option_type}")
-                continue
-
             sym = f"{sig.symbol} {int(sig.strike)} {sig.option_type}"
             msg_signals[msg.id] = sig
             is_above = bool(re.search(r'\bABOVE\b', text, re.I)) or _cl._ch2_last_is_above
