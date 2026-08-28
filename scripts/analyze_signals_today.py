@@ -627,9 +627,26 @@ async def main():
     out(f"{'='*130}")
     for ch_label in ("ch1", "ch2"):
         db_rows = conn.execute("""
-            SELECT id, ts, symbol, price, stop_price, target_price, pnl, status, channel
+            SELECT id, ts, symbol, price, stop_price, target_price, pnl, status,
+                   channel, exit_price
             FROM trades WHERE ts >= ? AND ts < ? AND channel=? ORDER BY ts
         """, (f"{target_date}T00:00:00", f"{target_date}T23:59:59", ch_label)).fetchall()
+        if db_rows:
+            out(f"\n  {ch_label.upper()} DB trades:")
+            out(f"  {'ID':<6} {'Time':<6} {'Symbol':<28} {'Entry':>7} {'SL':>7} {'TGT':>7} "
+                f"{'Exit':>7} {'P&L':>10} {'Status'}")
+            out(f"  {'─'*105}")
+            for r in db_rows:
+                t = r["ts"][11:16] if r["ts"] else ""
+                sym = r["symbol"] or ""
+                ep = r["price"] or 0
+                sl = r["stop_price"] or 0
+                tgt = r["target_price"] or 0
+                xp = r["exit_price"] or 0
+                p = r["pnl"] or 0
+                st = r["status"] or ""
+                out(f"  {r['id']:<6} {t:<6} {sym:<28} {ep:>7.1f} {sl:>7.0f} {tgt:>7.0f} "
+                    f"{xp:>7.1f} {p:>+10,.0f} {st}")
         db_pnl = sum(r["pnl"] or 0 for r in db_rows)
         out(f"  {ch_label.upper()}: {len(db_rows)} trades, DB P&L: ₹{db_pnl:+,.0f}")
 
