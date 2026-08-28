@@ -387,6 +387,8 @@ async def main():
     _cl._ch2_pending_ts = 0.0
     DELAY_SECS = 5
     last_reentry_ts = 0.0
+    MARKET_CLOSE_HR = 15
+    MARKET_CLOSE_MIN = 30
     for msg in ch2_msgs:
         if not msg.text:
             continue
@@ -395,6 +397,9 @@ async def main():
         ts_str = ts.strftime("%H:%M:%S")
         ts_epoch = ts.timestamp()
         upper = text.upper()
+
+        if ts.hour > MARKET_CLOSE_HR or (ts.hour == MARKET_CLOSE_HR and ts.minute >= MARKET_CLOSE_MIN):
+            continue
 
         if queued_signal and (ts_epoch - queued_ts) > DELAY_SECS:
             out(f"  ⏱  {DELAY_SECS}s elapsed — executing queued signal:")
