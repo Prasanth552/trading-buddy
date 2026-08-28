@@ -16,9 +16,9 @@ IST = ZoneInfo("Asia/Kolkata")
 parser = argparse.ArgumentParser()
 parser.add_argument("--date", default=None)
 parser.add_argument("--sl", type=float, default=2000, help="Hard SL in rupees")
-parser.add_argument("--tgt", type=float, default=2000, help="Profit target in rupees")
+parser.add_argument("--floor", type=float, default=2000, help="Profit floor in rupees (let profits run, exit if they drop back)")
 parser.add_argument("--lots", type=int, default=2)
-parser.add_argument("--mode", choices=["oel", "oeh", "both"], default="both")
+parser.add_argument("--mode", choices=["oel", "oeh", "both"], default="oel")
 args = parser.parse_args()
 
 target_date = args.date or datetime.now(IST).strftime("%Y-%m-%d")
@@ -110,16 +110,21 @@ def resolve_atm_option(sym, opt_type, entry_price_equity):
     }
 
 
-def walk_candles(candles, entry, sl_rupees, tgt_rupees, qty):
+def walk_candles(candles, entry, sl_rupees, floor_rupees, qty):
+    peak_pnl = 0
+    floor_armed = False
     for c in candles:
         low_pnl = (c["low"] - entry) * qty
         high_pnl = (c["high"] - entry) * qty
         if low_pnl <= -sl_rupees:
             exit_price = entry - (sl_rupees / qty)
             return exit_price, -sl_rupees, "SL"
-        if high_pnl >= tgt_rupees:
-            exit_price = entry + (tgt_rupees / qty)
-            return exit_price, tgt_rupees, "TGT"
+        if floor_armed and low_pnl <= floor_rupees:
+            exit_price = entry + (floor_rupees / qty)
+            return exit_price, floor_rupees, "FLOOR"
+        peak_pnl = max(peak_pnl, high_pnl)
+        if peak_pnl >= floor_rupees:
+            floor_armed = True
     eod_pnl = (candles[-1]["close"] - entry) * qty
     return candles[-1]["close"], eod_pnl, "EOD"
 
@@ -180,7 +185,7 @@ def scan_and_simulate(universe, scan_type, blocklist):
 
     candidates.sort(key=lambda x: x["change_pct"], reverse=True)
     print(f"\n{'='*100}")
-    print(f"  {scan_type.upper()} ANALYSIS — {target_date} — {args.lots} lots, ₹{args.sl:,.0f} SL, ₹{args.tgt:,.0f} TGT")
+    print(f"  {scan_type.upper()} ANALYSIS — {target_date} — {args.lots} lots, ₹{args.sl:,.0f} SL, ₹{args.floor:,.0f} floor")
     print(f"{'='*100}")
     print(f"  Scanned {scanned} stocks, found {len(candidates)} {scan_type.upper()} candidates\n")
 
@@ -225,7 +230,7 @@ def scan_and_simulate(universe, scan_type, blocklist):
             entry_candles = opt_candles
 
         opt_entry = entry_candles[0]["open"]
-        exit_price, pnl, result = walk_candles(entry_candles, opt_entry, args.sl, args.tgt, qty)
+        exit_price, pnl, result = walk_candles(entry_candles, opt_entry, args.sl, args.floor, qty)
 
         if pnl >= 0:
             wins += 1
