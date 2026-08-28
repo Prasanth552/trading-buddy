@@ -26,7 +26,7 @@ year, month, day = [int(x) for x in target_date.split("-")]
 
 from src.notify.channel_listener import OEH_UNIVERSE, OEL_UNIVERSE, OEH_BLOCKLIST
 from src.broker.upstox_data import UpstoxData, load_cached_token
-from src.notify import config
+import config
 
 LOT_SIZES = config.LOT_SIZES
 DEFAULT_LOT = 25
