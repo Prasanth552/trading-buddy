@@ -923,7 +923,7 @@ def _ch2_extract_sl(sl_match: re.Match, trigger: float) -> float:
 
     if is_points and trigger > 0:
         return trigger - sl_val
-    if sl_val <= 25 and trigger > 50:
+    if trigger > 0 and sl_val / trigger < 0.20:
         return trigger - sl_val
     return sl_val
 
