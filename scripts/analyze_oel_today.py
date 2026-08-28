@@ -62,43 +62,52 @@ def resolve_atm_option(sym, opt_type, entry_price_equity):
     from src.broker.upstox_client import _expiry_to_date
     base = sym.upper().replace(" ", "")
     lot_size = LOT_SIZES.get(base, DEFAULT_LOT)
+    today_d = datetime(year, month, day, tzinfo=IST).date()
 
-    strike_step = 10 if entry_price_equity < 500 else (50 if entry_price_equity < 2000 else 100)
+    fo_strikes = sorted({
+        float(inst.get("strike_price", 0))
+        for inst in master
+        if (inst.get("asset_symbol") or "").upper() == base
+        and inst.get("segment") in ("NSE_FO", "BSE_FO")
+        and inst.get("instrument_type") in ("CE", "PE")
+        and float(inst.get("strike_price", 0)) > 0
+    })
+    if len(fo_strikes) >= 2:
+        strike_step = min(fo_strikes[j+1] - fo_strikes[j] for j in range(min(10, len(fo_strikes)-1)))
+    else:
+        strike_step = 50
     atm_strike = round(entry_price_equity / strike_step) * strike_step
 
     candidates = []
     for inst in master:
         seg = inst.get("segment", "")
-        if seg not in ("NSE_FO",):
+        if seg not in ("NSE_FO", "BSE_FO"):
             continue
-        tsym = (inst.get("trading_symbol") or "").upper()
-        i_name = (inst.get("name") or "").upper().replace(" ", "")
-        if i_name != base:
+        if (inst.get("asset_symbol") or "").upper() != base:
             continue
-        i_type = (inst.get("instrument_type") or "").upper()
-        if i_type not in ("CE", "PE"):
+        if inst.get("instrument_type") != opt_type:
             continue
-        if i_type != opt_type:
+        if abs(float(inst.get("strike_price", -1)) - atm_strike) > 0.01:
             continue
-        i_strike = float(inst.get("strike_price", 0))
-        if i_strike != atm_strike:
+        exp = _expiry_to_date(inst.get("expiry"))
+        if exp is None or exp < today_d:
             continue
-        exp_raw = inst.get("expiry")
-        if not exp_raw:
-            continue
-        exp_date = _expiry_to_date(exp_raw)
-        if not exp_date:
-            continue
-        today = datetime(year, month, day, tzinfo=IST).date()
-        if exp_date < today:
-            continue
-        candidates.append((exp_date, inst.get("instrument_key"), i_strike, lot_size))
+        candidates.append((exp, inst))
 
     if not candidates:
         return None
     candidates.sort(key=lambda x: x[0])
-    exp_date, inst_key, strike, lot_size = candidates[0]
-    return {"inst_key": inst_key, "strike": strike, "lot_size": lot_size, "exp_date": exp_date, "symbol": f"{sym} {int(strike)} {opt_type}"}
+    inst = candidates[0][1]
+    inst_lot = int(inst.get("lot_size", 1)) or 1
+    if inst_lot > 1:
+        lot_size = inst_lot
+    return {
+        "inst_key": inst.get("instrument_key"),
+        "strike": atm_strike,
+        "lot_size": lot_size,
+        "exp_date": candidates[0][0],
+        "symbol": f"{sym} {int(atm_strike)} {opt_type}",
+    }
 
 
 def walk_candles(candles, entry, sl_rupees, tgt_rupees, qty):
