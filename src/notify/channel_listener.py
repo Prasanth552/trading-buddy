@@ -82,6 +82,7 @@ PROFIT_TARGET = 1500  # ₹1,500 net profit per trade → auto-close
 MAX_LOSS_PER_TRADE = 8000  # ₹8,000 hard cap — no trade can lose more than this
 CH2_MAX_LOSS = 4000  # ₹4,000 hard cap for CH2 trades
 MAX_DAILY_LOSS = 10000  # ₹10,000 daily loss limit — stop trading after this
+CH2_INDEX_ONLY = {"NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY"}
 
 # ---------------------------------------------------------------------------
 # Scanner (ch5) — auto-execute config
@@ -2344,6 +2345,10 @@ async def start_listener() -> None:
                 if now_ts - _ch2_last_reentry_ts < 60:
                     log.info("[CH2] RE-ENTRY skipped (duplicate within 60s)")
                     return
+                re_sym = last.symbol.replace(" ", "").upper()
+                if re_sym not in CH2_INDEX_ONLY:
+                    log.info("[CH2] RE-ENTRY skip non-index: %s", re_sym)
+                    return
                 new_entry = last.trigger_price
                 for g in reentry_m.groups():
                     if g:
@@ -2390,7 +2395,11 @@ async def start_listener() -> None:
                     if orig_msg and orig_msg.text:
                         orig_sig = parse_signal_ch2(orig_msg.text)
                         if orig_sig:
+                            re_sym = orig_sig.symbol.replace(" ", "").upper()
                             trade_sym = f"{orig_sig.symbol} {int(orig_sig.strike)} {orig_sig.option_type}"
+                            if re_sym not in CH2_INDEX_ONLY:
+                                log.info("[CH2] RE-ENTRY skip non-index: %s", trade_sym)
+                                return
                             reply_sig = parse_signal_ch2(text)
                             if reply_sig and reply_sig.stop_loss and reply_sig.targets:
                                 orig_sig = reply_sig
@@ -2423,6 +2432,11 @@ async def start_listener() -> None:
                      sig.trigger_price, sig.stop_loss, sig.targets)
 
             if channel == "ch2":
+                ch2_sym = sig.symbol.replace(" ", "").upper()
+                if ch2_sym not in CH2_INDEX_ONLY:
+                    log.info("[CH2] Skipping non-index: %s %s %s",
+                             sig.symbol, int(sig.strike), sig.option_type)
+                    return
                 _ch2_msg_signals[event.message.id] = sig
                 is_above = bool(re.search(r'\bABOVE\b', text, re.I)) or _ch2_last_is_above
                 if is_above:

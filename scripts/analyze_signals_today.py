@@ -491,6 +491,10 @@ async def main():
             if ts_epoch - last_reentry_ts < 60:
                 out(f"  ⊘  #{msg.id} @ {ts_str}: RE-ENTRY SKIPPED (duplicate <60s)")
                 continue
+            re_sym = last.symbol.replace(" ", "").upper()
+            if re_sym not in INDEX_SYMS:
+                out(f"  ⊘  #{msg.id} @ {ts_str}: RE-ENTRY SKIP non-index {re_sym}")
+                continue
             new_entry = last.trigger_price
             for g in reentry_m.groups():
                 if g:
@@ -528,7 +532,11 @@ async def main():
             if orig and orig.text:
                 orig_sig = parse_signal_ch2(orig.text)
                 if orig_sig:
+                    re_sym = orig_sig.symbol.replace(" ", "").upper()
                     sym_label = f"{orig_sig.symbol} {int(orig_sig.strike)} {orig_sig.option_type}"
+                    if re_sym not in INDEX_SYMS:
+                        out(f"  ⊘  #{msg.id} @ {ts_str}: RE-ENTRY SKIP non-index {sym_label}")
+                        continue
                     reply_sig = parse_signal_ch2(text)
                     if reply_sig and reply_sig.stop_loss and reply_sig.targets:
                         orig_sig = reply_sig
@@ -542,6 +550,10 @@ async def main():
 
         sig = parse_signal_ch2(text)
         if sig:
+            ch2_sym = sig.symbol.replace(" ", "").upper()
+            if ch2_sym not in INDEX_SYMS:
+                out(f"  ⊘  #{msg.id} @ {ts_str}: SKIP non-index {sig.symbol} {int(sig.strike)} {sig.option_type}")
+                continue
             sym = f"{sig.symbol} {int(sig.strike)} {sig.option_type}"
             msg_signals[msg.id] = sig
             is_above = bool(re.search(r'\bABOVE\b', text, re.I)) or _cl._ch2_last_is_above
