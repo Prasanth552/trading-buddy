@@ -110,10 +110,15 @@ def resolve_atm_option(sym, opt_type, entry_price_equity):
     }
 
 
-def walk_candles(candles, entry, sl_rupees, floor_rupees, qty):
+def walk_candles(candles, entry, sl_rupees, floor_rupees, qty, max_minutes=60):
     peak_pnl = 0
     floor_armed = False
+    entry_time = candles[0]["date"][11:16]
+    entry_mins = int(entry_time[:2]) * 60 + int(entry_time[3:])
     for c in candles:
+        c_time = c["date"][11:16]
+        c_mins = int(c_time[:2]) * 60 + int(c_time[3:])
+        elapsed = c_mins - entry_mins
         low_pnl = (c["low"] - entry) * qty
         high_pnl = (c["high"] - entry) * qty
         peak_pnl = max(peak_pnl, high_pnl)
@@ -125,6 +130,9 @@ def walk_candles(candles, entry, sl_rupees, floor_rupees, qty):
             return exit_price, floor_rupees, "FLOOR", peak_pnl
         if peak_pnl >= floor_rupees:
             floor_armed = True
+        if elapsed >= max_minutes:
+            cut_pnl = (c["close"] - entry) * qty
+            return c["close"], cut_pnl, "TIME", peak_pnl
     eod_pnl = (candles[-1]["close"] - entry) * qty
     return candles[-1]["close"], eod_pnl, "EOD", peak_pnl
 
