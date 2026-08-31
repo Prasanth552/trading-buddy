@@ -814,7 +814,11 @@ def parse_signal_ch2(text: str) -> ParsedSignal | None:
             if sl <= 0 or not targets:
                 return None
 
-            is_swing = any(kw in upper for kw in ("SWING", "POSITIONAL", "HOLD WITH PATIENCE"))
+            is_swing = (
+                ("POSITIONAL" in upper)
+                or ("HOLD WITH PATIENCE" in upper)
+                or (re.search(r'\bSWING\b', upper) and not re.search(r'SWING\s+HIGH|SWING\s+LOW', upper))
+            )
             if is_swing and "INTRA" not in upper:
                 return None
 
