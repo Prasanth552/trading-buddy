@@ -66,7 +66,7 @@ async def _ws_push_loop():
             _ensure_db()
             today_iso = mc.now_ist().date().isoformat()
             payload: dict[str, dict] = {}
-            for ch in ("ch1", "ch2", "ch3", "oeh"):
+            for ch in ("ch1", "ch2", "ch3", "oeh", "oel"):
                 cf = _ch_filter(ch)
                 with db.get_conn() as conn:
                     row = conn.execute(f"""SELECT
@@ -111,6 +111,7 @@ _CH_FILTERS = {
     "ch3": f"({_CHANNEL_FILTER_BASE} AND channel = 'ch3')",
     "ch5": f"({_CHANNEL_FILTER_BASE} AND channel = 'ch5')",
     "oeh": f"({_CHANNEL_FILTER_BASE} AND channel = 'oeh')",
+    "oel": f"({_CHANNEL_FILTER_BASE} AND channel = 'oel')",
     "ch1f": f"({_CHANNEL_FILTER_BASE} AND (channel IS NULL OR channel = 'ch1') AND filter_score >= 50)",
 }
 
@@ -542,6 +543,7 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
   <button class="tab active" onclick="switchCh('ch1')" id="tab-ch1"><span class=ico>1</span> Paid</button>
   <button class="tab" onclick="switchCh('ch2')" id="tab-ch2"><span class=ico>2</span> G Prime</button>
   <button class="tab" onclick="switchCh('oeh')" id="tab-oeh"><span class=ico>O</span> OEH</button>
+  <button class="tab" onclick="switchCh('oel')" id="tab-oel"><span class=ico>L</span> OEL</button>
 </div>
 
 <div class=wrap>
