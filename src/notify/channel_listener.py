@@ -2217,7 +2217,7 @@ async def start_listener() -> None:
 
     @client.on(events.NewMessage(chats=listen_channels))
     async def on_signal(event):
-        global _ch2_queued_signal, _ch2_queued_task, _ch2_trigger_held
+        global _ch2_queued_signal, _ch2_queued_task, _ch2_trigger_held, _ch2_last_executed, _ch2_last_reentry_ts
 
         text = event.message.text or ""
         if not text.strip():
