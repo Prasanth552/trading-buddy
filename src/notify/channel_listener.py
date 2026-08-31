@@ -84,6 +84,13 @@ CH2_MAX_LOSS = 4000  # ₹4,000 hard cap for CH2 trades
 MAX_DAILY_LOSS = 10000  # ₹10,000 daily loss limit — stop trading after this
 CH2_INDEX_ONLY = {"NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY"}
 
+# CH2F (filtered) — optimized params from backtest
+CH2F_ENABLED = True
+CH2F_MAX_LOSS = 6000   # ₹6,000 SL cap (wider than ch2's ₹4K)
+CH2F_PROFIT_FLOOR = 2000  # ₹2,000 floor (higher than ch2's ₹1.5K)
+CH2F_PE_ONLY = True     # skip all CE signals
+CH2F_SKIP_HOURS = {12, 13}  # skip 12:xx and 13:xx signals
+
 # ---------------------------------------------------------------------------
 # Scanner (ch5) — auto-execute config
 # ---------------------------------------------------------------------------
@@ -453,7 +460,7 @@ def execute_signal(sig: ParsedSignal, *, channel: str = "ch1", max_lots: int | N
     is_index = lot_key in ("NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY")
     if channel in ("oeh", "oel") and max_lots is not None:
         lots = max_lots
-    elif channel in ("ch2", "ch3"):
+    elif channel in ("ch2", "ch2f", "ch3"):
         lots = 3 if is_index else 2
     elif channel in ("ch1", "ch1b"):
         lots = 2
@@ -704,6 +711,20 @@ _CH2_SL_RE = re.compile(
 _CH2_SKIP: set[str] = set()  # no skips — commodities enabled
 
 
+def _loss_cap_for_channel(ch: str) -> float:
+    if ch == "ch2f":
+        return CH2F_MAX_LOSS
+    if ch == "ch2":
+        return CH2_MAX_LOSS
+    return MAX_LOSS_PER_TRADE
+
+
+def _floor_for_channel(ch: str) -> float:
+    if ch == "ch2f":
+        return CH2F_PROFIT_FLOOR
+    return PROFIT_TARGET
+
+
 def _execute_and_notify(sig: ParsedSignal, channel: str, ch_label: str) -> None:
     """Execute a channel signal with filter scoring and notifications."""
     global _ch2_last_executed
@@ -749,6 +770,35 @@ def _execute_and_notify(sig: ParsedSignal, channel: str, ch_label: str) -> None:
     else:
         _notify(f"[{ch_label}] Signal not executed: {result['reason']}")
         log.warning("[%s] Signal not executed: %s", ch_label, result["reason"])
+
+    if channel == "ch2" and CH2F_ENABLED:
+        _maybe_execute_ch2f(sig)
+
+
+def _maybe_execute_ch2f(sig: ParsedSignal) -> None:
+    """Shadow-execute on ch2f if the signal passes optimized filters."""
+    if CH2F_PE_ONLY and sig.option_type != "PE":
+        log.info("[CH2F] SKIP CE signal: %s %s %s", sig.symbol, int(sig.strike), sig.option_type)
+        return
+
+    from src.utils.market_calendar import now_ist
+    hr = now_ist().hour
+    if hr in CH2F_SKIP_HOURS:
+        log.info("[CH2F] SKIP hour %d signal: %s %s %s", hr, sig.symbol, int(sig.strike), sig.option_type)
+        return
+
+    log.info("[CH2F] Executing filtered signal: %s %s %s", sig.symbol, int(sig.strike), sig.option_type)
+    result = execute_signal(sig, channel="ch2f")
+    if result["placed"]:
+        _notify(
+            f"*[CH2F] Filtered order placed*\n"
+            f"{result['symbol']} x{result['qty']}\n"
+            f"Entry: {result['entry']} | SL: {result['sl']} | "
+            f"Target: {result['target']} | Floor: ₹{CH2F_PROFIT_FLOOR}"
+        )
+        log.info("[CH2F] Order placed: %s", result)
+    else:
+        log.info("[CH2F] Not executed: %s", result["reason"])
 
 
 def parse_signal_ch2(text: str) -> ParsedSignal | None:
@@ -1968,8 +2018,8 @@ async def start_listener() -> None:
                                  trade["symbol"], ltp, trade["stop_price"])
                         _close_trade_by_id(tid, ltp, "sl_hit")
                         _peak_net.pop(tid, None)
-                    elif net_pnl <= -(CH2_MAX_LOSS if (trade["channel"] or "ch1") == "ch2" else MAX_LOSS_PER_TRADE):
-                        loss_cap = CH2_MAX_LOSS if (trade["channel"] or "ch1") == "ch2" else MAX_LOSS_PER_TRADE
+                    elif net_pnl <= -(_loss_cap_for_channel(trade["channel"] or "ch1")):
+                        loss_cap = _loss_cap_for_channel(trade["channel"] or "ch1")
                         log.warning("MAX LOSS CAP for %s: net_pnl=₹%.0f hit -₹%d cap. Force closing.",
                                     trade["symbol"], net_pnl, loss_cap)
                         _close_trade_by_id(tid, ltp, "max_loss_cap")
@@ -1979,9 +2029,10 @@ async def start_listener() -> None:
                             f"Loss hit ₹{abs(net_pnl):,.0f} (cap: ₹{loss_cap:,})\n"
                             f"Auto-closed to protect capital."
                         )
-                    elif _peak_net[tid] >= PROFIT_TARGET and net_pnl <= PROFIT_TARGET:
+                    elif _peak_net[tid] >= _floor_for_channel(trade["channel"] or "ch1") and net_pnl <= _floor_for_channel(trade["channel"] or "ch1"):
+                        floor_val = _floor_for_channel(trade["channel"] or "ch1")
                         log.info("FLOOR EXIT for %s: peak=₹%.0f dipped to ₹%.0f (floor=₹%d)",
-                                 trade["symbol"], _peak_net[tid], net_pnl, PROFIT_TARGET)
+                                 trade["symbol"], _peak_net[tid], net_pnl, floor_val)
                         _close_trade_by_id(tid, ltp, "profit_floor")
                         _peak_net.pop(tid, None)
             except Exception as exc:  # noqa: BLE001
@@ -2418,6 +2469,8 @@ async def start_listener() -> None:
                                         f"{result['symbol']} x{result['qty']}\n"
                                         f"Entry: {result['entry']} | SL: {result['sl']} | "
                                         f"Target: {result['target']}")
+                            if CH2F_ENABLED:
+                                _maybe_execute_ch2f(orig_sig)
                             return
                 except Exception as exc:
                     log.warning("[CH2] Re-entry parse failed: %s", exc)
