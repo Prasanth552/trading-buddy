@@ -60,7 +60,7 @@ LOT_SIZES = {
     "NIFTY": 75, "BANKNIFTY": 30, "SENSEX": 20, "FINNIFTY": 40,
     "MIDCPNIFTY": 50, "CRUDEOIL": 100,
 }
-CH2_MAX_LOSS = 6000
+CH2_MAX_LOSS = 4000
 PROFIT_FLOOR = 2000
 
 _RE_REENTRY = re.compile(
@@ -427,7 +427,11 @@ def run_state_machine_with_debug(messages):
                 option_type=opt_type, trigger_price=new_entry,
                 stop_loss=round(new_entry * sl_ratio), targets=last.targets,
             )
-            msg_signals[msg.id] = re_sig
+            # Only register chain-resolved re-entries in msg_signals.
+            # Fallback re-entries have unreliable attribution and must NOT
+            # become chain targets for later messages.
+            if not is_fallback:
+                msg_signals[msg.id] = re_sig
             has_above = bool(re.search(r'\bABOVE\b', upper))
             if has_above:
                 trigger_held = re_sig
