@@ -205,11 +205,13 @@ def run_state_machine_with_debug(messages):
     queued_msg_id = 0
     trigger_held = None
     trigger_held_msg_id = 0
+    trigger_held_is_fallback = False
     last_executed_sig = None
     executed = []
     msg_signals = {}          # msg_id → ParsedSignal
     buffer_start_id = None    # tracks which msg_id started the split buffer
     executed_roots = set()    # root signal msg_ids that have been executed
+    inst_to_root = {}         # instrument_key → most recent root_id (for fallback dedup)
     debug_log = []
 
     DELAY_SECS = 5
@@ -258,15 +260,28 @@ def run_state_machine_with_debug(messages):
             last_signal = current
         return last_signal or msg_id
 
-    def record_execution(sig, ts_epoch, reason, entry_time, msg_id, origin_msg_id=None):
-        """Execute a trade, with root-signal dedup."""
+    def record_execution(sig, ts_epoch, reason, entry_time, msg_id, origin_msg_id=None,
+                         is_fallback_reentry=False):
+        """Execute a trade, with root-signal + instrument dedup for fallbacks."""
         nonlocal last_executed_sig
+        key = _inst_key(sig)
         root_id = find_root_signal_id(origin_msg_id or msg_id)
+
+        # For fallback re-entries (no reply chain): use the instrument's existing
+        # root if one exists, so they dedup against the original trade
+        if is_fallback_reentry and key in inst_to_root:
+            existing_root = inst_to_root[key]
+            if existing_root in executed_roots:
+                debug_log.append({"msg_id": msg_id,
+                                  "action": f"FALLBACK DEDUP: {key} → existing root={existing_root} already executed"})
+                return False
+
         if root_id in executed_roots:
             debug_log.append({"msg_id": msg_id,
-                              "action": f"ROOT DEDUP: {_inst_key(sig)} root={root_id} already executed"})
+                              "action": f"ROOT DEDUP: {key} root={root_id} already executed"})
             return False
         executed_roots.add(root_id)
+        inst_to_root[key] = root_id
         executed.append({"signal": sig, "ts": ts_epoch, "reason": reason,
                          "entry_time": entry_time, "msg_id": msg_id, "root_id": root_id})
         last_executed_sig = sig
@@ -299,6 +314,7 @@ def run_state_machine_with_debug(messages):
             if queued_signal:
                 trigger_held = queued_signal
                 trigger_held_msg_id = queued_msg_id
+                trigger_held_is_fallback = False
                 queued_signal = None
                 debug_log.append({"msg_id": msg.id, "action": "WAIT_TRIGGER: moved queued → trigger_held"})
             else:
@@ -309,14 +325,23 @@ def run_state_machine_with_debug(messages):
         clean_text = re.sub(r'[\U0001F600-\U0001FAFF☀-➿❤️‍\s]+', '', text).strip()
         if (re.search(r'\bACTIVE\b|\bACTT\b', upper) and len(clean_text) < 15):
             act_sig = None
+            act_origin = msg.id
+            act_from_chain = False
             if msg.reply_to and msg.reply_to.reply_to_msg_id:
                 act_sig = resolve_signal_via_chain(msg.reply_to.reply_to_msg_id)
+                if act_sig:
+                    act_origin = msg.id  # walk from ACTIVE msg → chain finds root
+                    act_from_chain = True
             if not act_sig and trigger_held:
                 act_sig = trigger_held
+                act_origin = trigger_held_msg_id or msg.id
+                act_from_chain = False  # from trigger_held
             if act_sig:
+                act_is_fallback = (not act_from_chain) and trigger_held_is_fallback
                 if record_execution(act_sig, ts_epoch, "active_trigger", ts.strftime("%H:%M"), msg.id,
-                                    origin_msg_id=trigger_held_msg_id or msg.id):
-                    debug_log.append({"msg_id": msg.id, "action": f"ACTIVE → EXECUTE: {act_sig.symbol} {int(act_sig.strike)} {act_sig.option_type}"})
+                                    origin_msg_id=act_origin, is_fallback_reentry=act_is_fallback):
+                    src = "chain" if act_from_chain else "trigger_held"
+                    debug_log.append({"msg_id": msg.id, "action": f"ACTIVE ({src}) → EXECUTE: {act_sig.symbol} {int(act_sig.strike)} {act_sig.option_type}"})
                 trigger_held = None
             else:
                 debug_log.append({"msg_id": msg.id, "action": "ACTIVE but nothing held/replied"})
@@ -329,6 +354,7 @@ def run_state_machine_with_debug(messages):
             if ref_sig:
                 trigger_held = ref_sig
                 trigger_held_msg_id = msg.id
+                trigger_held_is_fallback = False
                 msg_signals[msg.id] = ref_sig
                 debug_log.append({"msg_id": msg.id, "action": f"FOCUS → trigger_held: {ref_sig.symbol} {int(ref_sig.strike)} {ref_sig.option_type}"})
             else:
@@ -358,6 +384,7 @@ def run_state_machine_with_debug(messages):
         reentry_m = _RE_REENTRY.search(upper)
         if reentry_m:
             last = None
+            is_fallback = False
             # 1. Try reply chain (the correct way)
             if msg.reply_to and msg.reply_to.reply_to_msg_id:
                 last = resolve_signal_via_chain(msg.reply_to.reply_to_msg_id)
@@ -366,8 +393,9 @@ def run_state_machine_with_debug(messages):
             # 2. Only fall back to last_executed if no reply chain at all
             if not last and not (msg.reply_to and msg.reply_to.reply_to_msg_id):
                 last = last_executed_sig
+                is_fallback = True
                 if last:
-                    debug_log.append({"msg_id": msg.id, "action": f"RE-ENTRY: no reply, fallback to last_executed {last.symbol} {int(last.strike)}"})
+                    debug_log.append({"msg_id": msg.id, "action": f"RE-ENTRY: no reply, FALLBACK to last_executed {last.symbol} {int(last.strike)}"})
             if not last:
                 debug_log.append({"msg_id": msg.id, "action": "RE-ENTRY pattern but chain resolution failed (no fallback)"})
                 continue
@@ -395,10 +423,11 @@ def run_state_machine_with_debug(messages):
             if has_above:
                 trigger_held = re_sig
                 trigger_held_msg_id = msg.id
-                debug_log.append({"msg_id": msg.id, "action": f"RE-ENTRY ABOVE → trigger_held: {re_sig.symbol} {int(re_sig.strike)} {opt_type} entry={new_entry}"})
+                trigger_held_is_fallback = is_fallback
+                debug_log.append({"msg_id": msg.id, "action": f"RE-ENTRY ABOVE → trigger_held: {re_sig.symbol} {int(re_sig.strike)} {opt_type} entry={new_entry}" + (" [FALLBACK]" if is_fallback else "")})
             else:
                 if record_execution(re_sig, ts_epoch, "re-entry", ts.strftime("%H:%M"), msg.id,
-                                    origin_msg_id=msg.id):
+                                    origin_msg_id=msg.id, is_fallback_reentry=is_fallback):
                     debug_log.append({"msg_id": msg.id, "action": f"RE-ENTRY EXECUTE: {re_sig.symbol} {int(re_sig.strike)} {opt_type} entry={new_entry}"})
             continue
 
@@ -429,8 +458,10 @@ def run_state_machine_with_debug(messages):
 
         if sig:
             # If this completed a buffer, register under the original (first) msg too
+            completed_buffer_start = None
             if had_pending and _cl._ch2_pending is None and buffer_start_id:
                 msg_signals[buffer_start_id] = sig
+                completed_buffer_start = buffer_start_id
                 debug_log.append({"msg_id": msg.id, "action": f"BUFFER COMPLETE: registered signal under both ID={buffer_start_id} and ID={msg.id}"})
                 buffer_start_id = None
 
@@ -444,7 +475,9 @@ def run_state_machine_with_debug(messages):
 
             if is_above:
                 trigger_held = sig
-                trigger_held_msg_id = msg.id
+                # Use buffer start ID so root resolution traces to the first msg
+                trigger_held_msg_id = completed_buffer_start or msg.id
+                trigger_held_is_fallback = False
                 debug_log.append({"msg_id": msg.id, "action": f"PARSED ABOVE → trigger_held: {sig.symbol} {int(sig.strike)} {sig.option_type} entry={sig.trigger_price} sl={sig.stop_loss} tgt={sig.targets}"})
                 continue
 
