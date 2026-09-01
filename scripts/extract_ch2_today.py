@@ -180,8 +180,24 @@ def walk_candles_detailed(candles, entry, sl, targets, qty):
     return exit_price, "EOD", pnl, peak_pnl, trail
 
 
+def _inst_key(sig):
+    """Unique instrument identifier: 'NIFTY 24200 PE'."""
+    return f"{sig.symbol.replace(' ', '').upper()} {int(sig.strike)} {sig.option_type}"
+
+
 def run_state_machine_with_debug(messages):
-    """Full CH2 state machine (same as backtest) with per-message debug output."""
+    """Chain-aware CH2 state machine.
+
+    Key improvements over v1:
+    1. Registers split-buffer signals under the FIRST message's ID (the one
+       reply chains point to), not just the completing message.
+    2. Walks reply chains recursively to resolve signals, instead of only
+       checking the direct parent.
+    3. Per-instrument dedup: same instrument can only execute once every 3 min
+       unless a genuinely new price trigger is given.
+    4. Drops the dangerous `last_executed_sig` fallback for re-entries — if the
+       chain doesn't resolve, the re-entry is skipped rather than mis-attributed.
+    """
     global _fake_now
 
     msg_by_id = {m.id: m for m in messages}
@@ -192,16 +208,56 @@ def run_state_machine_with_debug(messages):
     trigger_held_msg_id = 0
     last_executed_sig = None
     executed = []
-    msg_signals = {}
+    msg_signals = {}          # msg_id → ParsedSignal
+    buffer_start_id = None    # tracks which msg_id started the split buffer
+    inst_last_exec_ts = {}    # instrument_key → last execution timestamp
     last_reentry_ts = 0.0
     debug_log = []
 
     DELAY_SECS = 5
     MARKET_CLOSE_HR = 15
     MARKET_CLOSE_MIN = 30
+    INSTRUMENT_DEDUP_SECS = 180  # same instrument can't fire again within 3 min
 
     _cl._ch2_pending = None
     _cl._ch2_pending_ts = 0.0
+
+    def resolve_signal_via_chain(start_msg_id):
+        """Walk reply chain upward until we find a msg_id registered in msg_signals."""
+        visited = set()
+        current = start_msg_id
+        while current:
+            if current in msg_signals:
+                return msg_signals[current]
+            if current in visited:
+                break
+            visited.add(current)
+            parent = msg_by_id.get(current)
+            if parent and parent.reply_to and parent.reply_to.reply_to_msg_id:
+                current = parent.reply_to.reply_to_msg_id
+            else:
+                break
+        return None
+
+    def can_execute_instrument(sig, ts_epoch):
+        """Per-instrument dedup: block if same instrument fired recently."""
+        key = _inst_key(sig)
+        prev = inst_last_exec_ts.get(key, 0)
+        return (ts_epoch - prev) >= INSTRUMENT_DEDUP_SECS
+
+    def record_execution(sig, ts_epoch, reason, entry_time, msg_id):
+        nonlocal last_executed_sig
+        key = _inst_key(sig)
+        if not can_execute_instrument(sig, ts_epoch):
+            debug_log.append({"msg_id": msg_id,
+                              "action": f"DEDUP BLOCKED: {key} (last exec {ts_epoch - inst_last_exec_ts.get(key, 0):.0f}s ago)"})
+            return False
+        executed.append({"signal": sig, "ts": ts_epoch, "reason": reason,
+                         "entry_time": entry_time, "msg_id": msg_id})
+        last_executed_sig = sig
+        inst_last_exec_ts[key] = ts_epoch
+        msg_signals[msg_id] = sig
+        return True
 
     for msg in messages:
         if not msg.text:
@@ -211,7 +267,6 @@ def run_state_machine_with_debug(messages):
         ts_epoch = ts.timestamp()
         upper = text.upper()
 
-        # Set fake clock so parse_signal_ch2 buffer timeout works
         _fake_now = ts_epoch
 
         if ts.hour > MARKET_CLOSE_HR or (ts.hour == MARKET_CLOSE_HR and ts.minute >= MARKET_CLOSE_MIN):
@@ -219,10 +274,8 @@ def run_state_machine_with_debug(messages):
 
         # Flush delayed queue
         if queued_signal and (ts_epoch - queued_ts) > DELAY_SECS:
-            executed.append({"signal": queued_signal, "ts": queued_ts, "reason": "near_exec",
-                             "entry_time": datetime.fromtimestamp(queued_ts, IST).strftime("%H:%M"),
-                             "msg_id": queued_msg_id})
-            last_executed_sig = queued_signal
+            record_execution(queued_signal, queued_ts, "near_exec",
+                             datetime.fromtimestamp(queued_ts, IST).strftime("%H:%M"), queued_msg_id)
             debug_log.append({"msg_id": msg.id, "action": f"FLUSHED queued: {queued_signal.symbol} {int(queued_signal.strike)} {queued_signal.option_type}"})
             queued_signal = None
 
@@ -242,35 +295,34 @@ def run_state_machine_with_debug(messages):
         if (re.search(r'\bACTIVE\b|\bACTT\b', upper) and len(clean_text) < 15):
             act_sig = None
             if msg.reply_to and msg.reply_to.reply_to_msg_id:
-                act_sig = msg_signals.get(msg.reply_to.reply_to_msg_id)
+                act_sig = resolve_signal_via_chain(msg.reply_to.reply_to_msg_id)
             if not act_sig and trigger_held:
                 act_sig = trigger_held
             if act_sig:
-                executed.append({"signal": act_sig, "ts": ts_epoch, "reason": "active_trigger",
-                                 "entry_time": ts.strftime("%H:%M"), "msg_id": msg.id})
-                last_executed_sig = act_sig
-                msg_signals[msg.id] = act_sig
+                if record_execution(act_sig, ts_epoch, "active_trigger", ts.strftime("%H:%M"), msg.id):
+                    debug_log.append({"msg_id": msg.id, "action": f"ACTIVE → EXECUTE: {act_sig.symbol} {int(act_sig.strike)} {act_sig.option_type}"})
                 trigger_held = None
-                debug_log.append({"msg_id": msg.id, "action": f"ACTIVE → EXECUTE: {act_sig.symbol} {int(act_sig.strike)} {act_sig.option_type}"})
             else:
                 debug_log.append({"msg_id": msg.id, "action": "ACTIVE but nothing held/replied"})
             continue
 
-        # FOCUS (reply)
+        # FOCUS (reply) — puts signal into trigger_held, does NOT execute
         if (re.search(r'\bFOCUS\b', upper) and len(clean_text) < 15
                 and msg.reply_to and msg.reply_to.reply_to_msg_id):
-            ref_sig = msg_signals.get(msg.reply_to.reply_to_msg_id)
+            ref_sig = resolve_signal_via_chain(msg.reply_to.reply_to_msg_id)
             if ref_sig:
                 trigger_held = ref_sig
                 msg_signals[msg.id] = ref_sig
-                debug_log.append({"msg_id": msg.id, "action": f"FOCUS → trigger_held: {ref_sig.symbol} {int(ref_sig.strike)}"})
+                debug_log.append({"msg_id": msg.id, "action": f"FOCUS → trigger_held: {ref_sig.symbol} {int(ref_sig.strike)} {ref_sig.option_type}"})
+            else:
+                debug_log.append({"msg_id": msg.id, "action": "FOCUS but chain resolution failed"})
             continue
 
         # AVOID
         if (re.search(r'\bAVOID\b', upper) and len(clean_text) < 15
                 and msg.reply_to and msg.reply_to.reply_to_msg_id):
-            ref_sig = msg_signals.get(msg.reply_to.reply_to_msg_id)
-            if ref_sig and trigger_held and trigger_held is ref_sig:
+            ref_sig = resolve_signal_via_chain(msg.reply_to.reply_to_msg_id)
+            if ref_sig and trigger_held and _inst_key(trigger_held) == _inst_key(ref_sig):
                 trigger_held = None
                 debug_log.append({"msg_id": msg.id, "action": "AVOID → cleared trigger_held"})
             continue
@@ -285,19 +337,22 @@ def run_state_machine_with_debug(messages):
                 debug_log.append({"msg_id": msg.id, "action": "NOT_ACTIVE → cleared trigger_held"})
             continue
 
-        # RE-ENTRY patterns
+        # RE-ENTRY patterns (Above X again/focus, Near same range, etc.)
         reentry_m = _RE_REENTRY.search(upper)
         if reentry_m:
             last = None
+            # 1. Try reply chain (the correct way)
             if msg.reply_to and msg.reply_to.reply_to_msg_id:
-                last = msg_signals.get(msg.reply_to.reply_to_msg_id)
-            if not last:
+                last = resolve_signal_via_chain(msg.reply_to.reply_to_msg_id)
+                if last:
+                    debug_log.append({"msg_id": msg.id, "action": f"RE-ENTRY: chain resolved to {last.symbol} {int(last.strike)} {last.option_type}"})
+            # 2. Only fall back to last_executed if no reply chain at all
+            if not last and not (msg.reply_to and msg.reply_to.reply_to_msg_id):
                 last = last_executed_sig
+                if last:
+                    debug_log.append({"msg_id": msg.id, "action": f"RE-ENTRY: no reply, fallback to last_executed {last.symbol} {int(last.strike)}"})
             if not last:
-                debug_log.append({"msg_id": msg.id, "action": "RE-ENTRY pattern but no reference signal"})
-                continue
-            if ts_epoch - last_reentry_ts < 60:
-                debug_log.append({"msg_id": msg.id, "action": "RE-ENTRY dedup (< 60s)"})
+                debug_log.append({"msg_id": msg.id, "action": "RE-ENTRY pattern but chain resolution failed (no fallback)"})
                 continue
             re_sym = last.symbol.replace(" ", "").upper()
             if re_sym not in INDEX_SYMS:
@@ -318,7 +373,6 @@ def run_state_machine_with_debug(messages):
                 option_type=opt_type, trigger_price=new_entry,
                 stop_loss=round(new_entry * sl_ratio), targets=last.targets,
             )
-            last_reentry_ts = ts_epoch
             msg_signals[msg.id] = re_sig
             has_above = bool(re.search(r'\bABOVE\b', upper))
             if has_above:
@@ -326,42 +380,47 @@ def run_state_machine_with_debug(messages):
                 trigger_held_msg_id = msg.id
                 debug_log.append({"msg_id": msg.id, "action": f"RE-ENTRY ABOVE → trigger_held: {re_sig.symbol} {int(re_sig.strike)} {opt_type} entry={new_entry}"})
             else:
-                executed.append({"signal": re_sig, "ts": ts_epoch, "reason": "re-entry",
-                                 "entry_time": ts.strftime("%H:%M"), "msg_id": msg.id})
-                last_executed_sig = re_sig
-                debug_log.append({"msg_id": msg.id, "action": f"RE-ENTRY EXECUTE: {re_sig.symbol} {int(re_sig.strike)} {opt_type} entry={new_entry}"})
+                if record_execution(re_sig, ts_epoch, "re-entry", ts.strftime("%H:%M"), msg.id):
+                    debug_log.append({"msg_id": msg.id, "action": f"RE-ENTRY EXECUTE: {re_sig.symbol} {int(re_sig.strike)} {opt_type} entry={new_entry}"})
             continue
 
         # AGAIN (reply-based re-entry)
         if msg.reply_to and msg.reply_to.reply_to_msg_id and re.search(r'\bAGAIN\b', upper):
-            reply_id = msg.reply_to.reply_to_msg_id
-            orig = msg_by_id.get(reply_id)
-            if orig and orig.text:
-                # Set fake clock for parsing the original message
-                _fake_now = ts_epoch
-                orig_sig = parse_signal_ch2(orig.text)
-                if orig_sig:
-                    re_sym = orig_sig.symbol.replace(" ", "").upper()
-                    if re_sym not in INDEX_SYMS:
-                        continue
-                    reply_sig = parse_signal_ch2(text)
-                    if reply_sig and reply_sig.stop_loss and reply_sig.targets:
-                        orig_sig = reply_sig
-                    executed.append({"signal": orig_sig, "ts": ts_epoch, "reason": "re-entry",
-                                     "entry_time": ts.strftime("%H:%M"), "msg_id": msg.id})
-                    last_executed_sig = orig_sig
-                    debug_log.append({"msg_id": msg.id, "action": f"AGAIN → EXECUTE: {orig_sig.symbol} {int(orig_sig.strike)} {orig_sig.option_type}"})
+            ref_sig = resolve_signal_via_chain(msg.reply_to.reply_to_msg_id)
+            if ref_sig:
+                re_sym = ref_sig.symbol.replace(" ", "").upper()
+                if re_sym not in INDEX_SYMS:
                     continue
+                reply_sig = parse_signal_ch2(text)
+                if reply_sig and reply_sig.stop_loss and reply_sig.targets:
+                    ref_sig = reply_sig
+                if record_execution(ref_sig, ts_epoch, "re-entry", ts.strftime("%H:%M"), msg.id):
+                    debug_log.append({"msg_id": msg.id, "action": f"AGAIN → EXECUTE: {ref_sig.symbol} {int(ref_sig.strike)} {ref_sig.option_type}"})
+                continue
 
         # Try parsing as new signal
+        # Track buffer state to register split signals under both msg IDs
+        had_pending = _cl._ch2_pending is not None
         sig = parse_signal_ch2(text)
+
+        # Detect buffer start: wasn't pending before, is now
+        if not had_pending and _cl._ch2_pending is not None:
+            buffer_start_id = msg.id
+            debug_log.append({"msg_id": msg.id, "action": f"BUFFER START: {_cl._ch2_pending.get('symbol')} {_cl._ch2_pending.get('strike')} {_cl._ch2_pending.get('opt_type')}"})
+
         if sig:
+            # If this completed a buffer, register under the original (first) msg too
+            if had_pending and _cl._ch2_pending is None and buffer_start_id:
+                msg_signals[buffer_start_id] = sig
+                debug_log.append({"msg_id": msg.id, "action": f"BUFFER COMPLETE: registered signal under both ID={buffer_start_id} and ID={msg.id}"})
+                buffer_start_id = None
+
             ch2_sym = sig.symbol.replace(" ", "").upper()
+            msg_signals[msg.id] = sig
             if ch2_sym not in INDEX_SYMS:
-                msg_signals[msg.id] = sig
                 debug_log.append({"msg_id": msg.id, "action": f"PARSED (non-index, skip): {sig.symbol} {int(sig.strike)} {sig.option_type}"})
                 continue
-            msg_signals[msg.id] = sig
+
             is_above = bool(re.search(r'\bABOVE\b', text, re.I)) or _cl._ch2_last_is_above
 
             if is_above:
@@ -376,15 +435,10 @@ def run_state_machine_with_debug(messages):
             debug_log.append({"msg_id": msg.id, "action": f"PARSED NEAR → queued: {sig.symbol} {int(sig.strike)} {sig.option_type} entry={sig.trigger_price} sl={sig.stop_loss} tgt={sig.targets}"})
             continue
 
-        # Check if buffer was updated
-        if _cl._ch2_pending:
-            debug_log.append({"msg_id": msg.id, "action": f"buffer: {_cl._ch2_pending}"})
-
     # Flush remaining
     if queued_signal:
-        executed.append({"signal": queued_signal, "ts": queued_ts, "reason": "end_flush",
-                         "entry_time": datetime.fromtimestamp(queued_ts, IST).strftime("%H:%M"),
-                         "msg_id": queued_msg_id})
+        record_execution(queued_signal, queued_ts, "end_flush",
+                         datetime.fromtimestamp(queued_ts, IST).strftime("%H:%M"), queued_msg_id)
 
     _fake_now = 0.0
     return executed, debug_log
