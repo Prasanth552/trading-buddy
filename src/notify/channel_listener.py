@@ -2407,6 +2407,7 @@ async def start_listener() -> None:
             # "Active"/"Actt" — execute held signal OR reply-to signal
             clean_ctl = re.sub(r'[\U0001F600-\U0001FAFF☀-➿❤️‍\s]+', '', text).strip()
             if (re.search(r'\bACTIVE\b|\bACTT\b', upper_ctl)
+                    and not re.search(r'NOT\s+ACTIVE', upper_ctl)
                     and len(clean_ctl) < 15):
                 act_sig = None
                 act_origin = event.message.id
