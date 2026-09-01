@@ -675,6 +675,14 @@ _ch2_last_is_above: bool = False
 _ch2_last_executed: ParsedSignal | None = None
 _ch2_last_reentry_ts: float = 0.0
 _ch2_msg_signals: dict[int, ParsedSignal] = {}  # msg_id → signal for reply tracking
+_ch2_msg_replies: dict[int, int] = {}  # msg_id → reply_to_msg_id (for chain walking)
+_ch2_executed_roots: set[int] = set()  # root signal IDs already executed
+_ch2_inst_to_root: dict[str, int] = {}  # instrument_key → root_id (fallback dedup)
+_ch2_inst_last_exec_ts: dict[str, float] = {}  # instrument_key → epoch (cooldown)
+_ch2_trigger_held_msg_id: int = 0
+_ch2_trigger_held_is_fallback: bool = False
+_ch2_buffer_start_id: int | None = None
+CH2_INST_COOLDOWN = 45 * 60  # 45-min same-instrument cooldown
 
 _RE_REENTRY = re.compile(
     r'(?:'
@@ -709,6 +717,87 @@ _CH2_SL_RE = re.compile(
     re.IGNORECASE,
 )
 _CH2_SKIP: set[str] = set()  # no skips — commodities enabled
+
+
+def _ch2_inst_key(sig: ParsedSignal) -> str:
+    return f"{sig.symbol.replace(' ', '').upper()} {int(sig.strike)} {sig.option_type}"
+
+
+def _ch2_resolve_signal_via_chain(start_msg_id: int) -> ParsedSignal | None:
+    """Walk reply chain upward until we find a msg_id registered in _ch2_msg_signals."""
+    visited: set[int] = set()
+    current = start_msg_id
+    while current:
+        if current in _ch2_msg_signals:
+            return _ch2_msg_signals[current]
+        if current in visited:
+            break
+        visited.add(current)
+        parent_reply = _ch2_msg_replies.get(current)
+        if parent_reply:
+            current = parent_reply
+        else:
+            break
+    return None
+
+
+def _ch2_find_root_signal_id(msg_id: int) -> int:
+    """Walk reply chain upward to find the topmost signal msg_id (root trade)."""
+    visited: set[int] = set()
+    current = msg_id
+    last_signal = msg_id if msg_id in _ch2_msg_signals else None
+    while current:
+        if current in visited:
+            break
+        visited.add(current)
+        if current in _ch2_msg_signals:
+            last_signal = current
+        parent_reply = _ch2_msg_replies.get(current)
+        if parent_reply:
+            current = parent_reply
+            continue
+        break
+    if current in _ch2_msg_signals:
+        last_signal = current
+    return last_signal or msg_id
+
+
+def _ch2_can_execute(sig: ParsedSignal, msg_id: int, origin_msg_id: int | None = None,
+                     is_fallback: bool = False) -> bool:
+    """Check instrument cooldown + root-signal dedup. Returns True if trade can proceed."""
+    if len(_ch2_msg_signals) > 500:
+        _ch2_msg_signals.clear()
+        _ch2_msg_replies.clear()
+        _ch2_executed_roots.clear()
+        _ch2_inst_to_root.clear()
+        _ch2_inst_last_exec_ts.clear()
+        log.info("[CH2] Cleared dedup state (>500 entries)")
+    key = _ch2_inst_key(sig)
+    now = _time.time()
+
+    if key in _ch2_inst_last_exec_ts:
+        elapsed = now - _ch2_inst_last_exec_ts[key]
+        if elapsed < CH2_INST_COOLDOWN:
+            log.info("[CH2] INST COOLDOWN: %s executed %.0fm ago (need %.0fm)",
+                     key, elapsed / 60, CH2_INST_COOLDOWN / 60)
+            return False
+
+    root_id = _ch2_find_root_signal_id(origin_msg_id or msg_id)
+
+    if is_fallback and key in _ch2_inst_to_root:
+        existing_root = _ch2_inst_to_root[key]
+        if existing_root in _ch2_executed_roots:
+            log.info("[CH2] FALLBACK DEDUP: %s → root=%d already executed", key, existing_root)
+            return False
+
+    if root_id in _ch2_executed_roots:
+        log.info("[CH2] ROOT DEDUP: %s root=%d already executed", key, root_id)
+        return False
+
+    _ch2_executed_roots.add(root_id)
+    _ch2_inst_to_root[key] = root_id
+    _ch2_inst_last_exec_ts[key] = now
+    return True
 
 
 def _loss_cap_for_channel(ch: str) -> float:
@@ -2270,6 +2359,7 @@ async def start_listener() -> None:
     @client.on(events.NewMessage(chats=listen_channels))
     async def on_signal(event):
         global _ch2_queued_signal, _ch2_queued_task, _ch2_trigger_held, _ch2_last_executed, _ch2_last_reentry_ts
+        global _ch2_trigger_held_msg_id, _ch2_trigger_held_is_fallback, _ch2_buffer_start_id
 
         text = event.message.text or ""
         if not text.strip():
@@ -2289,6 +2379,10 @@ async def start_listener() -> None:
 
         # --- CH2: handle control messages before parsing ---
         if channel == "ch2":
+            # Track reply chains for chain-walking
+            if event.message.reply_to and event.message.reply_to.reply_to_msg_id:
+                _ch2_msg_replies[event.message.id] = event.message.reply_to.reply_to_msg_id
+
             upper_ctl = text.strip().upper()
 
             # "WAIT FOR TRIGGER" — hold the queued signal, don't execute yet
@@ -2296,6 +2390,8 @@ async def start_listener() -> None:
                 if _ch2_queued_task and _ch2_queued_signal:
                     _ch2_queued_task.cancel()
                     _ch2_trigger_held = _ch2_queued_signal
+                    _ch2_trigger_held_msg_id = event.message.id
+                    _ch2_trigger_held_is_fallback = False
                     _ch2_queued_signal = None
                     _ch2_queued_task = None
                     log.info("[CH2] WAIT FOR TRIGGER — held: %s %s %s",
@@ -2312,50 +2408,57 @@ async def start_listener() -> None:
             clean_ctl = re.sub(r'[\U0001F600-\U0001FAFF☀-➿❤️‍\s]+', '', text).strip()
             if (re.search(r'\bACTIVE\b|\bACTT\b', upper_ctl)
                     and len(clean_ctl) < 15):
-                sig = None
-                # Try reply-to lookup first: "Active" replying to a signal/re-entry msg
+                act_sig = None
+                act_origin = event.message.id
+                act_is_fallback = False
+                # Try reply chain first
                 if event.message.reply_to and event.message.reply_to.reply_to_msg_id:
-                    reply_id = event.message.reply_to.reply_to_msg_id
-                    sig = _ch2_msg_signals.get(reply_id)
-                    if sig:
-                        log.info("[CH2] ACTIVE via reply to #%d: %s %s %s",
-                                 reply_id, sig.symbol, int(sig.strike), sig.option_type)
+                    act_sig = _ch2_resolve_signal_via_chain(event.message.reply_to.reply_to_msg_id)
+                    if act_sig:
+                        act_origin = event.message.id
+                        log.info("[CH2] ACTIVE via chain from #%d: %s %s %s",
+                                 event.message.reply_to.reply_to_msg_id,
+                                 act_sig.symbol, int(act_sig.strike), act_sig.option_type)
                 # Fall back to trigger_held
-                if not sig and _ch2_trigger_held:
-                    sig = _ch2_trigger_held
-                if sig:
+                if not act_sig and _ch2_trigger_held:
+                    act_sig = _ch2_trigger_held
+                    act_origin = _ch2_trigger_held_msg_id or event.message.id
+                    act_is_fallback = _ch2_trigger_held_is_fallback
+                if act_sig:
                     _ch2_trigger_held = None
-                    log.info("[CH2] ACTIVE — executing: %s %s %s",
-                             sig.symbol, int(sig.strike), sig.option_type)
-                    _notify(f"[CH2] Trigger ACTIVE — executing:\n"
-                            f"{sig.symbol} {int(sig.strike)} {sig.option_type}")
-                    _execute_and_notify(sig, channel, ch_label)
-                    _ch2_msg_signals[event.message.id] = sig
+                    if _ch2_can_execute(act_sig, event.message.id,
+                                        origin_msg_id=act_origin, is_fallback=act_is_fallback):
+                        log.info("[CH2] ACTIVE — executing: %s %s %s",
+                                 act_sig.symbol, int(act_sig.strike), act_sig.option_type)
+                        _notify(f"[CH2] Trigger ACTIVE — executing:\n"
+                                f"{act_sig.symbol} {int(act_sig.strike)} {act_sig.option_type}")
+                        _execute_and_notify(act_sig, channel, ch_label)
+                    _ch2_msg_signals[event.message.id] = act_sig
                 return
 
             # "Focus" as reply — hold the replied-to signal for later activation
             if (re.search(r'\bFOCUS\b', upper_ctl) and len(clean_ctl) < 15
                     and event.message.reply_to and event.message.reply_to.reply_to_msg_id):
-                reply_id = event.message.reply_to.reply_to_msg_id
-                ref_sig = _ch2_msg_signals.get(reply_id)
+                ref_sig = _ch2_resolve_signal_via_chain(event.message.reply_to.reply_to_msg_id)
                 if ref_sig:
                     _ch2_trigger_held = ref_sig
+                    _ch2_trigger_held_msg_id = event.message.id
+                    _ch2_trigger_held_is_fallback = False
                     _ch2_msg_signals[event.message.id] = ref_sig
                     trade_sym = f"{ref_sig.symbol} {int(ref_sig.strike)} {ref_sig.option_type}"
-                    log.info("[CH2] FOCUS reply to #%d — held: %s", reply_id, trade_sym)
+                    log.info("[CH2] FOCUS via chain — held: %s", trade_sym)
                     _notify(f"[CH2] Focus (held): {trade_sym}")
                     return
 
             # "Avoid" as reply — cancel the referenced signal
             if (re.search(r'\bAVOID\b', upper_ctl) and len(clean_ctl) < 15
                     and event.message.reply_to and event.message.reply_to.reply_to_msg_id):
-                reply_id = event.message.reply_to.reply_to_msg_id
-                ref_sig = _ch2_msg_signals.get(reply_id)
+                ref_sig = _ch2_resolve_signal_via_chain(event.message.reply_to.reply_to_msg_id)
                 if ref_sig:
                     trade_sym = f"{ref_sig.symbol} {int(ref_sig.strike)} {ref_sig.option_type}"
-                    if _ch2_trigger_held and _ch2_trigger_held is ref_sig:
+                    if _ch2_trigger_held and _ch2_inst_key(_ch2_trigger_held) == _ch2_inst_key(ref_sig):
                         _ch2_trigger_held = None
-                    log.info("[CH2] AVOID reply to #%d — skipping: %s", reply_id, trade_sym)
+                    log.info("[CH2] AVOID via chain — skipping: %s", trade_sym)
                     _notify(f"[CH2] Avoid (cancelled): {trade_sym}")
                     return
 
@@ -2386,15 +2489,20 @@ async def start_listener() -> None:
             # "Above last swing high", "Above X pe/ce side", "Below day low" etc.
             reentry_m = _RE_REENTRY.search(upper_ctl)
             if reentry_m:
-                # Determine reference signal: reply-to context OR last executed
                 last = None
-                if event.message.reply_to and event.message.reply_to.reply_to_msg_id:
-                    reply_id = event.message.reply_to.reply_to_msg_id
-                    last = _ch2_msg_signals.get(reply_id)
+                is_fallback = False
+                has_reply = bool(event.message.reply_to and event.message.reply_to.reply_to_msg_id)
+                if has_reply:
+                    last = _ch2_resolve_signal_via_chain(event.message.reply_to.reply_to_msg_id)
                     if last:
-                        log.info("[CH2] RE-ENTRY via reply to #%d", reply_id)
-                if not last:
+                        log.info("[CH2] RE-ENTRY via chain from #%d",
+                                 event.message.reply_to.reply_to_msg_id)
+                if not last and not has_reply:
                     last = _ch2_last_executed
+                    is_fallback = True
+                    if last:
+                        log.info("[CH2] RE-ENTRY FALLBACK to last_executed: %s %s",
+                                 last.symbol, int(last.strike))
                 if not last:
                     return
                 now_ts = _time.time()
@@ -2414,6 +2522,11 @@ async def start_listener() -> None:
                         break
                 side_m = re.search(r'(CE|PE)\s+SIDE', upper_ctl)
                 opt_type = side_m.group(1) if side_m else last.option_type
+                max_tgt = max(last.targets) if last.targets else 0
+                if new_entry > max_tgt * 1.5 and max_tgt > 0:
+                    log.info("[CH2] RE-ENTRY SKIP: entry=%.0f > max TGT=%.0f × 1.5 (wrong instrument)",
+                             new_entry, max_tgt)
+                    return
                 sl_ratio = last.stop_loss / last.trigger_price if last.trigger_price > 0 else 0.90
                 re_sig = ParsedSignal(
                     action="BUY",
@@ -2426,20 +2539,28 @@ async def start_listener() -> None:
                 )
                 trade_sym = f"{last.symbol} {int(last.strike)} {opt_type}"
                 _ch2_last_reentry_ts = now_ts
-                _ch2_msg_signals[event.message.id] = re_sig
+                if not is_fallback:
+                    _ch2_msg_signals[event.message.id] = re_sig
                 has_above = bool(re.search(r'\bABOVE\b', upper_ctl))
                 if has_above:
                     _ch2_trigger_held = re_sig
-                    log.info("[CH2] RE-ENTRY held (ABOVE): %s @ %.0f SL=%.0f",
-                             trade_sym, new_entry, re_sig.stop_loss)
+                    _ch2_trigger_held_msg_id = event.message.id
+                    _ch2_trigger_held_is_fallback = is_fallback
+                    log.info("[CH2] RE-ENTRY held (ABOVE%s): %s @ %.0f SL=%.0f",
+                             " FALLBACK" if is_fallback else "", trade_sym, new_entry, re_sig.stop_loss)
                     _notify(f"[CH2] Re-entry held (ABOVE trigger):\n"
                             f"{trade_sym} @ {new_entry} SL={re_sig.stop_loss}\n"
                             f"Waiting for Active...")
                 else:
-                    log.info("[CH2] RE-ENTRY executing: %s @ %.0f SL=%.0f",
-                             trade_sym, new_entry, re_sig.stop_loss)
-                    _notify(f"*[CH2] Re-entry executing:*\n{trade_sym} @ {new_entry}")
-                    _execute_and_notify(re_sig, channel, ch_label)
+                    if _ch2_can_execute(re_sig, event.message.id,
+                                        origin_msg_id=event.message.id,
+                                        is_fallback=is_fallback):
+                        log.info("[CH2] RE-ENTRY executing: %s @ %.0f SL=%.0f",
+                                 trade_sym, new_entry, re_sig.stop_loss)
+                        _notify(f"*[CH2] Re-entry executing:*\n{trade_sym} @ {new_entry}")
+                        _execute_and_notify(re_sig, channel, ch_label)
+                    else:
+                        log.info("[CH2] RE-ENTRY blocked by dedup: %s", trade_sym)
                 return
 
             # Re-entry via reply with "AGAIN" — parse original signal, execute
@@ -2447,40 +2568,44 @@ async def start_listener() -> None:
                     and re.search(r'\bAGAIN\b', upper_ctl)):
                 try:
                     reply_id = event.message.reply_to.reply_to_msg_id
-                    orig_msg = await client.get_messages(event.chat_id, ids=reply_id)
-                    if orig_msg and orig_msg.text:
-                        orig_sig = parse_signal_ch2(orig_msg.text)
-                        if orig_sig:
-                            re_sym = orig_sig.symbol.replace(" ", "").upper()
-                            trade_sym = f"{orig_sig.symbol} {int(orig_sig.strike)} {orig_sig.option_type}"
-                            if re_sym not in CH2_INDEX_ONLY:
-                                log.info("[CH2] RE-ENTRY skip non-index: %s", trade_sym)
-                                return
-                            reply_sig = parse_signal_ch2(text)
-                            if reply_sig and reply_sig.stop_loss and reply_sig.targets:
-                                orig_sig = reply_sig
-                            log.info("[CH2] RE-ENTRY executing: %s SL=%.1f TGT=%.1f",
-                                     trade_sym, orig_sig.stop_loss, orig_sig.targets[0])
-                            _notify(f"*[CH2] Re-entry executing:*\n{trade_sym}\n"
-                                    f"SL: {orig_sig.stop_loss} | TGT: {orig_sig.targets[0]}")
-                            _ch2_last_executed = orig_sig
-                            result = execute_signal(orig_sig, channel="ch2")
-                            if result["placed"]:
-                                _notify(f"*[CH2] Re-entry order placed*\n"
-                                        f"{result['symbol']} x{result['qty']}\n"
-                                        f"Entry: {result['entry']} | SL: {result['sl']} | "
-                                        f"Target: {result['target']}")
-                            if CH2F_ENABLED:
-                                _maybe_execute_ch2f(orig_sig)
+                    ref_sig = _ch2_resolve_signal_via_chain(reply_id)
+                    if not ref_sig:
+                        orig_msg = await client.get_messages(event.chat_id, ids=reply_id)
+                        if orig_msg and orig_msg.text:
+                            ref_sig = parse_signal_ch2(orig_msg.text)
+                    if ref_sig:
+                        re_sym = ref_sig.symbol.replace(" ", "").upper()
+                        trade_sym = f"{ref_sig.symbol} {int(ref_sig.strike)} {ref_sig.option_type}"
+                        if re_sym not in CH2_INDEX_ONLY:
+                            log.info("[CH2] RE-ENTRY skip non-index: %s", trade_sym)
                             return
+                        reply_sig = parse_signal_ch2(text)
+                        if reply_sig and reply_sig.stop_loss and reply_sig.targets:
+                            ref_sig = reply_sig
+                        if _ch2_can_execute(ref_sig, event.message.id,
+                                            origin_msg_id=event.message.id):
+                            log.info("[CH2] AGAIN executing: %s SL=%.1f TGT=%.1f",
+                                     trade_sym, ref_sig.stop_loss, ref_sig.targets[0])
+                            _notify(f"*[CH2] Re-entry executing:*\n{trade_sym}\n"
+                                    f"SL: {ref_sig.stop_loss} | TGT: {ref_sig.targets[0]}")
+                            _execute_and_notify(ref_sig, channel, ch_label)
+                        else:
+                            log.info("[CH2] AGAIN blocked by dedup: %s", trade_sym)
+                        _ch2_msg_signals[event.message.id] = ref_sig
+                        return
                 except Exception as exc:
                     log.warning("[CH2] Re-entry parse failed: %s", exc)
 
         # --- Parse signal ---
+        # --- Parse signal ---
         if channel == "ch3":
             sig = parse_signal_ch3(text)
         elif channel == "ch2":
+            had_pending = _ch2_pending is not None
             sig = parse_signal_ch2(text)
+            if not had_pending and _ch2_pending is not None:
+                _ch2_buffer_start_id = event.message.id
+                log.info("[CH2] Buffer start: msg %d", event.message.id)
         else:
             sig = parse_signal(text)
 
@@ -2495,10 +2620,22 @@ async def start_listener() -> None:
                     log.info("[CH2] Skipping non-index: %s %s %s",
                              sig.symbol, int(sig.strike), sig.option_type)
                     return
+
+                # If this completed a split buffer, register under the first msg too
+                completed_buffer_start = None
+                if had_pending and _ch2_pending is None and _ch2_buffer_start_id:
+                    _ch2_msg_signals[_ch2_buffer_start_id] = sig
+                    completed_buffer_start = _ch2_buffer_start_id
+                    _ch2_buffer_start_id = None
+                    log.info("[CH2] Buffer complete: registered under both %d and %d",
+                             completed_buffer_start, event.message.id)
+
                 _ch2_msg_signals[event.message.id] = sig
                 is_above = bool(re.search(r'\bABOVE\b', text, re.I)) or _ch2_last_is_above
                 if is_above:
                     _ch2_trigger_held = sig
+                    _ch2_trigger_held_msg_id = completed_buffer_start or event.message.id
+                    _ch2_trigger_held_is_fallback = False
                     _ch2_queued_signal = None
                     if _ch2_queued_task:
                         _ch2_queued_task.cancel()
@@ -2517,6 +2654,7 @@ async def start_listener() -> None:
                 _ch2_queued_signal = sig
                 _frozen_ch = channel
                 _frozen_lbl = ch_label
+                _frozen_msg_id = event.message.id
 
                 async def _ch2_delayed_exec():
                     global _ch2_queued_signal, _ch2_queued_task
@@ -2524,7 +2662,11 @@ async def start_listener() -> None:
                     if _ch2_queued_signal is sig:
                         _ch2_queued_signal = None
                         _ch2_queued_task = None
-                        _execute_and_notify(sig, _frozen_ch, _frozen_lbl)
+                        if _ch2_can_execute(sig, _frozen_msg_id, origin_msg_id=_frozen_msg_id):
+                            _execute_and_notify(sig, _frozen_ch, _frozen_lbl)
+                        else:
+                            log.info("[CH2] NEAR exec blocked by dedup: %s %s %s",
+                                     sig.symbol, int(sig.strike), sig.option_type)
 
                 _ch2_queued_task = asyncio.create_task(_ch2_delayed_exec())
                 log.info("[CH2] NEAR signal queued (5s): %s %s %s trigger=%.0f",
