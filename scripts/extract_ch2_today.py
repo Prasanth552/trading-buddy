@@ -186,17 +186,16 @@ def _inst_key(sig):
 
 
 def run_state_machine_with_debug(messages):
-    """Chain-aware CH2 state machine.
+    """Chain-aware CH2 state machine with root-signal dedup.
 
-    Key improvements over v1:
+    Key design:
     1. Registers split-buffer signals under the FIRST message's ID (the one
        reply chains point to), not just the completing message.
-    2. Walks reply chains recursively to resolve signals, instead of only
-       checking the direct parent.
-    3. Per-instrument dedup: same instrument can only execute once every 3 min
-       unless a genuinely new price trigger is given.
-    4. Drops the dangerous `last_executed_sig` fallback for re-entries — if the
-       chain doesn't resolve, the re-entry is skipped rather than mis-attributed.
+    2. Walks reply chains recursively to resolve signals.
+    3. Root-signal dedup: each unique root signal (the topmost signal in a reply
+       chain) executes at most ONCE. Re-entries and subsequent ACTIVEs on the
+       same root are skipped. This matches the operator's trade counting.
+    4. Drops the dangerous `last_executed_sig` fallback for re-entries.
     """
     global _fake_now
 
@@ -210,14 +209,12 @@ def run_state_machine_with_debug(messages):
     executed = []
     msg_signals = {}          # msg_id → ParsedSignal
     buffer_start_id = None    # tracks which msg_id started the split buffer
-    inst_last_exec_ts = {}    # instrument_key → last execution timestamp
-    last_reentry_ts = 0.0
+    executed_roots = set()    # root signal msg_ids that have been executed
     debug_log = []
 
     DELAY_SECS = 5
     MARKET_CLOSE_HR = 15
     MARKET_CLOSE_MIN = 30
-    INSTRUMENT_DEDUP_SECS = 180  # same instrument can't fire again within 3 min
 
     _cl._ch2_pending = None
     _cl._ch2_pending_ts = 0.0
@@ -239,23 +236,40 @@ def run_state_machine_with_debug(messages):
                 break
         return None
 
-    def can_execute_instrument(sig, ts_epoch):
-        """Per-instrument dedup: block if same instrument fired recently."""
-        key = _inst_key(sig)
-        prev = inst_last_exec_ts.get(key, 0)
-        return (ts_epoch - prev) >= INSTRUMENT_DEDUP_SECS
+    def find_root_signal_id(msg_id):
+        """Walk reply chain upward to find the topmost signal msg_id (root trade)."""
+        visited = set()
+        current = msg_id
+        last_signal = msg_id if msg_id in msg_signals else None
+        while current:
+            if current in visited:
+                break
+            visited.add(current)
+            if current in msg_signals:
+                last_signal = current
+            parent = msg_by_id.get(current)
+            if parent and parent.reply_to and parent.reply_to.reply_to_msg_id:
+                next_id = parent.reply_to.reply_to_msg_id
+                if next_id in msg_by_id:
+                    current = next_id
+                    continue
+            break
+        if current in msg_signals:
+            last_signal = current
+        return last_signal or msg_id
 
-    def record_execution(sig, ts_epoch, reason, entry_time, msg_id):
+    def record_execution(sig, ts_epoch, reason, entry_time, msg_id, origin_msg_id=None):
+        """Execute a trade, with root-signal dedup."""
         nonlocal last_executed_sig
-        key = _inst_key(sig)
-        if not can_execute_instrument(sig, ts_epoch):
+        root_id = find_root_signal_id(origin_msg_id or msg_id)
+        if root_id in executed_roots:
             debug_log.append({"msg_id": msg_id,
-                              "action": f"DEDUP BLOCKED: {key} (last exec {ts_epoch - inst_last_exec_ts.get(key, 0):.0f}s ago)"})
+                              "action": f"ROOT DEDUP: {_inst_key(sig)} root={root_id} already executed"})
             return False
+        executed_roots.add(root_id)
         executed.append({"signal": sig, "ts": ts_epoch, "reason": reason,
-                         "entry_time": entry_time, "msg_id": msg_id})
+                         "entry_time": entry_time, "msg_id": msg_id, "root_id": root_id})
         last_executed_sig = sig
-        inst_last_exec_ts[key] = ts_epoch
         msg_signals[msg_id] = sig
         return True
 
@@ -275,7 +289,8 @@ def run_state_machine_with_debug(messages):
         # Flush delayed queue
         if queued_signal and (ts_epoch - queued_ts) > DELAY_SECS:
             record_execution(queued_signal, queued_ts, "near_exec",
-                             datetime.fromtimestamp(queued_ts, IST).strftime("%H:%M"), queued_msg_id)
+                             datetime.fromtimestamp(queued_ts, IST).strftime("%H:%M"), queued_msg_id,
+                             origin_msg_id=queued_msg_id)
             debug_log.append({"msg_id": msg.id, "action": f"FLUSHED queued: {queued_signal.symbol} {int(queued_signal.strike)} {queued_signal.option_type}"})
             queued_signal = None
 
@@ -299,7 +314,8 @@ def run_state_machine_with_debug(messages):
             if not act_sig and trigger_held:
                 act_sig = trigger_held
             if act_sig:
-                if record_execution(act_sig, ts_epoch, "active_trigger", ts.strftime("%H:%M"), msg.id):
+                if record_execution(act_sig, ts_epoch, "active_trigger", ts.strftime("%H:%M"), msg.id,
+                                    origin_msg_id=trigger_held_msg_id or msg.id):
                     debug_log.append({"msg_id": msg.id, "action": f"ACTIVE → EXECUTE: {act_sig.symbol} {int(act_sig.strike)} {act_sig.option_type}"})
                 trigger_held = None
             else:
@@ -312,6 +328,7 @@ def run_state_machine_with_debug(messages):
             ref_sig = resolve_signal_via_chain(msg.reply_to.reply_to_msg_id)
             if ref_sig:
                 trigger_held = ref_sig
+                trigger_held_msg_id = msg.id
                 msg_signals[msg.id] = ref_sig
                 debug_log.append({"msg_id": msg.id, "action": f"FOCUS → trigger_held: {ref_sig.symbol} {int(ref_sig.strike)} {ref_sig.option_type}"})
             else:
@@ -380,7 +397,8 @@ def run_state_machine_with_debug(messages):
                 trigger_held_msg_id = msg.id
                 debug_log.append({"msg_id": msg.id, "action": f"RE-ENTRY ABOVE → trigger_held: {re_sig.symbol} {int(re_sig.strike)} {opt_type} entry={new_entry}"})
             else:
-                if record_execution(re_sig, ts_epoch, "re-entry", ts.strftime("%H:%M"), msg.id):
+                if record_execution(re_sig, ts_epoch, "re-entry", ts.strftime("%H:%M"), msg.id,
+                                    origin_msg_id=msg.id):
                     debug_log.append({"msg_id": msg.id, "action": f"RE-ENTRY EXECUTE: {re_sig.symbol} {int(re_sig.strike)} {opt_type} entry={new_entry}"})
             continue
 
@@ -394,7 +412,8 @@ def run_state_machine_with_debug(messages):
                 reply_sig = parse_signal_ch2(text)
                 if reply_sig and reply_sig.stop_loss and reply_sig.targets:
                     ref_sig = reply_sig
-                if record_execution(ref_sig, ts_epoch, "re-entry", ts.strftime("%H:%M"), msg.id):
+                if record_execution(ref_sig, ts_epoch, "re-entry", ts.strftime("%H:%M"), msg.id,
+                                    origin_msg_id=msg.id):
                     debug_log.append({"msg_id": msg.id, "action": f"AGAIN → EXECUTE: {ref_sig.symbol} {int(ref_sig.strike)} {ref_sig.option_type}"})
                 continue
 
@@ -438,7 +457,8 @@ def run_state_machine_with_debug(messages):
     # Flush remaining
     if queued_signal:
         record_execution(queued_signal, queued_ts, "end_flush",
-                         datetime.fromtimestamp(queued_ts, IST).strftime("%H:%M"), queued_msg_id)
+                         datetime.fromtimestamp(queued_ts, IST).strftime("%H:%M"), queued_msg_id,
+                         origin_msg_id=queued_msg_id)
 
     _fake_now = 0.0
     return executed, debug_log
@@ -526,9 +546,10 @@ async def main():
     print(f"\n  Total signals executed: {len(executed)}")
     for ex in executed:
         sig = ex["signal"]
+        root_info = f" root={ex.get('root_id', '?')}" if ex.get('root_id') else ""
         print(f"    {ex['entry_time']} {sig.symbol} {int(sig.strike)} {sig.option_type} "
               f"entry={sig.trigger_price} sl={sig.stop_loss} tgt={sig.targets} "
-              f"[{ex['reason']}]")
+              f"[{ex['reason']}]{root_info}")
 
     # ================================================================
     # PART 3: Simulate with actual candles
