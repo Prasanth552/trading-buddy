@@ -701,11 +701,11 @@ _CH2_ENTRY_RE = re.compile(
     re.IGNORECASE,
 )
 _CH2_TGT_RE = re.compile(
-    r'(?:TGT|TARGET)\s*[:\-]?\s*([\d\s,/.+\-]+)',
+    r'(?:TGT|TARGET)\s*[:\-]?\s*([\d\s,/.+\-l|]+)',
     re.IGNORECASE,
 )
 _CH2_SL_RE = re.compile(
-    r'(?:^|[^A-Z])(?:SL|Stop\s*loss)\s*(?:bel\w*\s*|use\s*)?(\d+(?:\.\d+)?(?:\s*[-–]\s*\d+)?)\s*(point)?',
+    r'(?:^|[^A-Z])(?:SL|Stop\s*loss)\s*(?:bel\w*\s*|use\s*|just\s+below\s*)?(\d+(?:\.\d+)?(?:\s*[-–]\s*\d+)?)\s*(po(?:int)?)?',
     re.IGNORECASE,
 )
 _CH2_SKIP: set[str] = set()  # no skips — commodities enabled
@@ -962,6 +962,7 @@ def parse_signal_ch2(text: str) -> ParsedSignal | None:
 
 def _ch2_extract_targets(tgt_match: re.Match) -> list[float]:
     raw = tgt_match.group(1)
+    raw = re.sub(r'\bll\b', '/', raw)
     nums = re.findall(r'\d+(?:\.\d+)?', raw)
     return [float(n) for n in nums if float(n) > 0]
 
