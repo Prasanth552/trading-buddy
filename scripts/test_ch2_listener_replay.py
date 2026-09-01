@@ -369,42 +369,66 @@ print(f"  Operator reported:    {len(recap)} trades")
 print(f"  Difference:           {len(executed) - len(recap):+d}")
 
 if recap:
-    recap_ids = {t.get("ref_id") for t in recap if t.get("ref_id")}
-    our_roots = set()
-    for ex in executed:
-        root = _ch2_find_root_signal_id(ex["msg_id"])
-        our_roots.add(root)
-
-    matched = 0
-    for rid in recap_ids:
-        if rid in our_roots or rid - 1 in our_roots or rid + 1 in our_roots:
-            matched += 1
-
-    print(f"\n  Operator refs matched: {matched}/{len(recap_ids)}")
-    unmatched_ops = []
+    # Build operator instruments from ref IDs → msg_signals lookup
+    recap_instruments = []
     for t in recap:
         rid = t.get("ref_id")
-        if rid and rid not in our_roots and rid - 1 not in our_roots and rid + 1 not in our_roots:
-            unmatched_ops.append(f"    Trade #{t['num']}: {t['result']} (ref {rid})")
-    if unmatched_ops:
-        print(f"\n  Operator trades we MISSED:")
-        for line in unmatched_ops:
-            print(line)
+        # Try to find the instrument from our msg_signals (check ±5 range for buffer offsets)
+        inst = None
+        if rid:
+            for offset in range(0, 6):
+                for check_id in (rid, rid + offset, rid - offset):
+                    if check_id in _cl._ch2_msg_signals:
+                        sig = _cl._ch2_msg_signals[check_id]
+                        inst = _ch2_inst_key(sig)
+                        break
+                if inst:
+                    break
+        recap_instruments.append({"num": t["num"], "result": t["result"], "ref_id": rid, "inst": inst})
 
-    our_extra = []
+    # Match by instrument name (much more reliable than root ID matching)
+    our_instruments = []
     for ex in executed:
-        root = _ch2_find_root_signal_id(ex["msg_id"])
-        found = False
-        for rid in recap_ids:
-            if abs(root - rid) <= 1:
-                found = True
+        key = _ch2_inst_key(ex["signal"])
+        our_instruments.append({"time": ex["time"], "inst": key, "reason": ex["reason"]})
+
+    # Greedy match: for each operator trade, find our trade with same instrument
+    used_ours = set()
+    matched_pairs = []
+    for op in recap_instruments:
+        best = None
+        for i, ours in enumerate(our_instruments):
+            if i in used_ours:
+                continue
+            if ours["inst"] == op["inst"]:
+                best = i
                 break
-        if not found:
-            key = _ch2_inst_key(ex["signal"])
-            our_extra.append(f"    {ex['time']} {key} (root={root})")
-    if our_extra:
-        print(f"\n  EXTRA trades (not in operator's recap):")
-        for line in our_extra:
-            print(line)
+        if best is not None:
+            used_ours.add(best)
+            matched_pairs.append((op, our_instruments[best]))
+
+    print(f"\n  Matched by instrument: {len(matched_pairs)}/{len(recap)}")
+    print()
+
+    # Show matched trades
+    print(f"  {'#':>3}  {'Operator':20s}  {'Result':6s}  {'Our time':8s}  {'Our reason':15s}")
+    print(f"  {'─'*3}  {'─'*20}  {'─'*6}  {'─'*8}  {'─'*15}")
+    for op, ours in matched_pairs:
+        inst = op["inst"] or "?"
+        print(f"  {op['num']:>3}  {inst:20s}  {op['result']:6s}  {ours['time']:8s}  {ours['reason']:15s}")
+
+    # Operator trades we missed
+    unmatched_ops = [op for op in recap_instruments if op not in [p[0] for p in matched_pairs]]
+    if unmatched_ops:
+        print(f"\n  Operator trades we MISSED ({len(unmatched_ops)}):")
+        for op in unmatched_ops:
+            print(f"    Trade #{op['num']}: {op['result']} (ref {op['ref_id']}) → {op['inst'] or '?'}")
+
+    # Our extra trades
+    extra = [our_instruments[i] for i in range(len(our_instruments)) if i not in used_ours]
+    if extra:
+        print(f"\n  EXTRA trades not in operator's recap ({len(extra)}):")
+        for ex in extra:
+            print(f"    {ex['time']} {ex['inst']} [{ex['reason']}]")
 
 print()
