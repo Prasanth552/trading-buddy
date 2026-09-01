@@ -212,6 +212,8 @@ def run_state_machine_with_debug(messages):
     buffer_start_id = None    # tracks which msg_id started the split buffer
     executed_roots = set()    # root signal msg_ids that have been executed
     inst_to_root = {}         # instrument_key → most recent root_id (for fallback dedup)
+    inst_last_exec_ts = {}    # instrument_key → epoch of last execution (cooldown dedup)
+    INST_COOLDOWN_SECS = 45 * 60  # same instrument can't re-enter within 45 min
     debug_log = []
 
     DELAY_SECS = 5
@@ -262,10 +264,20 @@ def run_state_machine_with_debug(messages):
 
     def record_execution(sig, ts_epoch, reason, entry_time, msg_id, origin_msg_id=None,
                          is_fallback_reentry=False):
-        """Execute a trade, with root-signal + instrument dedup for fallbacks."""
+        """Execute a trade, with root-signal + instrument cooldown + root dedup."""
         nonlocal last_executed_sig
         key = _inst_key(sig)
         root_id = find_root_signal_id(origin_msg_id or msg_id)
+
+        # Instrument cooldown: operator can't hold two positions on the same
+        # instrument simultaneously.  Skip if same instrument was executed
+        # within INST_COOLDOWN_SECS.
+        if key in inst_last_exec_ts:
+            elapsed = ts_epoch - inst_last_exec_ts[key]
+            if elapsed < INST_COOLDOWN_SECS:
+                debug_log.append({"msg_id": msg_id,
+                                  "action": f"INST COOLDOWN: {key} executed {elapsed/60:.0f}m ago (need {INST_COOLDOWN_SECS/60:.0f}m)"})
+                return False
 
         # For fallback re-entries (no reply chain): use the instrument's existing
         # root if one exists, so they dedup against the original trade
@@ -282,6 +294,7 @@ def run_state_machine_with_debug(messages):
             return False
         executed_roots.add(root_id)
         inst_to_root[key] = root_id
+        inst_last_exec_ts[key] = ts_epoch
         executed.append({"signal": sig, "ts": ts_epoch, "reason": reason,
                          "entry_time": entry_time, "msg_id": msg_id, "root_id": root_id})
         last_executed_sig = sig
