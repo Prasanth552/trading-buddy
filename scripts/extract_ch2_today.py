@@ -159,13 +159,14 @@ def walk_candles_detailed(candles, entry, sl, targets, qty):
                 return hit, "TGT_ALL", pnl, peak_pnl, trail
             cur_sl = hit
 
+        if cur_sl and c["low"] <= cur_sl:
+            sl_pnl = (cur_sl - entry) * qty
+            if sl_pnl >= -CH2_MAX_LOSS:
+                return cur_sl, "SL", sl_pnl, peak_pnl, trail
+
         if CH2_MAX_LOSS > 0 and low_pnl <= -CH2_MAX_LOSS:
             exit_price = entry - (CH2_MAX_LOSS / qty)
             return exit_price, "MAX_SL", -CH2_MAX_LOSS, peak_pnl, trail
-
-        if cur_sl and c["low"] <= cur_sl:
-            pnl = (cur_sl - entry) * qty
-            return cur_sl, "SL", pnl, peak_pnl, trail
 
         candle_peak = (c["high"] - entry) * qty
         peak_pnl = max(peak_pnl, candle_peak)
