@@ -412,6 +412,15 @@ def run_state_machine_with_debug(messages):
                     break
             side_m = re.search(r'(CE|PE)\s+SIDE', upper)
             opt_type = side_m.group(1) if side_m else last.option_type
+
+            # Sanity check: if new entry > max target, the trigger price doesn't
+            # belong to this instrument (e.g. "Above 451" from SENSEX applied to
+            # NIFTY PE at 125). Skip.
+            max_tgt = max(last.targets) if last.targets else 0
+            if new_entry > max_tgt * 1.5 and max_tgt > 0:
+                debug_log.append({"msg_id": msg.id, "action": f"RE-ENTRY SKIP: entry={new_entry} > max TGT={max_tgt} × 1.5 (wrong instrument)"})
+                continue
+
             sl_ratio = last.stop_loss / last.trigger_price if last.trigger_price > 0 else 0.90
             re_sig = ParsedSignal(
                 action="BUY", symbol=last.symbol, strike=last.strike,
@@ -625,6 +634,23 @@ async def main():
             continue
 
         entry_price = filtered[0]["open"]
+
+        # Validate: skip garbage signals where entry > all targets or
+        # trigger price is wildly inconsistent with actual option price
+        valid_tgts = [t for t in sig.targets if t > entry_price]
+        if not valid_tgts:
+            print(f"  {entry_time} {sym_str} [{ex['reason']}]")
+            print(f"    Signal:  trigger={sig.trigger_price} SL={sig.stop_loss} TGT={sig.targets}")
+            print(f"    SKIPPED: no targets above actual entry {entry_price:.1f} (garbage re-entry)")
+            print()
+            continue
+        if abs(sig.trigger_price - entry_price) / max(entry_price, 1) > 2.0:
+            print(f"  {entry_time} {sym_str} [{ex['reason']}]")
+            print(f"    Signal:  trigger={sig.trigger_price} SL={sig.stop_loss} TGT={sig.targets}")
+            print(f"    SKIPPED: trigger {sig.trigger_price} vs actual {entry_price:.1f} (>200% off, wrong instrument)")
+            print()
+            continue
+
         exit_price, result, pnl, peak_pnl, trail = walk_candles_detailed(
             filtered, entry_price, sig.stop_loss, list(sig.targets), qty
         )
