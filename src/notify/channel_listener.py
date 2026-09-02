@@ -730,6 +730,8 @@ _ch2_inst_to_root: dict[str, int] = {}  # instrument_key → root_id (fallback d
 _ch2_inst_last_exec_ts: dict[str, float] = {}  # instrument_key → epoch (cooldown)
 _ch2_trigger_held_msg_id: int = 0
 _ch2_trigger_held_is_fallback: bool = False
+_ch2_trigger_held_is_reentry: bool = False
+_ch2_reentry_origins: set[int] = set()
 _ch2_buffer_start_id: int | None = None
 _ch2_buffer_links: dict[int, int] = {}  # completion_msg_id → buffer_start_id (split-signal dedup)
 CH2_INST_COOLDOWN = 10 * 60  # 10-min same-instrument cooldown
@@ -2421,7 +2423,8 @@ async def start_listener() -> None:
     @client.on(events.NewMessage(chats=listen_channels))
     async def on_signal(event):
         global _ch2_queued_signal, _ch2_queued_task, _ch2_trigger_held, _ch2_last_executed, _ch2_last_reentry_ts
-        global _ch2_trigger_held_msg_id, _ch2_trigger_held_is_fallback, _ch2_buffer_start_id
+        global _ch2_trigger_held_msg_id, _ch2_trigger_held_is_fallback, _ch2_trigger_held_is_reentry
+        global _ch2_buffer_start_id, _ch2_reentry_origins
 
         text = event.message.text or ""
         if not text.strip():
@@ -2454,6 +2457,7 @@ async def start_listener() -> None:
                     _ch2_trigger_held = _ch2_queued_signal
                     _ch2_trigger_held_msg_id = event.message.id
                     _ch2_trigger_held_is_fallback = False
+                    _ch2_trigger_held_is_reentry = False
                     _ch2_queued_signal = None
                     _ch2_queued_task = None
                     log.info("[CH2] WAIT FOR TRIGGER — held: %s %s %s",
@@ -2513,15 +2517,23 @@ async def start_listener() -> None:
                         log.info("[CH2] ACTIVE via chain from #%d: %s %s %s",
                                  event.message.reply_to.reply_to_msg_id,
                                  act_sig.symbol, int(act_sig.strike), act_sig.option_type)
+                # Check if reply chain resolved through a re-entry origin
+                act_is_reentry = bool(
+                    event.message.reply_to
+                    and event.message.reply_to.reply_to_msg_id in _ch2_reentry_origins
+                ) if act_sig else False
                 # Fall back to trigger_held
                 if not act_sig and _ch2_trigger_held:
                     act_sig = _ch2_trigger_held
                     act_origin = _ch2_trigger_held_msg_id or event.message.id
                     act_is_fallback = _ch2_trigger_held_is_fallback
+                    act_is_reentry = _ch2_trigger_held_is_reentry
                 if act_sig:
                     _ch2_trigger_held = None
+                    _ch2_trigger_held_is_reentry = False
                     if _ch2_can_execute(act_sig, event.message.id,
-                                        origin_msg_id=act_origin, is_fallback=act_is_fallback):
+                                        origin_msg_id=act_origin, is_fallback=act_is_fallback,
+                                        own_root=act_is_reentry):
                         log.info("[CH2] ACTIVE — executing: %s %s %s",
                                  act_sig.symbol, int(act_sig.strike), act_sig.option_type)
                         _notify(f"[CH2] Trigger ACTIVE — executing:\n"
@@ -2538,6 +2550,7 @@ async def start_listener() -> None:
                     _ch2_trigger_held = ref_sig
                     _ch2_trigger_held_msg_id = event.message.id
                     _ch2_trigger_held_is_fallback = False
+                    _ch2_trigger_held_is_reentry = False
                     _ch2_msg_signals[event.message.id] = ref_sig
                     trade_sym = f"{ref_sig.symbol} {int(ref_sig.strike)} {ref_sig.option_type}"
                     log.info("[CH2] FOCUS via chain — held: %s", trade_sym)
@@ -2630,6 +2643,7 @@ async def start_listener() -> None:
                 trade_sym = f"{last.symbol} {int(last.strike)} {opt_type}"
                 _ch2_last_reentry_ts = now_ts
                 _ch2_msg_signals[event.message.id] = re_sig
+                _ch2_reentry_origins.add(event.message.id)
                 has_above = bool(re.search(r'\bABO(?:VE)?\b', upper_ctl))
                 # A re-entry with a specific numeric price different from the
                 # original trigger is a real entry instruction ("Near 320 try
@@ -2652,6 +2666,7 @@ async def start_listener() -> None:
                     _ch2_trigger_held = re_sig
                     _ch2_trigger_held_msg_id = event.message.id
                     _ch2_trigger_held_is_fallback = is_fallback
+                    _ch2_trigger_held_is_reentry = True
                     log.info("[CH2] RE-ENTRY held (%s%s): %s @ %.0f SL=%.0f",
                              "ABOVE" if has_above else "GUIDANCE",
                              " FALLBACK" if is_fallback else "", trade_sym, new_entry, re_sig.stop_loss)
@@ -2724,6 +2739,7 @@ async def start_listener() -> None:
                     _ch2_trigger_held = sig
                     _ch2_trigger_held_msg_id = completed_buffer_start or event.message.id
                     _ch2_trigger_held_is_fallback = False
+                    _ch2_trigger_held_is_reentry = False
                     _ch2_queued_signal = None
                     if _ch2_queued_task:
                         _ch2_queued_task.cancel()

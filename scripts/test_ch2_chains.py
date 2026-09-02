@@ -83,6 +83,8 @@ def run_scenario(name, messages):
 
     executed = []
     queued = None  # (signal, ts, msg_id)
+    trigger_held_is_reentry = False
+    reentry_origins = set()
     DELAY = 5
 
     try:
@@ -115,6 +117,7 @@ def run_scenario(name, messages):
                     _cl._ch2_trigger_held = queued[0]
                     _cl._ch2_trigger_held_msg_id = queued[2]
                     _cl._ch2_trigger_held_is_fallback = False
+                    trigger_held_is_reentry = False
                     queued = None
                 continue
 
@@ -129,13 +132,17 @@ def run_scenario(name, messages):
                     act_sig = _ch2_resolve_signal_via_chain(reply_to)
                     if act_sig:
                         act_origin = msg_id
+                act_is_reentry = bool(act_sig and reply_to and reply_to in reentry_origins)
                 if not act_sig and _cl._ch2_trigger_held:
                     act_sig = _cl._ch2_trigger_held
                     act_origin = _cl._ch2_trigger_held_msg_id or msg_id
                     act_fb = _cl._ch2_trigger_held_is_fallback
+                    act_is_reentry = trigger_held_is_reentry
                 if act_sig:
                     _cl._ch2_trigger_held = None
-                    if _ch2_can_execute(act_sig, msg_id, origin_msg_id=act_origin, is_fallback=act_fb):
+                    trigger_held_is_reentry = False
+                    if _ch2_can_execute(act_sig, msg_id, origin_msg_id=act_origin, is_fallback=act_fb,
+                                        own_root=act_is_reentry):
                         executed.append({"inst": _ch2_inst_key(act_sig), "time": dt.strftime("%H:%M"),
                                          "reason": "active", "msg_id": msg_id})
                         _cl._ch2_last_executed = act_sig
@@ -149,6 +156,7 @@ def run_scenario(name, messages):
                     _cl._ch2_trigger_held = ref
                     _cl._ch2_trigger_held_msg_id = msg_id
                     _cl._ch2_trigger_held_is_fallback = False
+                    trigger_held_is_reentry = False
                     _cl._ch2_msg_signals[msg_id] = ref
                 continue
 
@@ -198,6 +206,7 @@ def run_scenario(name, messages):
                                       option_type=opt_type, trigger_price=new_entry,
                                       stop_loss=round(new_entry * sl_ratio), targets=last.targets)
                 _cl._ch2_msg_signals[msg_id] = re_sig
+                reentry_origins.add(msg_id)
                 has_above = bool(re.search(r'\bABOVE\b', upper))
                 has_new_price = (new_entry != last.trigger_price)
                 if has_new_price and not has_above:
@@ -210,6 +219,7 @@ def run_scenario(name, messages):
                     _cl._ch2_trigger_held = re_sig
                     _cl._ch2_trigger_held_msg_id = msg_id
                     _cl._ch2_trigger_held_is_fallback = is_fb
+                    trigger_held_is_reentry = True
                 continue
 
             # Parse signal
@@ -232,6 +242,7 @@ def run_scenario(name, messages):
                     _cl._ch2_trigger_held = sig
                     _cl._ch2_trigger_held_msg_id = completed_start or msg_id
                     _cl._ch2_trigger_held_is_fallback = False
+                    trigger_held_is_reentry = False
                     continue
                 queued = (sig, ts_epoch, msg_id)
                 continue
@@ -317,9 +328,9 @@ msgs = [
     make_msg(303, "Above 170 again", make_epoch(9, 40), reply_to=300),  # re-entry via chain
     make_msg(304, "Active", make_epoch(9, 41), reply_to=303),
 ]
-# Root dedup: 302 and 304 share root 300 → only first executes
-check("Re-entry ACTIVE deduped by root (same root=300)",
-      run_scenario("t3", msgs), ["NIFTY 24200 PE"])
+# Re-entry is a legitimate new trade when confirmed by ACTIVE
+check("Re-entry ACTIVE → 2 trades (own_root bypasses root dedup)",
+      run_scenario("t3", msgs), ["NIFTY 24200 PE", "NIFTY 24200 PE"])
 
 
 # --- Test 4: FOCUS → ACTIVE ---
@@ -514,6 +525,21 @@ msgs = [
 ]
 check("Near 320 (new price) → executes without ACTIVE",
       run_scenario("t15c", msgs), ["SENSEX 76400 PE", "SENSEX 76400 PE"])
+
+
+# --- Test 15d: Re-entry guidance (same price) + ACTIVE → new trade via own_root ---
+print("\n  15d. Re-entry guidance (\"Above day high again focus\") + ACTIVE → new trade")
+msgs = [
+    make_msg(1530, "SENSEX 76400 PE\nABOVE 345", make_epoch(9, 27)),
+    make_msg(1531, "TGT 365/400/460\nSL 315", make_epoch(9, 27, 10)),
+    make_msg(1532, "Active", make_epoch(9, 28), reply_to=1530),
+    # Re-entry guidance (same price, has ABOVE) — held as trigger_held with is_reentry=True
+    make_msg(1533, "Above day high again focus with tight sl", make_epoch(9, 48), reply_to=1530),
+    # ACTIVE confirms re-entry — should execute as NEW trade (own_root=True, not blocked by root dedup)
+    make_msg(1534, "Active", make_epoch(9, 49), reply_to=1533),
+]
+check("Re-entry guidance + ACTIVE → 2 trades (own_root bypasses root dedup)",
+      run_scenario("t15d", msgs), ["SENSEX 76400 PE", "SENSEX 76400 PE"])
 
 
 # --- Test 16: Fallback re-entry respects inst_to_root dedup ---

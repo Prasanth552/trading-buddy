@@ -261,6 +261,8 @@ def run_state_machine_with_debug(messages):
     trigger_held = None
     trigger_held_msg_id = 0
     trigger_held_is_fallback = False
+    trigger_held_is_reentry = False
+    reentry_origins = set()   # msg_ids from re-entry handler (for ACTIVE own_root)
     last_executed_sig = None
     executed = []
     msg_signals = {}          # msg_id → ParsedSignal
@@ -386,6 +388,7 @@ def run_state_machine_with_debug(messages):
                 trigger_held = queued_signal
                 trigger_held_msg_id = queued_msg_id
                 trigger_held_is_fallback = False
+                trigger_held_is_reentry = False
                 queued_signal = None
                 debug_log.append({"msg_id": msg.id, "action": "WAIT_TRIGGER: moved queued → trigger_held"})
             else:
@@ -433,17 +436,24 @@ def run_state_machine_with_debug(messages):
                 if act_sig:
                     act_origin = msg.id
                     act_from_chain = True
+            act_is_reentry = bool(
+                act_from_chain and msg.reply_to
+                and msg.reply_to.reply_to_msg_id in reentry_origins
+            )
             if not act_sig and trigger_held:
                 act_sig = trigger_held
                 act_origin = trigger_held_msg_id or msg.id
                 act_from_chain = False
+                act_is_reentry = trigger_held_is_reentry
             if act_sig:
                 act_is_fallback = (not act_from_chain) and trigger_held_is_fallback
                 if record_execution(act_sig, ts_epoch, "active_trigger", ts.strftime("%H:%M"), msg.id,
-                                    origin_msg_id=act_origin, is_fallback_reentry=act_is_fallback):
+                                    origin_msg_id=act_origin, is_fallback_reentry=act_is_fallback,
+                                    own_root=act_is_reentry):
                     src = "chain" if act_from_chain else "trigger_held"
                     debug_log.append({"msg_id": msg.id, "action": f"ACTIVE ({src}) → EXECUTE: {act_sig.symbol} {int(act_sig.strike)} {act_sig.option_type}"})
                 trigger_held = None
+                trigger_held_is_reentry = False
             else:
                 debug_log.append({"msg_id": msg.id, "action": "ACTIVE but nothing held/replied"})
             continue
@@ -456,6 +466,7 @@ def run_state_machine_with_debug(messages):
                 trigger_held = ref_sig
                 trigger_held_msg_id = msg.id
                 trigger_held_is_fallback = False
+                trigger_held_is_reentry = False
                 msg_signals[msg.id] = ref_sig
                 debug_log.append({"msg_id": msg.id, "action": f"FOCUS → trigger_held: {ref_sig.symbol} {int(ref_sig.strike)} {ref_sig.option_type}"})
             else:
@@ -525,6 +536,7 @@ def run_state_machine_with_debug(messages):
                 stop_loss=round(new_entry * sl_ratio), targets=last.targets,
             )
             msg_signals[msg.id] = re_sig
+            reentry_origins.add(msg.id)
             has_above = bool(re.search(r'\bABO(?:VE)?\b', upper))
             has_new_price = (new_entry != last.trigger_price)
             # Re-entry with a specific new price ("Near 320 try with tight
@@ -540,6 +552,7 @@ def run_state_machine_with_debug(messages):
                 trigger_held = re_sig
                 trigger_held_msg_id = msg.id
                 trigger_held_is_fallback = is_fallback
+                trigger_held_is_reentry = True
                 debug_log.append({"msg_id": msg.id, "action": f"RE-ENTRY {'ABOVE' if has_above else 'GUIDANCE'} → trigger_held: {re_sig.symbol} {int(re_sig.strike)} {opt_type} entry={new_entry}" + (" [FALLBACK]" if is_fallback else "")})
             continue
 
@@ -581,9 +594,9 @@ def run_state_machine_with_debug(messages):
 
             if is_above:
                 trigger_held = sig
-                # Use buffer start ID so root resolution traces to the first msg
                 trigger_held_msg_id = completed_buffer_start or msg.id
                 trigger_held_is_fallback = False
+                trigger_held_is_reentry = False
                 debug_log.append({"msg_id": msg.id, "action": f"PARSED ABOVE → trigger_held: {sig.symbol} {int(sig.strike)} {sig.option_type} entry={sig.trigger_price} sl={sig.stop_loss} tgt={sig.targets}"})
                 continue
 
