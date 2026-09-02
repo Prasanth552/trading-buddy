@@ -205,11 +205,13 @@ def walk_candles_detailed(candles, entry, sl, targets, qty):
                        "l": c["low"], "c": c["close"],
                        "pnl_range": f"₹{low_pnl:+,.0f} to ₹{high_pnl:+,.0f}"})
 
-        # Exit at first TGT hit
+        # Check TGT BEFORE SL within same candle (optimistic ordering)
         if remaining and c["high"] >= remaining[0]:
-            hit = remaining[0]
-            pnl = (hit - entry) * qty
-            return hit, "TGT1", pnl, peak_pnl, trail
+            hit = remaining.pop(0)
+            if not remaining:
+                pnl = (hit - entry) * qty
+                return hit, "TGT_ALL", pnl, peak_pnl, trail
+            cur_sl = hit
 
         if cur_sl and c["low"] <= cur_sl:
             sl_pnl = (cur_sl - entry) * qty
@@ -275,6 +277,7 @@ def run_state_machine_with_debug(messages):
     DELAY_SECS = 5
     MARKET_CLOSE_HR = 15
     MARKET_CLOSE_MIN = 30
+    last_near_flush_ts = 0.0  # epoch when a NEAR signal was auto-flushed
 
     _cl._ch2_pending = None
     _cl._ch2_pending_ts = 0.0
@@ -378,6 +381,7 @@ def run_state_machine_with_debug(messages):
                              datetime.fromtimestamp(queued_ts, IST).strftime("%H:%M"), queued_msg_id,
                              origin_msg_id=queued_msg_id)
             debug_log.append({"msg_id": msg.id, "action": f"FLUSHED queued: {queued_signal.symbol} {int(queued_signal.strike)} {queued_signal.option_type}"})
+            last_near_flush_ts = ts_epoch
             queued_signal = None
 
         # WAIT FOR TRIGGER
@@ -439,6 +443,11 @@ def run_state_machine_with_debug(messages):
                 and msg.reply_to.reply_to_msg_id in reentry_origins
             )
             if not act_sig and trigger_held:
+                # If a NEAR just auto-flushed within 90s, bare Active (no reply)
+                # is confirming that flush, not firing trigger_held
+                if not (msg.reply_to and msg.reply_to.reply_to_msg_id) and (ts_epoch - last_near_flush_ts) < 90:
+                    debug_log.append({"msg_id": msg.id, "action": "ACTIVE ignored: NEAR just flushed, bare Active is confirming flush"})
+                    continue
                 act_sig = trigger_held
                 act_origin = trigger_held_msg_id or msg.id
                 act_from_chain = False

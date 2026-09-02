@@ -85,6 +85,7 @@ def run_scenario(name, messages):
     queued = None  # (signal, ts, msg_id)
     trigger_held_is_reentry = False
     reentry_origins = set()
+    last_near_flush_ts = 0.0
     DELAY = 5
 
     try:
@@ -109,6 +110,7 @@ def run_scenario(name, messages):
                     t = datetime.fromtimestamp(qts, IST).strftime("%H:%M")
                     executed.append({"inst": _ch2_inst_key(sig), "time": t, "reason": "near_exec", "msg_id": qid})
                     _cl._ch2_last_executed = sig
+                last_near_flush_ts = ts_epoch
                 queued = None
 
             # WAIT FOR TRIGGER
@@ -134,6 +136,8 @@ def run_scenario(name, messages):
                         act_origin = msg_id
                 act_is_reentry = bool(act_sig and reply_to and reply_to in reentry_origins)
                 if not act_sig and _cl._ch2_trigger_held:
+                    if not reply_to and (ts_epoch - last_near_flush_ts) < 90:
+                        continue
                     act_sig = _cl._ch2_trigger_held
                     act_origin = _cl._ch2_trigger_held_msg_id or msg_id
                     act_fb = _cl._ch2_trigger_held_is_fallback
@@ -556,6 +560,26 @@ msgs = [
 # Instrument cooldown: 11:35 is 5m from 11:30 → blocked
 check("Fallback re-entry blocked by instrument cooldown",
       run_scenario("t16", msgs), ["NIFTY 24100 CE"])
+
+
+# --- Test 17: Bare Active after NEAR flush → confirms flush, not trigger_held ---
+print("\n  17. Bare Active after NEAR flush ignores trigger_held")
+msgs = [
+    make_msg(1700, "SENSEX 76400 PE\nABOVE 345", make_epoch(9, 18)),
+    make_msg(1701, "TGT 365/400/460\nSL 315", make_epoch(9, 18, 10)),
+    make_msg(1702, "Active", make_epoch(9, 22), reply_to=1700),
+    # Re-entry held as trigger_held
+    make_msg(1703, "Near same range again try with tight sl", make_epoch(9, 47), reply_to=1700),
+    # NEAR signal for different instrument (must be in CH2_INDEX_ONLY)
+    make_msg(1710, "BANKNIFTY 51200 PE\nNEAR 180", make_epoch(9, 48)),
+    make_msg(1711, "TGT 190/205/220/250\nSL 173", make_epoch(9, 48, 10)),
+    # Bare Active 60s after NEAR flush — should confirm BANKNIFTY, not fire SENSEX trigger_held
+    make_msg(1712, "Active", make_epoch(9, 49, 30)),
+]
+# BANKNIFTY flushes as near_exec. Active at 09:49:30 has no reply → within 90s of flush → ignored.
+# Only SENSEX (via Active reply at 09:22) and BANKNIFTY (near_exec) execute. No extra SENSEX re-entry.
+check("Bare Active after NEAR flush → only 2 trades (no ghost trigger_held fire)",
+      run_scenario("t17", msgs), ["SENSEX 76400 PE", "BANKNIFTY 51200 PE"])
 
 
 # ============================================================================

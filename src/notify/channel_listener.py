@@ -732,6 +732,7 @@ _ch2_trigger_held_msg_id: int = 0
 _ch2_trigger_held_is_fallback: bool = False
 _ch2_trigger_held_is_reentry: bool = False
 _ch2_reentry_origins: set[int] = set()
+_ch2_last_near_flush_ts: float = 0.0
 _ch2_buffer_start_id: int | None = None
 _ch2_buffer_links: dict[int, int] = {}  # completion_msg_id → buffer_start_id (split-signal dedup)
 CH2_INST_COOLDOWN = 10 * 60  # 10-min same-instrument cooldown
@@ -2524,6 +2525,12 @@ async def start_listener() -> None:
                 ) if act_sig else False
                 # Fall back to trigger_held
                 if not act_sig and _ch2_trigger_held:
+                    # If a NEAR just auto-flushed within 90s, bare Active (no reply)
+                    # is confirming that flush, not firing trigger_held
+                    has_reply = event.message.reply_to and event.message.reply_to.reply_to_msg_id
+                    if not has_reply and (_time.time() - _ch2_last_near_flush_ts) < 90:
+                        log.info("[CH2] ACTIVE ignored: NEAR just flushed, bare Active confirms flush")
+                        return
                     act_sig = _ch2_trigger_held
                     act_origin = _ch2_trigger_held_msg_id or event.message.id
                     act_is_fallback = _ch2_trigger_held_is_fallback
@@ -2761,11 +2768,12 @@ async def start_listener() -> None:
                 _frozen_msg_id = event.message.id
 
                 async def _ch2_delayed_exec():
-                    global _ch2_queued_signal, _ch2_queued_task
+                    global _ch2_queued_signal, _ch2_queued_task, _ch2_last_near_flush_ts
                     await asyncio.sleep(5)
                     if _ch2_queued_signal is sig:
                         _ch2_queued_signal = None
                         _ch2_queued_task = None
+                        _ch2_last_near_flush_ts = _time.time()
                         if _ch2_can_execute(sig, _frozen_msg_id, origin_msg_id=_frozen_msg_id):
                             _execute_and_notify(sig, _frozen_ch, _frozen_lbl)
                         else:
