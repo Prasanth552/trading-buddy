@@ -321,11 +321,11 @@ def run_state_machine_with_debug(messages):
         return last_signal or msg_id
 
     def record_execution(sig, ts_epoch, reason, entry_time, msg_id, origin_msg_id=None,
-                         is_fallback_reentry=False):
+                         is_fallback_reentry=False, own_root=False):
         """Execute a trade, with root-signal + instrument cooldown + root dedup."""
         nonlocal last_executed_sig
         key = _inst_key(sig)
-        root_id = find_root_signal_id(origin_msg_id or msg_id)
+        root_id = msg_id if own_root else find_root_signal_id(origin_msg_id or msg_id)
 
         # Instrument cooldown: operator can't hold two positions on the same
         # instrument simultaneously.  Skip if same instrument was executed
@@ -525,13 +525,22 @@ def run_state_machine_with_debug(messages):
                 stop_loss=round(new_entry * sl_ratio), targets=last.targets,
             )
             msg_signals[msg.id] = re_sig
-            # Re-entry messages are trade-management guidance — always hold
-            # for ACTIVE confirmation, never execute directly.
-            trigger_held = re_sig
-            trigger_held_msg_id = msg.id
-            trigger_held_is_fallback = is_fallback
             has_above = bool(re.search(r'\bABO(?:VE)?\b', upper))
-            debug_log.append({"msg_id": msg.id, "action": f"RE-ENTRY {'ABOVE' if has_above else 'NEAR'} → trigger_held: {re_sig.symbol} {int(re_sig.strike)} {opt_type} entry={new_entry}" + (" [FALLBACK]" if is_fallback else "")})
+            has_new_price = (new_entry != last.trigger_price)
+            # Re-entry with a specific new price ("Near 320 try with tight
+            # sl") is a real entry instruction → execute like a NEAR signal.
+            # Vague guidance without a new price ("Above high again focus",
+            # "Same level again") → hold for ACTIVE only.
+            if has_new_price and not has_above:
+                if record_execution(re_sig, ts_epoch, "re-entry", ts.strftime("%H:%M"), msg.id,
+                                    origin_msg_id=msg.id, is_fallback_reentry=is_fallback,
+                                    own_root=True):
+                    debug_log.append({"msg_id": msg.id, "action": f"RE-ENTRY EXECUTE (new price {new_entry}): {re_sig.symbol} {int(re_sig.strike)} {opt_type} entry={new_entry}"})
+            else:
+                trigger_held = re_sig
+                trigger_held_msg_id = msg.id
+                trigger_held_is_fallback = is_fallback
+                debug_log.append({"msg_id": msg.id, "action": f"RE-ENTRY {'ABOVE' if has_above else 'GUIDANCE'} → trigger_held: {re_sig.symbol} {int(re_sig.strike)} {opt_type} entry={new_entry}" + (" [FALLBACK]" if is_fallback else "")})
             continue
 
         # AGAIN (reply-based re-entry)

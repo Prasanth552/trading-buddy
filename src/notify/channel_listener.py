@@ -820,8 +820,13 @@ def _ch2_find_root_signal_id(msg_id: int) -> int:
 
 
 def _ch2_can_execute(sig: ParsedSignal, msg_id: int, origin_msg_id: int | None = None,
-                     is_fallback: bool = False) -> bool:
-    """Check instrument cooldown + root-signal dedup. Returns True if trade can proceed."""
+                     is_fallback: bool = False, own_root: bool = False) -> bool:
+    """Check instrument cooldown + root-signal dedup. Returns True if trade can proceed.
+
+    own_root=True skips reply-chain walk and uses msg_id directly as the root.
+    Used for price-based re-entries which are genuinely new trades despite
+    replying to an older signal.
+    """
     if len(_ch2_msg_signals) > 500:
         _ch2_msg_signals.clear()
         _ch2_msg_replies.clear()
@@ -839,7 +844,7 @@ def _ch2_can_execute(sig: ParsedSignal, msg_id: int, origin_msg_id: int | None =
                      key, elapsed / 60, CH2_INST_COOLDOWN / 60)
             return False
 
-    root_id = _ch2_find_root_signal_id(origin_msg_id or msg_id)
+    root_id = msg_id if own_root else _ch2_find_root_signal_id(origin_msg_id or msg_id)
 
     if is_fallback and key in _ch2_inst_to_root:
         existing_root = _ch2_inst_to_root[key]
@@ -2625,19 +2630,34 @@ async def start_listener() -> None:
                 trade_sym = f"{last.symbol} {int(last.strike)} {opt_type}"
                 _ch2_last_reentry_ts = now_ts
                 _ch2_msg_signals[event.message.id] = re_sig
-                # Re-entry messages are trade-management guidance, not new
-                # entries.  Always hold for ACTIVE confirmation — never
-                # execute directly.
-                _ch2_trigger_held = re_sig
-                _ch2_trigger_held_msg_id = event.message.id
-                _ch2_trigger_held_is_fallback = is_fallback
                 has_above = bool(re.search(r'\bABO(?:VE)?\b', upper_ctl))
-                log.info("[CH2] RE-ENTRY held (%s%s): %s @ %.0f SL=%.0f",
-                         "ABOVE" if has_above else "NEAR",
-                         " FALLBACK" if is_fallback else "", trade_sym, new_entry, re_sig.stop_loss)
-                _notify(f"[CH2] Re-entry held ({('ABOVE' if has_above else 'NEAR')} trigger):\n"
-                        f"{trade_sym} @ {new_entry} SL={re_sig.stop_loss}\n"
-                        f"Waiting for Active...")
+                # A re-entry with a specific numeric price different from the
+                # original trigger is a real entry instruction ("Near 320 try
+                # with tight sl").  Execute it like a NEAR signal.
+                # Vague guidance without a new price ("Above high again focus",
+                # "Same level again") only sets trigger_held for ACTIVE.
+                has_new_price = (new_entry != last.trigger_price)
+                if has_new_price and not has_above:
+                    if _ch2_can_execute(re_sig, event.message.id,
+                                        origin_msg_id=event.message.id,
+                                        is_fallback=is_fallback, own_root=True):
+                        log.info("[CH2] RE-ENTRY executing (new price %.0f): %s @ %.0f SL=%.0f",
+                                 new_entry, trade_sym, new_entry, re_sig.stop_loss)
+                        _notify(f"[CH2] Re-entry executing (price {new_entry}):\n"
+                                f"{trade_sym} @ {new_entry} SL={re_sig.stop_loss}")
+                        _execute_and_notify(re_sig, channel, ch_label)
+                    else:
+                        log.info("[CH2] RE-ENTRY blocked by dedup: %s", trade_sym)
+                else:
+                    _ch2_trigger_held = re_sig
+                    _ch2_trigger_held_msg_id = event.message.id
+                    _ch2_trigger_held_is_fallback = is_fallback
+                    log.info("[CH2] RE-ENTRY held (%s%s): %s @ %.0f SL=%.0f",
+                             "ABOVE" if has_above else "GUIDANCE",
+                             " FALLBACK" if is_fallback else "", trade_sym, new_entry, re_sig.stop_loss)
+                    _notify(f"[CH2] Re-entry held ({('ABOVE' if has_above else 'guidance')}):\n"
+                            f"{trade_sym} @ {new_entry} SL={re_sig.stop_loss}\n"
+                            f"Waiting for Active...")
                 return
 
             # Re-entry via reply with "AGAIN" — parse original signal, execute

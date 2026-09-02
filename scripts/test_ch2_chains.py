@@ -198,11 +198,18 @@ def run_scenario(name, messages):
                                       option_type=opt_type, trigger_price=new_entry,
                                       stop_loss=round(new_entry * sl_ratio), targets=last.targets)
                 _cl._ch2_msg_signals[msg_id] = re_sig
-                # Re-entry messages are trade-management guidance — always
-                # hold for ACTIVE confirmation, never execute directly.
-                _cl._ch2_trigger_held = re_sig
-                _cl._ch2_trigger_held_msg_id = msg_id
-                _cl._ch2_trigger_held_is_fallback = is_fb
+                has_above = bool(re.search(r'\bABOVE\b', upper))
+                has_new_price = (new_entry != last.trigger_price)
+                if has_new_price and not has_above:
+                    if _ch2_can_execute(re_sig, msg_id, origin_msg_id=msg_id, is_fallback=is_fb,
+                                       own_root=True):
+                        executed.append({"inst": _ch2_inst_key(re_sig), "time": dt.strftime("%H:%M"),
+                                         "reason": "re-entry", "msg_id": msg_id})
+                        _cl._ch2_last_executed = re_sig
+                else:
+                    _cl._ch2_trigger_held = re_sig
+                    _cl._ch2_trigger_held_msg_id = msg_id
+                    _cl._ch2_trigger_held_is_fallback = is_fb
                 continue
 
             # Parse signal
@@ -494,6 +501,19 @@ msgs = [
 ]
 check("NEAR re-entry + ACTIVE → 2 trades",
       run_scenario("t15b", msgs), ["NIFTY 24050 PE", "NIFTY 24050 PE"])
+
+
+# --- Test 15c: Re-entry with specific new price → executes immediately ---
+print("\n  15c. Re-entry with new price (Near 320 try with tight sl) → executes")
+msgs = [
+    make_msg(1520, "SENSEX 76400 PE\nABOVE 345", make_epoch(9, 27)),
+    make_msg(1521, "TGT 365/400/460\nSL 315", make_epoch(9, 27, 10)),
+    make_msg(1522, "Active", make_epoch(9, 28), reply_to=1520),
+    # Operator gives new entry at 320 (different from original 345) — 20 min later
+    make_msg(1523, "Near 320 try with tight sl", make_epoch(9, 48), reply_to=1520),
+]
+check("Near 320 (new price) → executes without ACTIVE",
+      run_scenario("t15c", msgs), ["SENSEX 76400 PE", "SENSEX 76400 PE"])
 
 
 # --- Test 16: Fallback re-entry respects inst_to_root dedup ---
