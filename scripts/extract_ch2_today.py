@@ -727,7 +727,13 @@ async def main():
             print(f"  {entry_time} {sym_str} — NO CANDLE DATA")
             continue
 
-        filtered = [c for c in opt_candles if c["date"][11:16] >= entry_time]
+        # Include the candle that CONTAINS the entry time, not just candles
+        # after it.  5-min candle at 09:45 covers 09:45-09:50, so a signal
+        # at 09:48 should use the 09:45 candle (where the trigger was live).
+        entry_h, entry_m = int(entry_time[:2]), int(entry_time[3:])
+        candle_start_min = (entry_m // 5) * 5
+        candle_filter = f"{entry_h:02d}:{candle_start_min:02d}"
+        filtered = [c for c in opt_candles if c["date"][11:16] >= candle_filter]
         if not filtered:
             print(f"  {entry_time} {sym_str} — NO CANDLES AFTER ENTRY")
             continue
