@@ -337,20 +337,27 @@ def run_state_machine_with_debug(messages):
 
         # ACTIVE
         clean_text = re.sub(r'[\U0001F600-\U0001FAFF☀-➿❤️‍\s]+', '', text).strip()
-        if (re.search(r'\bACTIVE\b|\bACTT\b', upper) and len(clean_text) < 15):
+        if (re.search(r'\bACTIVE\b|\bACTT\b', upper)
+                and not re.search(r'NOT\s+ACTIVE', upper)
+                and len(clean_text) < 15):
             act_sig = None
             act_origin = msg.id
             act_from_chain = False
             if msg.reply_to and msg.reply_to.reply_to_msg_id:
                 act_sig = resolve_signal_via_chain(msg.reply_to.reply_to_msg_id)
                 if act_sig:
-                    act_origin = msg.id  # walk from ACTIVE msg → chain finds root
+                    act_origin = msg.id
                     act_from_chain = True
             if not act_sig and trigger_held:
                 act_sig = trigger_held
                 act_origin = trigger_held_msg_id or msg.id
-                act_from_chain = False  # from trigger_held
+                act_from_chain = False
             if act_sig:
+                act_sym = act_sig.symbol.replace(" ", "").upper()
+                if act_sym not in CH2_INDEX_ONLY:
+                    debug_log.append({"msg_id": msg.id, "action": f"ACTIVE skip (not index: {act_sym})"})
+                    trigger_held = None
+                    continue
                 act_is_fallback = (not act_from_chain) and trigger_held_is_fallback
                 if record_execution(act_sig, ts_epoch, "active_trigger", ts.strftime("%H:%M"), msg.id,
                                     origin_msg_id=act_origin, is_fallback_reentry=act_is_fallback):
@@ -441,12 +448,8 @@ def run_state_machine_with_debug(messages):
                 option_type=opt_type, trigger_price=new_entry,
                 stop_loss=round(new_entry * sl_ratio), targets=last.targets,
             )
-            # Only register chain-resolved re-entries in msg_signals.
-            # Fallback re-entries have unreliable attribution and must NOT
-            # become chain targets for later messages.
-            if not is_fallback:
-                msg_signals[msg.id] = re_sig
-            has_above = bool(re.search(r'\bABOVE\b', upper))
+            msg_signals[msg.id] = re_sig
+            has_above = bool(re.search(r'\bABO(?:VE)?\b', upper))
             if has_above:
                 trigger_held = re_sig
                 trigger_held_msg_id = msg.id

@@ -705,7 +705,7 @@ _CH2_SYMBOL_RE = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 _CH2_ENTRY_RE = re.compile(
-    r'(?:ABOVE|NEAR|Entry\s+near|BUY\s*@|CMP)\s*[:\-]?\s*(\d+(?:\.\d+)?)',
+    r'(?:ABOVE|ABO|NEAR|Entry\s+near|BUY\s*@|CMP)\s*[:\-]?\s*(\d+(?:\.\d+)?)',
     re.IGNORECASE,
 )
 _CH2_TGT_RE = re.compile(
@@ -945,7 +945,7 @@ def parse_signal_ch2(text: str) -> ParsedSignal | None:
         opt_type = sym_match.group(3).upper()
         trigger = float(entry_match.group(1)) if entry_match else 0.0
 
-        has_above = bool(re.search(r'\bABOVE\b', upper))
+        has_above = bool(re.search(r'\bABO(?:VE)?\b', upper))
 
         if has_tgt and has_sl:
             targets = _ch2_extract_targets(tgt_match)
@@ -2427,7 +2427,10 @@ async def start_listener() -> None:
                     act_is_fallback = _ch2_trigger_held_is_fallback
                 if act_sig:
                     _ch2_trigger_held = None
-                    if _ch2_can_execute(act_sig, event.message.id,
+                    act_sym = act_sig.symbol.replace(" ", "").upper()
+                    if act_sym not in CH2_INDEX_ONLY:
+                        log.info("[CH2] ACTIVE skip (not index: %s)", act_sym)
+                    elif _ch2_can_execute(act_sig, event.message.id,
                                         origin_msg_id=act_origin, is_fallback=act_is_fallback):
                         log.info("[CH2] ACTIVE — executing: %s %s %s",
                                  act_sig.symbol, int(act_sig.strike), act_sig.option_type)
@@ -2540,9 +2543,8 @@ async def start_listener() -> None:
                 )
                 trade_sym = f"{last.symbol} {int(last.strike)} {opt_type}"
                 _ch2_last_reentry_ts = now_ts
-                if not is_fallback:
-                    _ch2_msg_signals[event.message.id] = re_sig
-                has_above = bool(re.search(r'\bABOVE\b', upper_ctl))
+                _ch2_msg_signals[event.message.id] = re_sig
+                has_above = bool(re.search(r'\bABO(?:VE)?\b', upper_ctl))
                 if has_above:
                     _ch2_trigger_held = re_sig
                     _ch2_trigger_held_msg_id = event.message.id
@@ -2632,7 +2634,7 @@ async def start_listener() -> None:
                              completed_buffer_start, event.message.id)
 
                 _ch2_msg_signals[event.message.id] = sig
-                is_above = bool(re.search(r'\bABOVE\b', text, re.I)) or _ch2_last_is_above
+                is_above = bool(re.search(r'\bABO(?:VE)?\b', text, re.I)) or _ch2_last_is_above
                 if is_above:
                     _ch2_trigger_held = sig
                     _ch2_trigger_held_msg_id = completed_buffer_start or event.message.id

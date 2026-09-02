@@ -135,6 +135,9 @@ def run_scenario(name, messages):
                     act_fb = _cl._ch2_trigger_held_is_fallback
                 if act_sig:
                     _cl._ch2_trigger_held = None
+                    act_sym = act_sig.symbol.replace(" ", "").upper()
+                    if act_sym not in CH2_INDEX_ONLY:
+                        continue
                     if _ch2_can_execute(act_sig, msg_id, origin_msg_id=act_origin, is_fallback=act_fb):
                         executed.append({"inst": _ch2_inst_key(act_sig), "time": dt.strftime("%H:%M"),
                                          "reason": "active", "msg_id": msg_id})
@@ -200,8 +203,7 @@ def run_scenario(name, messages):
                 re_sig = ParsedSignal(action="BUY", symbol=last.symbol, strike=last.strike,
                                       option_type=opt_type, trigger_price=new_entry,
                                       stop_loss=round(new_entry * sl_ratio), targets=last.targets)
-                if not is_fb:
-                    _cl._ch2_msg_signals[msg_id] = re_sig
+                _cl._ch2_msg_signals[msg_id] = re_sig
                 has_above = bool(re.search(r'\bABOVE\b', upper))
                 if has_above:
                     _cl._ch2_trigger_held = re_sig
