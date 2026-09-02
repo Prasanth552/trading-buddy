@@ -2427,10 +2427,7 @@ async def start_listener() -> None:
                     act_is_fallback = _ch2_trigger_held_is_fallback
                 if act_sig:
                     _ch2_trigger_held = None
-                    act_sym = act_sig.symbol.replace(" ", "").upper()
-                    if act_sym not in CH2_INDEX_ONLY:
-                        log.info("[CH2] ACTIVE skip (not index: %s)", act_sym)
-                    elif _ch2_can_execute(act_sig, event.message.id,
+                    if _ch2_can_execute(act_sig, event.message.id,
                                         origin_msg_id=act_origin, is_fallback=act_is_fallback):
                         log.info("[CH2] ACTIVE — executing: %s %s %s",
                                  act_sig.symbol, int(act_sig.strike), act_sig.option_type)
@@ -2513,10 +2510,6 @@ async def start_listener() -> None:
                 if now_ts - _ch2_last_reentry_ts < 60:
                     log.info("[CH2] RE-ENTRY skipped (duplicate within 60s)")
                     return
-                re_sym = last.symbol.replace(" ", "").upper()
-                if re_sym not in CH2_INDEX_ONLY:
-                    log.info("[CH2] RE-ENTRY skip non-index: %s", re_sym)
-                    return
                 new_entry = last.trigger_price
                 for g in reentry_m.groups():
                     if g:
@@ -2577,11 +2570,7 @@ async def start_listener() -> None:
                         if orig_msg and orig_msg.text:
                             ref_sig = parse_signal_ch2(orig_msg.text)
                     if ref_sig:
-                        re_sym = ref_sig.symbol.replace(" ", "").upper()
                         trade_sym = f"{ref_sig.symbol} {int(ref_sig.strike)} {ref_sig.option_type}"
-                        if re_sym not in CH2_INDEX_ONLY:
-                            log.info("[CH2] RE-ENTRY skip non-index: %s", trade_sym)
-                            return
                         reply_sig = parse_signal_ch2(text)
                         if reply_sig and reply_sig.stop_loss and reply_sig.targets:
                             ref_sig = reply_sig
@@ -2618,12 +2607,6 @@ async def start_listener() -> None:
                      sig.trigger_price, sig.stop_loss, sig.targets)
 
             if channel == "ch2":
-                ch2_sym = sig.symbol.replace(" ", "").upper()
-                if ch2_sym not in CH2_INDEX_ONLY:
-                    log.info("[CH2] Skipping non-index: %s %s %s",
-                             sig.symbol, int(sig.strike), sig.option_type)
-                    return
-
                 # If this completed a split buffer, register under the first msg too
                 completed_buffer_start = None
                 if had_pending and _ch2_pending is None and _ch2_buffer_start_id:

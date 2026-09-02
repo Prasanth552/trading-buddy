@@ -135,9 +135,6 @@ def run_scenario(name, messages):
                     act_fb = _cl._ch2_trigger_held_is_fallback
                 if act_sig:
                     _cl._ch2_trigger_held = None
-                    act_sym = act_sig.symbol.replace(" ", "").upper()
-                    if act_sym not in CH2_INDEX_ONLY:
-                        continue
                     if _ch2_can_execute(act_sig, msg_id, origin_msg_id=act_origin, is_fallback=act_fb):
                         executed.append({"inst": _ch2_inst_key(act_sig), "time": dt.strftime("%H:%M"),
                                          "reason": "active", "msg_id": msg_id})
@@ -183,9 +180,6 @@ def run_scenario(name, messages):
                     last = _cl._ch2_last_executed
                     is_fb = True
                 if not last:
-                    continue
-                re_sym = last.symbol.replace(" ", "").upper()
-                if re_sym not in CH2_INDEX_ONLY:
                     continue
                 new_entry = last.trigger_price
                 for g in reentry_m.groups():

@@ -353,11 +353,6 @@ def run_state_machine_with_debug(messages):
                 act_origin = trigger_held_msg_id or msg.id
                 act_from_chain = False
             if act_sig:
-                act_sym = act_sig.symbol.replace(" ", "").upper()
-                if act_sym not in CH2_INDEX_ONLY:
-                    debug_log.append({"msg_id": msg.id, "action": f"ACTIVE skip (not index: {act_sym})"})
-                    trigger_held = None
-                    continue
                 act_is_fallback = (not act_from_chain) and trigger_held_is_fallback
                 if record_execution(act_sig, ts_epoch, "active_trigger", ts.strftime("%H:%M"), msg.id,
                                     origin_msg_id=act_origin, is_fallback_reentry=act_is_fallback):
@@ -420,10 +415,6 @@ def run_state_machine_with_debug(messages):
             if not last:
                 debug_log.append({"msg_id": msg.id, "action": "RE-ENTRY pattern but chain resolution failed (no fallback)"})
                 continue
-            re_sym = last.symbol.replace(" ", "").upper()
-            if re_sym not in INDEX_SYMS:
-                debug_log.append({"msg_id": msg.id, "action": f"RE-ENTRY skip (not index: {re_sym})"})
-                continue
             new_entry = last.trigger_price
             for g in reentry_m.groups():
                 if g:
@@ -465,9 +456,6 @@ def run_state_machine_with_debug(messages):
         if msg.reply_to and msg.reply_to.reply_to_msg_id and re.search(r'\bAGAIN\b', upper):
             ref_sig = resolve_signal_via_chain(msg.reply_to.reply_to_msg_id)
             if ref_sig:
-                re_sym = ref_sig.symbol.replace(" ", "").upper()
-                if re_sym not in INDEX_SYMS:
-                    continue
                 reply_sig = parse_signal_ch2(text)
                 if reply_sig and reply_sig.stop_loss and reply_sig.targets:
                     ref_sig = reply_sig
@@ -495,13 +483,9 @@ def run_state_machine_with_debug(messages):
                 debug_log.append({"msg_id": msg.id, "action": f"BUFFER COMPLETE: registered signal under both ID={buffer_start_id} and ID={msg.id}"})
                 buffer_start_id = None
 
-            ch2_sym = sig.symbol.replace(" ", "").upper()
             msg_signals[msg.id] = sig
-            if ch2_sym not in INDEX_SYMS:
-                debug_log.append({"msg_id": msg.id, "action": f"PARSED (non-index, skip): {sig.symbol} {int(sig.strike)} {sig.option_type}"})
-                continue
 
-            is_above = bool(re.search(r'\bABOVE\b', text, re.I)) or _cl._ch2_last_is_above
+            is_above = bool(re.search(r'\bABO(?:VE)?\b', text, re.I)) or _cl._ch2_last_is_above
 
             if is_above:
                 trigger_held = sig
