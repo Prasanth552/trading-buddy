@@ -244,7 +244,7 @@ def run_state_machine_with_debug(messages):
     executed_roots = set()    # root signal msg_ids that have been executed
     inst_to_root = {}         # instrument_key → most recent root_id (for fallback dedup)
     inst_last_exec_ts = {}    # instrument_key → epoch of last execution (cooldown dedup)
-    INST_COOLDOWN_SECS = 20 * 60  # same instrument can't re-enter within 20 min
+    INST_COOLDOWN_SECS = 10 * 60  # same instrument can't re-enter within 10 min
     debug_log = []
 
     DELAY_SECS = 5

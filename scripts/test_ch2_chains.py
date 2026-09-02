@@ -355,16 +355,16 @@ check("Fallback re-entry: only 1 trade (root dedup catches ACTIVE)",
 
 
 # --- Test 6: Instrument cooldown ---
-print("\n  6. Same instrument within 20 min → blocked")
+print("\n  6. Same instrument within 10 min → blocked")
 msgs = [
     make_msg(600, "NIFTY 24050 CE\nNEAR 85", make_epoch(11, 13)),
     make_msg(601, "TGT 95/110/130\nSL 77", make_epoch(11, 13, 10)),
-    # 18 min later: different root, same instrument
-    make_msg(610, "NIFTY 24050 CE\nABOVE 104", make_epoch(11, 31)),
-    make_msg(611, "TGT 95/110/130\nSL 94", make_epoch(11, 31, 10)),
-    make_msg(612, "Active", make_epoch(11, 32), reply_to=610),
+    # 8 min later: different root, same instrument — within 10m cooldown
+    make_msg(610, "NIFTY 24050 CE\nABOVE 104", make_epoch(11, 21)),
+    make_msg(611, "TGT 95/110/130\nSL 94", make_epoch(11, 21, 10)),
+    make_msg(612, "Active", make_epoch(11, 22), reply_to=610),
 ]
-check("Second NIFTY 24050 CE blocked (18m < 20m cooldown)",
+check("Second NIFTY 24050 CE blocked (8m < 10m cooldown)",
       run_scenario("t6", msgs), ["NIFTY 24050 CE"])
 
 
@@ -378,7 +378,7 @@ msgs = [
     make_msg(710, "NIFTY 24000 PE\nNEAR 35", make_epoch(13, 50)),
     make_msg(711, "TGT 44/60/80\nSL 30", make_epoch(13, 50, 10)),
 ]
-check("Second NIFTY 24000 PE allowed (50m > 20m)",
+check("Second NIFTY 24000 PE allowed (50m > 10m)",
       run_scenario("t7", msgs), ["NIFTY 24000 PE", "NIFTY 24000 PE"])
 
 

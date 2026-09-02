@@ -705,7 +705,7 @@ _ch2_inst_last_exec_ts: dict[str, float] = {}  # instrument_key → epoch (coold
 _ch2_trigger_held_msg_id: int = 0
 _ch2_trigger_held_is_fallback: bool = False
 _ch2_buffer_start_id: int | None = None
-CH2_INST_COOLDOWN = 20 * 60  # 20-min same-instrument cooldown
+CH2_INST_COOLDOWN = 10 * 60  # 10-min same-instrument cooldown
 
 _RE_REENTRY = re.compile(
     r'(?:'
