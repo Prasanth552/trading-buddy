@@ -705,19 +705,18 @@ _ch2_inst_last_exec_ts: dict[str, float] = {}  # instrument_key → epoch (coold
 _ch2_trigger_held_msg_id: int = 0
 _ch2_trigger_held_is_fallback: bool = False
 _ch2_buffer_start_id: int | None = None
-CH2_INST_COOLDOWN = 45 * 60  # 45-min same-instrument cooldown
+CH2_INST_COOLDOWN = 20 * 60  # 20-min same-instrument cooldown
 
 _RE_REENTRY = re.compile(
     r'(?:'
     r'(?:ABOVE|NEAR)\.?\s+(?:LAST\s+SWING\s+HIGH|HIGH|SAME\s+(?:RANGE|LEVEL)|THIS\s+LEVEL|(\d+))\s*'
-    r'(?:AGAIN|NEW\s+(?:BUY|TRADE)|FOCUS|(?:U\s+(?:CAN\s+)?)?PLAN|ENTER|WITH\s+TIGHT|OPEN|ALSO\s+OPEN)'
-    r'|SAME\s+(?:RANGE|LEVEL)\s+(?:AGAIN|OPEN)'
+    r'(?:AGAIN|NEW\s+(?:BUY|TRADE)|FOCUS|(?:U\s+(?:CAN\s+)?)?PLAN|ENTER|WITH\s+TIGHT|OPEN|ALSO\s+OPEN|TRY\s+WITH\s+TIGHT)'
+    r'|SAME\s+(?:RANGE|LEVEL)\s+(?:AGAIN|OPEN|FOCUS)'
     r'|NEAR\s+SAME\s+(?:RANGE|LEVEL)'
-    r'|ABOVE\.?\s+(\d+)\s+(?:NEW\s+(?:BUY|TRADE)|AGAIN|FOCUS|(?:U\s+(?:CAN\s+)?)?PLAN|WITH\s+TIGHT|THIS\s+LEVEL)'
-    r'|ABOVE\s+(?:HIGH|LAST\s+SWING\s+HIGH)\s+(?:AGAIN|FOCUS)'
+    r'|ABOVE\.?\s+(\d+)\s+(?:NEW\s+(?:BUY|TRADE)|AGAIN|FOCUS|(?:U\s+(?:CAN\s+)?)?PLAN|WITH\s+TIGHT|THIS\s+LEVEL|KEEP\s+YOUR\s+EYES)'
+    r'|ABOVE\s+(?:HIGH|LAST\s+SWING\s+HIGH|DAY\s+HIGH)\s+(?:AGAIN|FOCUS)'
     r'|ABOVE\s+(\d+)\s+(?:PE|CE)\s+SIDE'
     r'|(?:BELOW|BELWO)\s+(?:DAY\s+LOW|(\d+))\s+NEW\s+BUY'
-    r'|ENTER\s+AFTER\s+BREAK\s+(\d+(?:\.\d+)?)'
     r'|SL\s+HIT\s*[,.]?\s*(?:REBUY|RE[\s-]*BUY|RE[\s-]*ENTER)\s+(?:FROM\s+)?(?:LOW\s+)?(?:NEAR\s+)?(\d+(?:\.\d+)?)?'
     r')',
     re.IGNORECASE,
@@ -933,7 +932,7 @@ def parse_signal_ch2(text: str) -> ParsedSignal | None:
                                        "FAKE ALERT", "OFFER", "APPLICATION",
                                        "FOLLOW THIS", "PLS READ",
                                        "PERFORMANCE", "MEMBERS SEND",
-                                       "CONGRATULATIONS")):
+                                       "CONGRATULATIONS", "ENTER AFTER BREAK")):
         return None
 
     if re.search(r'NOT\s+ACTIVE\s+AVOID', upper):
@@ -2429,6 +2428,37 @@ async def start_listener() -> None:
                     log.info("[CH2] WAIT FOR TRIGGER — no queued signal to hold")
                 return
 
+            # STRIKE CORRECTION: "It's XXXXX CE/PE"
+            corr_m = re.search(r"IT'?S\s+(\d+)\s+(CE|PE)", upper_ctl)
+            if corr_m and len(text.strip()) < 30:
+                new_strike = float(corr_m.group(1))
+                new_opt = corr_m.group(2)
+                if _ch2_trigger_held:
+                    old = _ch2_trigger_held
+                    _ch2_trigger_held = ParsedSignal(
+                        action=old.action, symbol=old.symbol,
+                        strike=new_strike, option_type=new_opt,
+                        trigger_price=old.trigger_price,
+                        stop_loss=old.stop_loss, targets=old.targets,
+                    )
+                    _ch2_msg_signals[event.message.id] = _ch2_trigger_held
+                    log.info("[CH2] STRIKE CORRECTION: %s %s %s → %s %s",
+                             old.symbol, int(old.strike), old.option_type,
+                             int(new_strike), new_opt)
+                elif _ch2_queued_signal:
+                    old = _ch2_queued_signal
+                    _ch2_queued_signal = ParsedSignal(
+                        action=old.action, symbol=old.symbol,
+                        strike=new_strike, option_type=new_opt,
+                        trigger_price=old.trigger_price,
+                        stop_loss=old.stop_loss, targets=old.targets,
+                    )
+                    _ch2_msg_signals[event.message.id] = _ch2_queued_signal
+                    log.info("[CH2] STRIKE CORRECTION: %s %s %s → %s %s",
+                             old.symbol, int(old.strike), old.option_type,
+                             int(new_strike), new_opt)
+                return
+
             # "Active"/"Actt" — execute held signal OR reply-to signal
             clean_ctl = re.sub(r'[\U0001F600-\U0001FAFF☀-➿❤️‍\s]+', '', text).strip()
             if (re.search(r'\bACTIVE\b|\bACTT\b', upper_ctl)
@@ -2562,7 +2592,7 @@ async def start_listener() -> None:
                 trade_sym = f"{last.symbol} {int(last.strike)} {opt_type}"
                 _ch2_last_reentry_ts = now_ts
                 _ch2_msg_signals[event.message.id] = re_sig
-                has_above = bool(re.search(r'\bABO(?:VE)?\b', upper_ctl) or re.search(r'ENTER\s+AFTER\s+BREAK', upper_ctl))
+                has_above = bool(re.search(r'\bABO(?:VE)?\b', upper_ctl))
                 if has_above:
                     _ch2_trigger_held = re_sig
                     _ch2_trigger_held_msg_id = event.message.id

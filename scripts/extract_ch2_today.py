@@ -66,14 +66,13 @@ PROFIT_FLOOR = 2000
 _RE_REENTRY = re.compile(
     r'(?:'
     r'(?:ABOVE|NEAR)\.?\s+(?:LAST\s+SWING\s+HIGH|HIGH|SAME\s+(?:RANGE|LEVEL)|THIS\s+LEVEL|(\d+))\s*'
-    r'(?:AGAIN|NEW\s+(?:BUY|TRADE)|FOCUS|(?:U\s+(?:CAN\s+)?)?PLAN|ENTER|WITH\s+TIGHT|OPEN|ALSO\s+OPEN)'
-    r'|SAME\s+(?:RANGE|LEVEL)\s+(?:AGAIN|OPEN)'
+    r'(?:AGAIN|NEW\s+(?:BUY|TRADE)|FOCUS|(?:U\s+(?:CAN\s+)?)?PLAN|ENTER|WITH\s+TIGHT|OPEN|ALSO\s+OPEN|TRY\s+WITH\s+TIGHT)'
+    r'|SAME\s+(?:RANGE|LEVEL)\s+(?:AGAIN|OPEN|FOCUS)'
     r'|NEAR\s+SAME\s+(?:RANGE|LEVEL)'
-    r'|ABOVE\.?\s+(\d+)\s+(?:NEW\s+(?:BUY|TRADE)|AGAIN|FOCUS|(?:U\s+(?:CAN\s+)?)?PLAN|WITH\s+TIGHT|THIS\s+LEVEL)'
-    r'|ABOVE\s+(?:HIGH|LAST\s+SWING\s+HIGH)\s+(?:AGAIN|FOCUS)'
+    r'|ABOVE\.?\s+(\d+)\s+(?:NEW\s+(?:BUY|TRADE)|AGAIN|FOCUS|(?:U\s+(?:CAN\s+)?)?PLAN|WITH\s+TIGHT|THIS\s+LEVEL|KEEP\s+YOUR\s+EYES)'
+    r'|ABOVE\s+(?:HIGH|LAST\s+SWING\s+HIGH|DAY\s+HIGH)\s+(?:AGAIN|FOCUS)'
     r'|ABOVE\s+(\d+)\s+(?:PE|CE)\s+SIDE'
     r'|(?:BELOW|BELWO)\s+(?:DAY\s+LOW|(\d+))\s+NEW\s+BUY'
-    r'|ENTER\s+AFTER\s+BREAK\s+(\d+(?:\.\d+)?)'
     r'|SL\s+HIT\s*[,.]?\s*(?:REBUY|RE[\s-]*BUY|RE[\s-]*ENTER)\s+(?:FROM\s+)?(?:LOW\s+)?(?:NEAR\s+)?(\d+(?:\.\d+)?)?'
     r')',
     re.IGNORECASE,
@@ -245,7 +244,7 @@ def run_state_machine_with_debug(messages):
     executed_roots = set()    # root signal msg_ids that have been executed
     inst_to_root = {}         # instrument_key → most recent root_id (for fallback dedup)
     inst_last_exec_ts = {}    # instrument_key → epoch of last execution (cooldown dedup)
-    INST_COOLDOWN_SECS = 45 * 60  # same instrument can't re-enter within 45 min
+    INST_COOLDOWN_SECS = 20 * 60  # same instrument can't re-enter within 20 min
     debug_log = []
 
     DELAY_SECS = 5
@@ -366,6 +365,34 @@ def run_state_machine_with_debug(messages):
                 debug_log.append({"msg_id": msg.id, "action": "WAIT_TRIGGER: nothing queued"})
             continue
 
+        # STRIKE CORRECTION: "It's XXXXX CE/PE" — operator corrects the strike or option type
+        corr_m = re.search(r"IT'?S\s+(\d+)\s+(CE|PE)", upper)
+        if corr_m and len(text.strip()) < 30:
+            new_strike = float(corr_m.group(1))
+            new_opt = corr_m.group(2)
+            corrected = None
+            if trigger_held:
+                corrected = trigger_held
+                trigger_held = ParsedSignal(
+                    action=corrected.action, symbol=corrected.symbol,
+                    strike=new_strike, option_type=new_opt,
+                    trigger_price=corrected.trigger_price,
+                    stop_loss=corrected.stop_loss, targets=corrected.targets,
+                )
+                msg_signals[msg.id] = trigger_held
+            elif queued_signal:
+                corrected = queued_signal
+                queued_signal = ParsedSignal(
+                    action=corrected.action, symbol=corrected.symbol,
+                    strike=new_strike, option_type=new_opt,
+                    trigger_price=corrected.trigger_price,
+                    stop_loss=corrected.stop_loss, targets=corrected.targets,
+                )
+                msg_signals[msg.id] = queued_signal
+            if corrected:
+                debug_log.append({"msg_id": msg.id, "action": f"STRIKE CORRECTION: {corrected.symbol} {int(corrected.strike)} {corrected.option_type} → {int(new_strike)} {new_opt}"})
+            continue
+
         # ACTIVE
         clean_text = re.sub(r'[\U0001F600-\U0001FAFF☀-➿❤️‍\s]+', '', text).strip()
         if (re.search(r'\bACTIVE\b|\bACTT\b', upper)
@@ -471,7 +498,7 @@ def run_state_machine_with_debug(messages):
                 stop_loss=round(new_entry * sl_ratio), targets=last.targets,
             )
             msg_signals[msg.id] = re_sig
-            has_above = bool(re.search(r'\bABO(?:VE)?\b', upper) or re.search(r'ENTER\s+AFTER\s+BREAK', upper))
+            has_above = bool(re.search(r'\bABO(?:VE)?\b', upper))
             if has_above:
                 trigger_held = re_sig
                 trigger_held_msg_id = msg.id
