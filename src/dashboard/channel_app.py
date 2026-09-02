@@ -315,14 +315,39 @@ def api_close_trade(trade_id: int) -> JSONResponse:
     _ensure_db()
     with db.get_conn() as conn:
         row = conn.execute(
-            "SELECT id, price, qty FROM trades WHERE id = ? AND status = 'OPEN'",
+            "SELECT id, price, qty, broker_key FROM trades WHERE id = ? AND status = 'OPEN'",
             (trade_id,)).fetchone()
         if not row:
             return JSONResponse({"closed": False, "reason": "Trade not found or already closed"}, status_code=404)
+
+    ltp = None
+    if row["broker_key"]:
+        try:
+            from src.broker.upstox_data import UpstoxData
+            ud = UpstoxData()
+            ltp_data = ud._get("/v2/market-quote/ltp",
+                               params={"instrument_key": row["broker_key"]}).get("data", {})
+            for item in ltp_data.values():
+                ltp = item.get("last_price")
+                break
+        except Exception:
+            pass
+
+    if not ltp:
+        return JSONResponse({"closed": False, "reason": "Could not fetch LTP"}, status_code=503)
+
+    exit_price = float(ltp)
+    gross_pnl = (exit_price - row["price"]) * row["qty"]
+    from src.notify.channel_listener import calc_charges
+    charges = calc_charges(row["price"], exit_price, row["qty"])
+    net_pnl = gross_pnl - charges["total"]
+
+    with db.get_conn() as conn:
         conn.execute(
-            "UPDATE trades SET status = 'CLOSED', exit_price = price, pnl = 0 WHERE id = ?",
-            (trade_id,))
-    return JSONResponse({"closed": True, "trade_id": trade_id, "pnl": 0})
+            "UPDATE trades SET status='CLOSED', exit_price=?, pnl=?, charges=? WHERE id=?",
+            (exit_price, net_pnl, charges["total"], trade_id))
+    return JSONResponse({"closed": True, "trade_id": trade_id,
+                         "exit_price": exit_price, "pnl": round(net_pnl, 2)})
 
 
 @app.get("/", response_class=HTMLResponse)

@@ -563,65 +563,75 @@ load();setInterval(load,20000);
 # --------------------------------------------------------------------------
 # Channel Trades Dashboard (mounted on same port)
 # --------------------------------------------------------------------------
-from src.dashboard.channel_app import _PAGE as _CHANNEL_PAGE, _CHANNEL_FILTER as _CH_FILTER
+from src.dashboard.channel_app import _PAGE as _CHANNEL_PAGE, _ch_filter as _channel_filter
 
 
 @app.get("/api/channel/trades")
-def api_channel_trades(_: None = Depends(require_auth)) -> JSONResponse:
+def api_channel_trades(channel: str = "ch1", _: None = Depends(require_auth)) -> JSONResponse:
     db.init_db()
+    cf = _channel_filter(channel)
     rows = _rows(
         f"SELECT id, ts, symbol, side, qty, price, exit_price, pnl, mode, status, "
-        f"stop_price, target_price, index_entry, broker_key "
-        f"FROM trades WHERE {_CH_FILTER} ORDER BY id DESC LIMIT 100")
+        f"stop_price, target_price, index_entry, broker_key, charges "
+        f"FROM trades WHERE {cf} ORDER BY id DESC LIMIT 100")
     return JSONResponse(rows)
 
 
 @app.get("/api/channel/stats")
-def api_channel_stats(_: None = Depends(require_auth)) -> JSONResponse:
+def api_channel_stats(channel: str = "ch1", _: None = Depends(require_auth)) -> JSONResponse:
     db.init_db()
+    cf = _channel_filter(channel)
+    today_iso = mc.now_ist().date().isoformat()
     with db.get_conn() as conn:
-        total = conn.execute(f"SELECT COUNT(*) FROM trades WHERE {_CH_FILTER}").fetchone()[0]
-        open_count = conn.execute(f"SELECT COUNT(*) FROM trades WHERE {_CH_FILTER} AND status='OPEN'").fetchone()[0]
-        closed = conn.execute(f"SELECT COUNT(*) FROM trades WHERE {_CH_FILTER} AND status LIKE 'CLOSED%'").fetchone()[0]
-        wins = conn.execute(f"SELECT COUNT(*) FROM trades WHERE {_CH_FILTER} AND pnl > 0").fetchone()[0]
-        losses = conn.execute(f"SELECT COUNT(*) FROM trades WHERE {_CH_FILTER} AND pnl IS NOT NULL AND pnl <= 0").fetchone()[0]
-        total_pnl = conn.execute(f"SELECT COALESCE(SUM(pnl),0) FROM trades WHERE {_CH_FILTER} AND pnl IS NOT NULL").fetchone()[0]
-        best = conn.execute(f"SELECT COALESCE(MAX(pnl),0) FROM trades WHERE {_CH_FILTER}").fetchone()[0]
-        worst = conn.execute(f"SELECT COALESCE(MIN(pnl),0) FROM trades WHERE {_CH_FILTER} AND pnl IS NOT NULL").fetchone()[0]
-        avg_pnl = conn.execute(f"SELECT COALESCE(AVG(pnl),0) FROM trades WHERE {_CH_FILTER} AND pnl IS NOT NULL").fetchone()[0]
-        today_iso = mc.now_ist().date().isoformat()
-        today_pnl = conn.execute(
-            f"SELECT COALESCE(SUM(pnl),0) FROM trades WHERE {_CH_FILTER} AND pnl IS NOT NULL AND ts >= ?",
-            (today_iso,)).fetchone()[0]
-        today_count = conn.execute(
-            f"SELECT COUNT(*) FROM trades WHERE {_CH_FILTER} AND ts >= ?", (today_iso,)).fetchone()[0]
+        row = conn.execute(f"""SELECT
+            COUNT(*) AS total,
+            SUM(CASE WHEN status='OPEN' THEN 1 ELSE 0 END) AS open_count,
+            SUM(CASE WHEN status LIKE 'CLOSED%' THEN 1 ELSE 0 END) AS closed,
+            SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins,
+            SUM(CASE WHEN pnl IS NOT NULL AND pnl <= 0 THEN 1 ELSE 0 END) AS losses,
+            COALESCE(SUM(CASE WHEN pnl IS NOT NULL THEN pnl END),0) AS total_pnl,
+            COALESCE(MAX(pnl),0) AS best,
+            COALESCE(MIN(CASE WHEN pnl IS NOT NULL THEN pnl END),0) AS worst,
+            COALESCE(AVG(CASE WHEN pnl IS NOT NULL THEN pnl END),0) AS avg_pnl,
+            COALESCE(SUM(CASE WHEN pnl IS NOT NULL AND ts >= '{today_iso}' THEN pnl END),0) AS today_pnl,
+            SUM(CASE WHEN ts >= '{today_iso}' THEN 1 ELSE 0 END) AS today_count,
+            COALESCE(SUM(CASE WHEN charges IS NOT NULL THEN charges END),0) AS total_charges,
+            COALESCE(SUM(CASE WHEN charges IS NOT NULL AND ts >= '{today_iso}' THEN charges END),0) AS today_charges,
+            COALESCE(SUM(CASE WHEN status='OPEN' THEN price * qty END),0) AS utilized
+        FROM trades WHERE {cf}""").fetchone()
+        s = dict(row)
         pnl_series = [dict(r) for r in conn.execute(
-            f"SELECT ts, pnl FROM trades WHERE {_CH_FILTER} AND pnl IS NOT NULL ORDER BY id"
+            f"SELECT ts, pnl FROM trades WHERE {cf} AND pnl IS NOT NULL ORDER BY id"
         ).fetchall()]
 
+    closed = s["closed"] or 0
+    wins = s["wins"] or 0
     win_rate = (wins / closed * 100) if closed > 0 else 0
     cumulative, running = [], 0
-    for row in pnl_series:
-        running += row["pnl"]
-        cumulative.append({"ts": row["ts"], "pnl": row["pnl"], "cumulative": round(running, 2)})
+    for r in pnl_series:
+        running += r["pnl"]
+        cumulative.append({"ts": r["ts"], "pnl": r["pnl"], "cumulative": round(running, 2)})
 
     return JSONResponse({
-        "total": total, "open": open_count, "closed": closed,
-        "wins": wins, "losses": losses, "win_rate": round(win_rate, 1),
-        "total_pnl": round(total_pnl, 2), "best_trade": round(best, 2),
-        "worst_trade": round(worst, 2), "avg_pnl": round(avg_pnl, 2),
-        "today_pnl": round(today_pnl, 2), "today_count": today_count,
+        "total": s["total"], "open": s["open_count"] or 0, "closed": closed,
+        "wins": wins, "losses": s["losses"] or 0, "win_rate": round(win_rate, 1),
+        "total_pnl": round(s["total_pnl"], 2), "best_trade": round(s["best"], 2),
+        "worst_trade": round(s["worst"], 2), "avg_pnl": round(s["avg_pnl"], 2),
+        "today_pnl": round(s["today_pnl"], 2), "today_count": s["today_count"] or 0,
+        "total_charges": round(s["total_charges"], 2), "today_charges": round(s["today_charges"], 2),
+        "capital": 100000, "utilized": round(s["utilized"], 2),
         "pnl_curve": cumulative,
         "now": mc.now_ist().strftime("%Y-%m-%d %H:%M:%S IST"),
     })
 
 
 @app.get("/api/channel/ltp")
-def api_channel_ltp(_: None = Depends(require_auth)) -> JSONResponse:
+def api_channel_ltp(channel: str = "ch1", _: None = Depends(require_auth)) -> JSONResponse:
     db.init_db()
+    cf = _channel_filter(channel)
     with db.get_conn() as conn:
         rows = conn.execute(
-            f"SELECT id, broker_key FROM trades WHERE {_CH_FILTER} "
+            f"SELECT id, broker_key FROM trades WHERE {cf} "
             "AND status = 'OPEN' AND broker_key IS NOT NULL"
         ).fetchall()
     if not rows:
@@ -690,14 +700,68 @@ def api_channel_close(trade_id: int, _: None = Depends(require_auth)) -> JSONRes
                          "exit_price": exit_price, "pnl": round(net_pnl, 2)})
 
 
+@app.get("/api/channel/all")
+def api_channel_all(channel: str = "ch1", _: None = Depends(require_auth)) -> JSONResponse:
+    db.init_db()
+    cf = _channel_filter(channel)
+    today_iso = mc.now_ist().date().isoformat()
+    with db.get_conn() as conn:
+        stats_row = conn.execute(f"""SELECT
+            COUNT(*) AS total,
+            SUM(CASE WHEN status='OPEN' THEN 1 ELSE 0 END) AS open_count,
+            SUM(CASE WHEN status LIKE 'CLOSED%' THEN 1 ELSE 0 END) AS closed,
+            SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins,
+            SUM(CASE WHEN pnl IS NOT NULL AND pnl <= 0 THEN 1 ELSE 0 END) AS losses,
+            COALESCE(SUM(CASE WHEN pnl IS NOT NULL THEN pnl END),0) AS total_pnl,
+            COALESCE(MAX(pnl),0) AS best,
+            COALESCE(MIN(CASE WHEN pnl IS NOT NULL THEN pnl END),0) AS worst,
+            COALESCE(AVG(CASE WHEN pnl IS NOT NULL THEN pnl END),0) AS avg_pnl,
+            COALESCE(SUM(CASE WHEN pnl IS NOT NULL AND ts >= '{today_iso}' THEN pnl END),0) AS today_pnl,
+            SUM(CASE WHEN ts >= '{today_iso}' THEN 1 ELSE 0 END) AS today_count,
+            COALESCE(SUM(CASE WHEN charges IS NOT NULL THEN charges END),0) AS total_charges,
+            COALESCE(SUM(CASE WHEN charges IS NOT NULL AND ts >= '{today_iso}' THEN charges END),0) AS today_charges,
+            COALESCE(SUM(CASE WHEN status='OPEN' THEN price * qty END),0) AS utilized
+        FROM trades WHERE {cf}""").fetchone()
+        s = dict(stats_row)
+        pnl_series = [dict(r) for r in conn.execute(
+            f"SELECT ts, pnl FROM trades WHERE {cf} AND pnl IS NOT NULL ORDER BY id"
+        ).fetchall()]
+        trades = [dict(r) for r in conn.execute(
+            f"SELECT id, ts, symbol, side, qty, price, exit_price, pnl, mode, status, "
+            f"stop_price, target_price, index_entry, broker_key, charges "
+            f"FROM trades WHERE {cf} ORDER BY id DESC LIMIT 100"
+        ).fetchall()]
+
+    closed = s["closed"] or 0
+    wins = s["wins"] or 0
+    win_rate = (wins / closed * 100) if closed > 0 else 0
+    cumulative, running = [], 0
+    for r in pnl_series:
+        running += r["pnl"]
+        cumulative.append({"ts": r["ts"], "pnl": r["pnl"], "cumulative": round(running, 2)})
+
+    return JSONResponse({
+        "stats": {
+            "total": s["total"], "open": s["open_count"] or 0, "closed": closed,
+            "wins": wins, "losses": s["losses"] or 0, "win_rate": round(win_rate, 1),
+            "total_pnl": round(s["total_pnl"], 2), "best_trade": round(s["best"], 2),
+            "worst_trade": round(s["worst"], 2), "avg_pnl": round(s["avg_pnl"], 2),
+            "today_pnl": round(s["today_pnl"], 2), "today_count": s["today_count"] or 0,
+            "total_charges": round(s["total_charges"], 2), "today_charges": round(s["today_charges"], 2),
+            "capital": 100000, "utilized": round(s["utilized"], 2),
+            "pnl_curve": cumulative,
+            "now": mc.now_ist().strftime("%Y-%m-%d %H:%M:%S IST"),
+        },
+        "trades": trades,
+    })
+
+
 @app.get("/channel", response_class=HTMLResponse)
 def channel_page(_: None = Depends(require_auth)) -> str:
     return _CHANNEL_PAGE.replace(
-        "fetch('/api/stats')", "fetch('/api/channel/stats')"
-    ).replace(
-        "fetch('/api/trades')", "fetch('/api/channel/trades')"
+        "fetch('/api/all'", "fetch('/api/channel/all'"
     ).replace(
         "fetch('/api/close/'", "fetch('/api/channel/close/'"
     ).replace(
-        "fetch('/api/ltp')", "fetch('/api/channel/ltp')"
+        "fetch('/api/ltp'", "fetch('/api/channel/ltp'"
     )
