@@ -73,6 +73,8 @@ _RE_REENTRY = re.compile(
     r'|ABOVE\s+(?:HIGH|LAST\s+SWING\s+HIGH)\s+(?:AGAIN|FOCUS)'
     r'|ABOVE\s+(\d+)\s+(?:PE|CE)\s+SIDE'
     r'|(?:BELOW|BELWO)\s+(?:DAY\s+LOW|(\d+))\s+NEW\s+BUY'
+    r'|ENTER\s+AFTER\s+BREAK\s+(\d+(?:\.\d+)?)'
+    r'|SL\s+HIT\s*[,.]?\s*(?:REBUY|RE[\s-]*BUY|RE[\s-]*ENTER)\s+(?:FROM\s+)?(?:LOW\s+)?(?:NEAR\s+)?(\d+(?:\.\d+)?)?'
     r')',
     re.IGNORECASE,
 )
@@ -93,6 +95,16 @@ def _norm_channel_id(raw_id):
     return raw_id
 
 
+_SYMBOL_ALIASES = {
+    "BAJAJAUTO": "BAJAJ-AUTO",
+    "BAJAJ AUTO": "BAJAJ-AUTO",
+    "KALYANJIL": "KALYANKJIL",
+    "LIC": "LICI",
+    "M&M": "M_M",
+    "M&MFIN": "M_MFIN",
+}
+
+
 def resolve_instrument(symbol_str, ref_date):
     parts = symbol_str.strip().split()
     if len(parts) < 3:
@@ -100,6 +112,7 @@ def resolve_instrument(symbol_str, ref_date):
     opt_type = parts[-1]
     strike = float(parts[-2])
     sym = "".join(parts[:-2]).upper()
+    sym = _SYMBOL_ALIASES.get(sym, sym)
     candidates = []
     for inst in master:
         seg = inst.get("segment", "")
@@ -115,6 +128,24 @@ def resolve_instrument(symbol_str, ref_date):
         if exp is None or exp < ref_date:
             continue
         candidates.append((exp, inst))
+    if not candidates and strike >= 10000:
+        alt_strike = strike / 10
+        for inst in master:
+            seg = inst.get("segment", "")
+            if seg not in ("NSE_FO", "BSE_FO", "MCX_FO"):
+                continue
+            if inst.get("asset_symbol", "").upper() != sym:
+                continue
+            if inst.get("instrument_type") != opt_type:
+                continue
+            if abs(float(inst.get("strike_price", -1)) - alt_strike) > 0.01:
+                continue
+            exp = _expiry_to_date(inst.get("expiry"))
+            if exp is None or exp < ref_date:
+                continue
+            candidates.append((exp, inst))
+        if candidates:
+            print(f"    Strike fix: {sym} {int(strike)} → {int(alt_strike)} (operator extra zero)")
     if not candidates:
         return None, None, None
     candidates.sort(key=lambda x: x[0])
@@ -440,7 +471,7 @@ def run_state_machine_with_debug(messages):
                 stop_loss=round(new_entry * sl_ratio), targets=last.targets,
             )
             msg_signals[msg.id] = re_sig
-            has_above = bool(re.search(r'\bABO(?:VE)?\b', upper))
+            has_above = bool(re.search(r'\bABO(?:VE)?\b', upper) or re.search(r'ENTER\s+AFTER\s+BREAK', upper))
             if has_above:
                 trigger_held = re_sig
                 trigger_held_msg_id = msg.id
@@ -626,7 +657,9 @@ async def main():
             continue
 
         lot_size = LOT_SIZES.get(base_sym, master_lot or 75)
-        qty = lot_size * args.lots
+        is_index = base_sym in INDEX_SYMS
+        lots = 3 if is_index else 2
+        qty = lot_size * lots
 
         opt_candles = fetch_option_candles(inst_key, target_date)
         if not opt_candles:

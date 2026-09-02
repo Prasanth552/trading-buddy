@@ -326,6 +326,10 @@ def _resolve_channel_option(
     _SYMBOL_ALIASES: dict[str, str] = {
         "KALYANJIL": "KALYANKJIL",
         "LIC": "LICI",
+        "BAJAJAUTO": "BAJAJ-AUTO",
+        "BAJAJ AUTO": "BAJAJ-AUTO",
+        "M&M": "M_M",
+        "M&MFIN": "M_MFIN",
     }
     sym = _SYMBOL_ALIASES.get(sym, sym)
 
@@ -344,6 +348,25 @@ def _resolve_channel_option(
         if exp is None or exp < today:
             continue
         candidates.append((exp, inst))
+
+    if not candidates and strike >= 10000:
+        alt_strike = strike / 10
+        for inst in instruments:
+            seg = inst.get("segment", "")
+            if seg not in ("NSE_FO", "BSE_FO", "MCX_FO"):
+                continue
+            if inst.get("asset_symbol", "").upper() != sym:
+                continue
+            if inst.get("instrument_type") != option_type:
+                continue
+            if abs(float(inst.get("strike_price", -1)) - alt_strike) > 0.01:
+                continue
+            exp = _expiry_to_date(inst.get("expiry"))
+            if exp is None or exp < today:
+                continue
+            candidates.append((exp, inst))
+        if candidates:
+            log.info("Strike fix: %s %s → %s (operator extra zero)", symbol, int(strike), int(alt_strike))
 
     if not candidates:
         fuzzy: list[tuple[date, dict[str, Any]]] = []
@@ -694,6 +717,8 @@ _RE_REENTRY = re.compile(
     r'|ABOVE\s+(?:HIGH|LAST\s+SWING\s+HIGH)\s+(?:AGAIN|FOCUS)'
     r'|ABOVE\s+(\d+)\s+(?:PE|CE)\s+SIDE'
     r'|(?:BELOW|BELWO)\s+(?:DAY\s+LOW|(\d+))\s+NEW\s+BUY'
+    r'|ENTER\s+AFTER\s+BREAK\s+(\d+(?:\.\d+)?)'
+    r'|SL\s+HIT\s*[,.]?\s*(?:REBUY|RE[\s-]*BUY|RE[\s-]*ENTER)\s+(?:FROM\s+)?(?:LOW\s+)?(?:NEAR\s+)?(\d+(?:\.\d+)?)?'
     r')',
     re.IGNORECASE,
 )
@@ -908,7 +933,7 @@ def parse_signal_ch2(text: str) -> ParsedSignal | None:
                                        "FAKE ALERT", "OFFER", "APPLICATION",
                                        "FOLLOW THIS", "PLS READ",
                                        "PERFORMANCE", "MEMBERS SEND",
-                                       "CONGRATULATIONS", "ENTER AFTER BREAK")):
+                                       "CONGRATULATIONS")):
         return None
 
     if re.search(r'NOT\s+ACTIVE\s+AVOID', upper):
@@ -2537,7 +2562,7 @@ async def start_listener() -> None:
                 trade_sym = f"{last.symbol} {int(last.strike)} {opt_type}"
                 _ch2_last_reentry_ts = now_ts
                 _ch2_msg_signals[event.message.id] = re_sig
-                has_above = bool(re.search(r'\bABO(?:VE)?\b', upper_ctl))
+                has_above = bool(re.search(r'\bABO(?:VE)?\b', upper_ctl) or re.search(r'ENTER\s+AFTER\s+BREAK', upper_ctl))
                 if has_above:
                     _ch2_trigger_held = re_sig
                     _ch2_trigger_held_msg_id = event.message.id
