@@ -145,6 +145,30 @@ def resolve_instrument(symbol_str, ref_date):
             candidates.append((exp, inst))
         if candidates:
             print(f"    Strike fix: {sym} {int(strike)} → {int(alt_strike)} (operator extra zero)")
+    # Nearest-strike fallback: snap to closest available strike
+    if not candidates:
+        search_strike = strike / 10 if strike >= 10000 else strike
+        nearest = None
+        nearest_dist = float("inf")
+        for inst in master:
+            seg = inst.get("segment", "")
+            if seg not in ("NSE_FO", "BSE_FO", "MCX_FO"):
+                continue
+            if inst.get("asset_symbol", "").upper() != sym:
+                continue
+            if inst.get("instrument_type") != opt_type:
+                continue
+            exp = _expiry_to_date(inst.get("expiry"))
+            if exp is None or exp < ref_date:
+                continue
+            inst_strike = float(inst.get("strike_price", -1))
+            dist = abs(inst_strike - search_strike)
+            if dist < nearest_dist:
+                nearest_dist = dist
+                nearest = (exp, inst, inst_strike)
+        if nearest and nearest_dist <= search_strike * 0.02:
+            candidates.append((nearest[0], nearest[1]))
+            print(f"    Strike snap: {sym} {int(strike)} → {int(nearest[2])} (nearest, delta={nearest_dist:.0f})")
     if not candidates:
         return None, None, None
     candidates.sort(key=lambda x: x[0])
@@ -241,6 +265,7 @@ def run_state_machine_with_debug(messages):
     executed = []
     msg_signals = {}          # msg_id → ParsedSignal
     buffer_start_id = None    # tracks which msg_id started the split buffer
+    buffer_links = {}         # completion_msg_id → buffer_start_id (split-signal dedup)
     executed_roots = set()    # root signal msg_ids that have been executed
     inst_to_root = {}         # instrument_key → most recent root_id (for fallback dedup)
     inst_last_exec_ts = {}    # instrument_key → epoch of last execution (cooldown dedup)
@@ -272,10 +297,11 @@ def run_state_machine_with_debug(messages):
         return None
 
     def find_root_signal_id(msg_id):
-        """Walk reply chain upward to find the topmost signal msg_id (root trade)."""
+        """Walk reply chain upward to find the topmost signal msg_id (root trade).
+        Follows buffer links so split signals resolve to the same root."""
         visited = set()
-        current = msg_id
-        last_signal = msg_id if msg_id in msg_signals else None
+        current = buffer_links.get(msg_id, msg_id)
+        last_signal = current if current in msg_signals else None
         while current:
             if current in visited:
                 break
@@ -285,6 +311,7 @@ def run_state_machine_with_debug(messages):
             parent = msg_by_id.get(current)
             if parent and parent.reply_to and parent.reply_to.reply_to_msg_id:
                 next_id = parent.reply_to.reply_to_msg_id
+                next_id = buffer_links.get(next_id, next_id)
                 if next_id in msg_by_id:
                     current = next_id
                     continue
@@ -498,16 +525,13 @@ def run_state_machine_with_debug(messages):
                 stop_loss=round(new_entry * sl_ratio), targets=last.targets,
             )
             msg_signals[msg.id] = re_sig
+            # Re-entry messages are trade-management guidance — always hold
+            # for ACTIVE confirmation, never execute directly.
+            trigger_held = re_sig
+            trigger_held_msg_id = msg.id
+            trigger_held_is_fallback = is_fallback
             has_above = bool(re.search(r'\bABO(?:VE)?\b', upper))
-            if has_above:
-                trigger_held = re_sig
-                trigger_held_msg_id = msg.id
-                trigger_held_is_fallback = is_fallback
-                debug_log.append({"msg_id": msg.id, "action": f"RE-ENTRY ABOVE → trigger_held: {re_sig.symbol} {int(re_sig.strike)} {opt_type} entry={new_entry}" + (" [FALLBACK]" if is_fallback else "")})
-            else:
-                if record_execution(re_sig, ts_epoch, "re-entry", ts.strftime("%H:%M"), msg.id,
-                                    origin_msg_id=msg.id, is_fallback_reentry=is_fallback):
-                    debug_log.append({"msg_id": msg.id, "action": f"RE-ENTRY EXECUTE: {re_sig.symbol} {int(re_sig.strike)} {opt_type} entry={new_entry}"})
+            debug_log.append({"msg_id": msg.id, "action": f"RE-ENTRY {'ABOVE' if has_above else 'NEAR'} → trigger_held: {re_sig.symbol} {int(re_sig.strike)} {opt_type} entry={new_entry}" + (" [FALLBACK]" if is_fallback else "")})
             continue
 
         # AGAIN (reply-based re-entry)
@@ -537,6 +561,7 @@ def run_state_machine_with_debug(messages):
             completed_buffer_start = None
             if had_pending and _cl._ch2_pending is None and buffer_start_id:
                 msg_signals[buffer_start_id] = sig
+                buffer_links[msg.id] = buffer_start_id
                 completed_buffer_start = buffer_start_id
                 debug_log.append({"msg_id": msg.id, "action": f"BUFFER COMPLETE: registered signal under both ID={buffer_start_id} and ID={msg.id}"})
                 buffer_start_id = None

@@ -368,6 +368,32 @@ def _resolve_channel_option(
         if candidates:
             log.info("Strike fix: %s %s → %s (operator extra zero)", symbol, int(strike), int(alt_strike))
 
+    # Nearest-strike fallback: snap to closest available strike (within 2%)
+    if not candidates:
+        search_strike = strike / 10 if strike >= 10000 else strike
+        nearest = None
+        nearest_dist = float("inf")
+        for inst in instruments:
+            seg = inst.get("segment", "")
+            if seg not in ("NSE_FO", "BSE_FO", "MCX_FO"):
+                continue
+            if inst.get("asset_symbol", "").upper() != sym:
+                continue
+            if inst.get("instrument_type") != option_type:
+                continue
+            exp = _expiry_to_date(inst.get("expiry"))
+            if exp is None or exp < today:
+                continue
+            inst_strike = float(inst.get("strike_price", -1))
+            dist = abs(inst_strike - search_strike)
+            if dist < nearest_dist:
+                nearest_dist = dist
+                nearest = (exp, inst, inst_strike)
+        if nearest and nearest_dist <= search_strike * 0.02:
+            candidates.append((nearest[0], nearest[1]))
+            log.info("Strike snap: %s %s → %s (nearest, delta=%.0f)",
+                     symbol, int(strike), int(nearest[2]), nearest_dist)
+
     if not candidates:
         fuzzy: list[tuple[date, dict[str, Any]]] = []
         for inst in instruments:
@@ -705,6 +731,7 @@ _ch2_inst_last_exec_ts: dict[str, float] = {}  # instrument_key → epoch (coold
 _ch2_trigger_held_msg_id: int = 0
 _ch2_trigger_held_is_fallback: bool = False
 _ch2_buffer_start_id: int | None = None
+_ch2_buffer_links: dict[int, int] = {}  # completion_msg_id → buffer_start_id (split-signal dedup)
 CH2_INST_COOLDOWN = 10 * 60  # 10-min same-instrument cooldown
 
 _RE_REENTRY = re.compile(
@@ -766,10 +793,15 @@ def _ch2_resolve_signal_via_chain(start_msg_id: int) -> ParsedSignal | None:
 
 
 def _ch2_find_root_signal_id(msg_id: int) -> int:
-    """Walk reply chain upward to find the topmost signal msg_id (root trade)."""
+    """Walk reply chain upward to find the topmost signal msg_id (root trade).
+
+    Also follows buffer links: if a split signal was registered under both
+    msg A (header) and msg B (TGT/SL), the buffer link B→A ensures both
+    resolve to the same root.
+    """
     visited: set[int] = set()
-    current = msg_id
-    last_signal = msg_id if msg_id in _ch2_msg_signals else None
+    current = _ch2_buffer_links.get(msg_id, msg_id)
+    last_signal = current if current in _ch2_msg_signals else None
     while current:
         if current in visited:
             break
@@ -778,6 +810,7 @@ def _ch2_find_root_signal_id(msg_id: int) -> int:
             last_signal = current
         parent_reply = _ch2_msg_replies.get(current)
         if parent_reply:
+            parent_reply = _ch2_buffer_links.get(parent_reply, parent_reply)
             current = parent_reply
             continue
         break
@@ -2592,26 +2625,19 @@ async def start_listener() -> None:
                 trade_sym = f"{last.symbol} {int(last.strike)} {opt_type}"
                 _ch2_last_reentry_ts = now_ts
                 _ch2_msg_signals[event.message.id] = re_sig
+                # Re-entry messages are trade-management guidance, not new
+                # entries.  Always hold for ACTIVE confirmation — never
+                # execute directly.
+                _ch2_trigger_held = re_sig
+                _ch2_trigger_held_msg_id = event.message.id
+                _ch2_trigger_held_is_fallback = is_fallback
                 has_above = bool(re.search(r'\bABO(?:VE)?\b', upper_ctl))
-                if has_above:
-                    _ch2_trigger_held = re_sig
-                    _ch2_trigger_held_msg_id = event.message.id
-                    _ch2_trigger_held_is_fallback = is_fallback
-                    log.info("[CH2] RE-ENTRY held (ABOVE%s): %s @ %.0f SL=%.0f",
-                             " FALLBACK" if is_fallback else "", trade_sym, new_entry, re_sig.stop_loss)
-                    _notify(f"[CH2] Re-entry held (ABOVE trigger):\n"
-                            f"{trade_sym} @ {new_entry} SL={re_sig.stop_loss}\n"
-                            f"Waiting for Active...")
-                else:
-                    if _ch2_can_execute(re_sig, event.message.id,
-                                        origin_msg_id=event.message.id,
-                                        is_fallback=is_fallback):
-                        log.info("[CH2] RE-ENTRY executing: %s @ %.0f SL=%.0f",
-                                 trade_sym, new_entry, re_sig.stop_loss)
-                        _notify(f"*[CH2] Re-entry executing:*\n{trade_sym} @ {new_entry}")
-                        _execute_and_notify(re_sig, channel, ch_label)
-                    else:
-                        log.info("[CH2] RE-ENTRY blocked by dedup: %s", trade_sym)
+                log.info("[CH2] RE-ENTRY held (%s%s): %s @ %.0f SL=%.0f",
+                         "ABOVE" if has_above else "NEAR",
+                         " FALLBACK" if is_fallback else "", trade_sym, new_entry, re_sig.stop_loss)
+                _notify(f"[CH2] Re-entry held ({('ABOVE' if has_above else 'NEAR')} trigger):\n"
+                        f"{trade_sym} @ {new_entry} SL={re_sig.stop_loss}\n"
+                        f"Waiting for Active...")
                 return
 
             # Re-entry via reply with "AGAIN" — parse original signal, execute
@@ -2667,6 +2693,7 @@ async def start_listener() -> None:
                 if had_pending and _ch2_pending is None and _ch2_buffer_start_id:
                     _ch2_msg_signals[_ch2_buffer_start_id] = sig
                     completed_buffer_start = _ch2_buffer_start_id
+                    _ch2_buffer_links[event.message.id] = _ch2_buffer_start_id
                     _ch2_buffer_start_id = None
                     log.info("[CH2] Buffer complete: registered under both %d and %d",
                              completed_buffer_start, event.message.id)

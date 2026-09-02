@@ -198,16 +198,11 @@ def run_scenario(name, messages):
                                       option_type=opt_type, trigger_price=new_entry,
                                       stop_loss=round(new_entry * sl_ratio), targets=last.targets)
                 _cl._ch2_msg_signals[msg_id] = re_sig
-                has_above = bool(re.search(r'\bABOVE\b', upper))
-                if has_above:
-                    _cl._ch2_trigger_held = re_sig
-                    _cl._ch2_trigger_held_msg_id = msg_id
-                    _cl._ch2_trigger_held_is_fallback = is_fb
-                else:
-                    if _ch2_can_execute(re_sig, msg_id, origin_msg_id=msg_id, is_fallback=is_fb):
-                        executed.append({"inst": _ch2_inst_key(re_sig), "time": dt.strftime("%H:%M"),
-                                         "reason": "re-entry", "msg_id": msg_id})
-                        _cl._ch2_last_executed = re_sig
+                # Re-entry messages are trade-management guidance — always
+                # hold for ACTIVE confirmation, never execute directly.
+                _cl._ch2_trigger_held = re_sig
+                _cl._ch2_trigger_held_msg_id = msg_id
+                _cl._ch2_trigger_held_is_fallback = is_fb
                 continue
 
             # Parse signal
@@ -472,18 +467,33 @@ check("3-hop chain walk resolves correctly",
       run_scenario("t14", msgs), ["NIFTY 24250 PE"])
 
 
-# --- Test 15: Re-entry with "NEAR same range" (no ABOVE) → immediate exec ---
-print("\n  15. Re-entry without ABOVE → immediate execution")
+# --- Test 15: Re-entry always held (needs ACTIVE to execute) ---
+print("\n  15. Re-entry (NEAR or ABOVE) always held for ACTIVE")
 msgs = [
     make_msg(1500, "NIFTY 24050 PE\nNEAR 15", make_epoch(13, 5)),
     make_msg(1501, "TGT 26/38/50\nSL 15", make_epoch(13, 5, 10)),
-    # Wait for flush
     make_msg(1502, "some filler", make_epoch(13, 5, 20)),
-    # Re-entry 46 min later (past cooldown)
+    # Re-entry 46 min later — goes to trigger_held, not executed
     make_msg(1503, "Near same range again", make_epoch(13, 51), reply_to=1500),
+    # Without ACTIVE, only the original trade executes
 ]
-check("NEAR re-entry executes immediately (no ABOVE hold)",
-      run_scenario("t15", msgs), ["NIFTY 24050 PE", "NIFTY 24050 PE"])
+check("NEAR re-entry held (no ACTIVE → only 1 trade)",
+      run_scenario("t15", msgs), ["NIFTY 24050 PE"])
+
+
+# --- Test 15b: Re-entry + ACTIVE → executes ---
+print("\n  15b. Re-entry + ACTIVE → second trade executes")
+msgs = [
+    make_msg(1510, "NIFTY 24050 PE\nNEAR 15", make_epoch(13, 5)),
+    make_msg(1511, "TGT 26/38/50\nSL 15", make_epoch(13, 5, 10)),
+    make_msg(1512, "some filler", make_epoch(13, 5, 20)),
+    # Re-entry 46 min later — held
+    make_msg(1513, "Near same range again", make_epoch(13, 51), reply_to=1510),
+    # ACTIVE confirms re-entry
+    make_msg(1514, "Active", make_epoch(13, 52)),
+]
+check("NEAR re-entry + ACTIVE → 2 trades",
+      run_scenario("t15b", msgs), ["NIFTY 24050 PE", "NIFTY 24050 PE"])
 
 
 # --- Test 16: Fallback re-entry respects inst_to_root dedup ---
