@@ -205,13 +205,11 @@ def walk_candles_detailed(candles, entry, sl, targets, qty):
                        "l": c["low"], "c": c["close"],
                        "pnl_range": f"₹{low_pnl:+,.0f} to ₹{high_pnl:+,.0f}"})
 
-        # Check TGT BEFORE SL within same candle (optimistic ordering)
+        # Exit at first TGT hit
         if remaining and c["high"] >= remaining[0]:
-            hit = remaining.pop(0)
-            if not remaining:
-                pnl = (hit - entry) * qty
-                return hit, "TGT_ALL", pnl, peak_pnl, trail
-            cur_sl = hit
+            hit = remaining[0]
+            pnl = (hit - entry) * qty
+            return hit, "TGT1", pnl, peak_pnl, trail
 
         if cur_sl and c["low"] <= cur_sl:
             sl_pnl = (cur_sl - entry) * qty
