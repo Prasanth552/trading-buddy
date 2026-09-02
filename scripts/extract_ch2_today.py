@@ -31,7 +31,7 @@ target_date = date(*[int(x) for x in date_str.split("-")])
 try:
     import config
     from src.notify.channel_listener import (
-        ParsedSignal, parse_signal_ch2,
+        ParsedSignal, parse_signal_ch2, CH2_INDEX_ONLY,
         _CH2_SYMBOL_RE, _CH2_ENTRY_RE, _CH2_TGT_RE, _CH2_SL_RE,
         _ch2_extract_targets, _ch2_extract_sl,
     )
