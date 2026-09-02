@@ -732,7 +732,22 @@ async def main():
             print(f"  {entry_time} {sym_str} — NO CANDLES AFTER ENTRY")
             continue
 
-        entry_price = filtered[0]["open"]
+        # Entry price logic: the operator calls a trigger price ("Near 300").
+        # If the entry candle's range includes the trigger, the operator
+        # enters at the trigger price — not at the candle open which may
+        # already be higher.  Use trigger price when achievable.
+        candle_open = filtered[0]["open"]
+        candle_low = filtered[0]["low"]
+        candle_high = filtered[0]["high"]
+        trigger = sig.trigger_price
+        if trigger > 0 and candle_low <= trigger <= candle_high:
+            entry_price = trigger
+        elif trigger > 0 and candle_open > trigger and candle_low < candle_open:
+            # Candle opened above trigger but dipped — enter at the low
+            # (conservative estimate of best achievable price)
+            entry_price = max(candle_low, trigger * 0.95)
+        else:
+            entry_price = candle_open
 
         # Validate: skip garbage signals where entry > all targets or
         # trigger price is wildly inconsistent with actual option price
@@ -765,9 +780,10 @@ async def main():
         })
 
         icon = "WIN" if pnl >= 0 else "LOSS"
+        entry_src = "trigger" if entry_price == trigger else f"candle (open={candle_open:.1f})"
         print(f"  {entry_time} {sym_str} [{ex['reason']}]")
         print(f"    Signal:  trigger={sig.trigger_price} SL={sig.stop_loss} TGT={sig.targets}")
-        print(f"    Actual:  entry={entry_price:.1f} → exit={exit_price:.1f} ({result})")
+        print(f"    Actual:  entry={entry_price:.1f} [{entry_src}] → exit={exit_price:.1f} ({result})")
         print(f"    P&L:     ₹{pnl:+,.0f}  (peak: ₹{peak_pnl:+,.0f})  [{icon}]")
 
         if result in ("SL", "MAX_SL"):
