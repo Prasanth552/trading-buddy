@@ -384,8 +384,10 @@ def run_state_machine_with_debug(messages):
             last_near_flush_ts = ts_epoch
             queued_signal = None
 
-        # WAIT FOR TRIGGER
-        if re.search(r'WAIT\s+FOR\s+TRIGGER', upper):
+        # WAIT FOR TRIGGER / ENTER AFTER BREAK / WAIT FOR RANGE
+        if (re.search(r'WAIT\s+FOR\s+TRIGGER', upper)
+                or re.search(r'ENTER\s+AFTER\s+BREAK', upper)
+                or re.search(r'WAIT\s+FOR\s+RANGE', upper)):
             if queued_signal:
                 trigger_held = queued_signal
                 trigger_held_msg_id = queued_msg_id

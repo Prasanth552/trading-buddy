@@ -538,6 +538,19 @@ def execute_signal(sig: ParsedSignal, *, channel: str = "ch1", max_lots: int | N
     except Exception as exc:  # noqa: BLE001
         log.warning("LTP fetch failed, using signal price: %s", exc)
 
+    # Sanity check: reject if LTP is wildly different from signal price
+    if sig.trigger_price > 0:
+        ratio = entry_price / sig.trigger_price
+        if ratio > 3.0 or ratio < 0.25:
+            log.warning("ENTRY REJECTED: LTP %.2f is %.1fx signal price %.2f — "
+                        "likely wrong instrument. %s %s %s",
+                        entry_price, ratio, sig.trigger_price,
+                        sig.symbol, int(sig.strike), sig.option_type)
+            _notify(f"⚠️ *Entry rejected* — {sig.symbol} {int(sig.strike)} {sig.option_type}\n"
+                    f"LTP {entry_price:.1f} vs signal {sig.trigger_price:.1f} "
+                    f"({ratio:.1f}x) — wrong instrument?")
+            return {"placed": False, "reason": f"LTP {entry_price} too far from signal {sig.trigger_price}"}
+
     trade_row = {
         "ts": __import__("src.utils.market_calendar", fromlist=["now_ist"]).now_ist().isoformat(timespec="seconds"),
         "symbol": f"{sig.symbol} {int(sig.strike)} {sig.option_type}",
@@ -2451,8 +2464,10 @@ async def start_listener() -> None:
 
             upper_ctl = text.strip().upper()
 
-            # "WAIT FOR TRIGGER" — hold the queued signal, don't execute yet
-            if re.search(r'WAIT\s+FOR\s+TRIGGER', upper_ctl):
+            # "WAIT FOR TRIGGER" or "ENTER AFTER BREAK" — hold the queued signal
+            if (re.search(r'WAIT\s+FOR\s+TRIGGER', upper_ctl)
+                    or re.search(r'ENTER\s+AFTER\s+BREAK', upper_ctl)
+                    or re.search(r'WAIT\s+FOR\s+RANGE', upper_ctl)):
                 if _ch2_queued_task and _ch2_queued_signal:
                     _ch2_queued_task.cancel()
                     _ch2_trigger_held = _ch2_queued_signal

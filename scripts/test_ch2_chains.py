@@ -113,8 +113,10 @@ def run_scenario(name, messages):
                 last_near_flush_ts = ts_epoch
                 queued = None
 
-            # WAIT FOR TRIGGER
-            if re.search(r'WAIT\s+FOR\s+TRIGGER', upper):
+            # WAIT FOR TRIGGER / ENTER AFTER BREAK / WAIT FOR RANGE
+            if (re.search(r'WAIT\s+FOR\s+TRIGGER', upper)
+                    or re.search(r'ENTER\s+AFTER\s+BREAK', upper)
+                    or re.search(r'WAIT\s+FOR\s+RANGE', upper)):
                 if queued:
                     _cl._ch2_trigger_held = queued[0]
                     _cl._ch2_trigger_held_msg_id = queued[2]
