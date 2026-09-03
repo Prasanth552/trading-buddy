@@ -44,7 +44,7 @@ parser.add_argument("--max-loss", type=float, default=6000, help="Per-trade hard
 parser.add_argument("--floor", type=float, default=2000, help="Profit floor")
 parser.add_argument("--itm-min", type=int, default=300, help="Min ITM depth for PE strike (pts)")
 parser.add_argument("--itm-max", type=int, default=900, help="Max ITM depth for PE strike (pts)")
-parser.add_argument("--gap-threshold", type=float, default=-0.50, help="Min gap from open %% to trigger (negative = down)")
+parser.add_argument("--gap-threshold", type=float, default=-0.10, help="Min gap from open %% to trigger (negative = down)")
 parser.add_argument("--skip-hours", default="12,13", help="Hours to skip (comma-separated)")
 parser.add_argument("--cooldown", type=int, default=30, help="Min minutes between signals on same index")
 parser.add_argument("--indexes", default="NIFTY,SENSEX", help="Indexes to scan (BANKNIFTY excluded — 48%% WR, net negative)")
