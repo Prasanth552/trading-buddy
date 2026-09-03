@@ -291,6 +291,15 @@ def api_ltp(channel: str = "ch1") -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+@app.get("/api/ml")
+def api_ml() -> JSONResponse:
+    try:
+        from src.ml.bot import ml_status
+        return JSONResponse(ml_status())
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse({"enabled": False, "error": str(exc)})
+
+
 @app.get("/api/scan")
 def api_scan() -> JSONResponse:
     """Run the market scanner and return today's top signals."""
@@ -606,6 +615,13 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
   <div class=cw><canvas id=cv></canvas><div class="cl-label" id=cvl></div></div>
 </div>
 
+<!-- ML Scanner -->
+<div class=sec id=mlSec>
+  <div class=sec-h>ML Scanner <span class=badge id=mlBadge>-</span></div>
+  <div class=chips id=mlChips></div>
+  <div id=mlList></div>
+</div>
+
 <!-- Open positions -->
 <div class=sec>
   <div class=sec-h>Open Positions <span class=badge id=oc>0</span></div>
@@ -875,6 +891,43 @@ function renderScan(data){
   }).join('');
 }
 
+function rML(ml){
+  if(!ml||!ml.enabled){$('mlBadge').textContent='off';$('mlChips').innerHTML='';
+    $('mlList').innerHTML='<div class=empty>ML scanner not active</div>';return}
+  const ms=ml.summary||{};
+  $('mlBadge').textContent=(ms.open_trades||0)+' open';
+  $('mlChips').innerHTML=[
+    {l:'Trades',v:String(ms.total_trades||0),c:''},
+    {l:'Win Rate',v:ms.win_rate||'—',c:(parseFloat(ms.win_rate)>=50?'pos':'')},
+    {l:'Net P&L',v:inr(ms.net_pnl),c:pc(ms.net_pnl)},
+    {l:'Open',v:String(ms.open_trades||0),c:''},
+  ].map(i=>'<div class=chip><div class=cl>'+i.l+'</div><div class="cv '+i.c+'">'+i.v+'</div></div>').join('');
+  const sigs=ml.signals||[];
+  if(!sigs.length){$('mlList').innerHTML='<div class=empty>No ML signals today</div>';return}
+  $('mlList').innerHTML=sigs.map(s=>{
+    const isW=s.pnl!=null&&s.pnl>0;
+    const conf=s.confidence?(s.confidence*100).toFixed(0)+'%':'-';
+    const cc=s.confidence>=0.7?'hi':s.confidence>=0.5?'md':'lo';
+    const st=s.status==='OPEN'?'<span class="pill op">OPEN</span>':
+             s.pnl>0?'<span class="pill cl">'+s.exit_reason+'</span>':
+             '<span class="pill sl">'+s.exit_reason+'</span>';
+    return '<div class=trade-card onclick="togCard(this)"><div class=tc-top>'+
+      '<div class="tc-icon '+(s.status==='OPEN'?'w':isW?'w':'l')+'">'+(s.status==='OPEN'?'⟳':isW?'W':'L')+'</div>'+
+      '<div class=tc-body><div class=tc-sym>'+s.index_sym+' PE '+s.strike+'</div>'+
+        '<div class=tc-meta>'+(s.ts||'').slice(11,16)+' | <span class="scan-conf '+cc+'" style="font-size:10px;padding:1px 6px">'+conf+'</span></div></div>'+
+      '<div class="tc-pnl '+(s.pnl!=null?pc(s.pnl):'')+'">'+(s.pnl!=null?inr(s.pnl):st)+'</div>'+
+    '</div>'+
+    '<div class=tc-detail><div class=tc-grid>'+
+      '<div class=tc-item>Spot <b>'+Math.round(s.spot).toLocaleString('en-IN')+'</b></div>'+
+      '<div class=tc-item>Entry <b>₹'+Math.round(s.entry)+'</b></div>'+
+      '<div class=tc-item>SL <b>₹'+Math.round(s.sl)+'</b></div>'+
+      '<div class=tc-item>TGT <b>₹'+Math.round(s.tgt)+'</b></div>'+
+      '<div class=tc-item>Qty <b>'+s.qty+'</b></div>'+
+      '<div class=tc-item>Exit <b>'+(s.exit_price?'₹'+Math.round(s.exit_price):'-')+'</b></div>'+
+    '</div></div></div>'
+  }).join('');
+}
+
 async function load(){
   if(_loading)return;
   _loading=true;
@@ -886,6 +939,7 @@ async function load(){
     rHero(s);rRing(s);rChips(s);rC(s.pnl_curve);rH(t);
     rO(t);
     fetch('/api/ltp'+q).then(r=>r.json()).then(ltp=>{if(!ltp.error){LTP=ltp;rO(t)}}).catch(()=>{});
+    fetch('/api/ml').then(r=>r.json()).then(rML).catch(()=>{});
   }catch(e){$('sd').className='live-dot off'}
   finally{_loading=false}
 }
