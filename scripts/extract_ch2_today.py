@@ -211,7 +211,7 @@ def walk_candles_detailed(candles, entry, sl, targets, qty):
             if not remaining:
                 pnl = (hit - entry) * qty
                 return hit, "TGT_ALL", pnl, peak_pnl, trail
-            cur_sl = entry  # cost-to-cost: trail SL to entry after TGT1
+            cur_sl = hit
 
         if cur_sl and c["low"] <= cur_sl:
             sl_pnl = (cur_sl - entry) * qty

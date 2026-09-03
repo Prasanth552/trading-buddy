@@ -2157,7 +2157,7 @@ async def start_listener() -> None:
                         remaining = trade["targets_remaining"] or ""
                         if remaining:
                             next_tgts = [float(t) for t in remaining.split(",") if t.strip()]
-                            new_sl = entry  # cost-to-cost: trail SL to entry after TGT1
+                            new_sl = trade["target_price"]
                             if next_tgts:
                                 new_tgt = next_tgts.pop(0)
                                 new_remaining = ",".join(str(t) for t in next_tgts) if next_tgts else None
