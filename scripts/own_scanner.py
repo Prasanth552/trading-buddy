@@ -58,10 +58,13 @@ start_date = end_date - timedelta(days=args.days - 1)
 SKIP_HOURS = set(int(h) for h in args.skip_hours.split(",") if h.strip())
 INDEXES = [s.strip() for s in args.indexes.split(",")]
 
+parser.add_argument("--slippage", type=float, default=0.5, help="Slippage %% on entry (bid-ask spread)")
+
 try:
     import config
     from src.broker.upstox_data import UpstoxData, load_cached_token
     from src.broker.upstox_client import _expiry_to_date
+    from src.notify.channel_listener import calc_charges
 except ImportError as e:
     print(f"ERROR: {e}"); sys.exit(1)
 
@@ -240,9 +243,12 @@ def simulate_signal(sig, ref_date):
     if not filtered:
         return None
 
-    entry = filtered[0]["open"]
-    if entry <= 0:
+    raw_entry = filtered[0]["open"]
+    if raw_entry <= 0:
         return None
+
+    # Slippage: entry is worse by slippage % (paying more for the option)
+    entry = raw_entry * (1 + args.slippage / 100)
 
     lot_size = LOT_SIZES.get(sig["index"], 75)
     qty = lot_size * args.lots
@@ -256,26 +262,28 @@ def simulate_signal(sig, ref_date):
     floor_armed = False
     cur_sl = sl_price
 
+    def _finalize(exit_price, result):
+        gross_pnl = (exit_price - entry) * qty
+        charges = calc_charges(entry, exit_price, qty)["total"]
+        net_pnl = gross_pnl - charges
+        return {"entry": round(entry, 2), "exit": round(exit_price, 2), "qty": qty,
+                "gross_pnl": round(gross_pnl, 2), "charges": round(charges, 2),
+                "pnl": round(net_pnl, 2), "result": result,
+                "sl": round(sl_price, 2), "tgt": round(tgt_price, 2),
+                "slippage": round(entry - raw_entry, 2)}
+
     for c in filtered:
         low_pnl = (c["low"] - entry) * qty
-        # Hard SL cap
+        # Hard SL cap (on gross, before charges)
         if args.max_loss > 0 and low_pnl <= -args.max_loss:
             exit_price = entry - (args.max_loss / qty)
-            return {"entry": entry, "exit": exit_price, "qty": qty,
-                    "pnl": -args.max_loss, "result": "MAX_SL",
-                    "sl": sl_price, "tgt": tgt_price}
+            return _finalize(exit_price, "MAX_SL")
         # SL hit
         if c["low"] <= cur_sl:
-            pnl = (cur_sl - entry) * qty
-            return {"entry": entry, "exit": cur_sl, "qty": qty,
-                    "pnl": pnl, "result": "SL",
-                    "sl": sl_price, "tgt": tgt_price}
+            return _finalize(cur_sl, "SL")
         # TGT hit
         if c["high"] >= tgt_price:
-            pnl = (tgt_price - entry) * qty
-            return {"entry": entry, "exit": tgt_price, "qty": qty,
-                    "pnl": pnl, "result": "TGT",
-                    "sl": sl_price, "tgt": tgt_price}
+            return _finalize(tgt_price, "TGT")
         # Profit floor
         candle_peak = (c["high"] - entry) * qty
         peak_pnl = max(peak_pnl, candle_peak)
@@ -285,17 +293,11 @@ def simulate_signal(sig, ref_date):
             cur_pnl = (c["low"] - entry) * qty
             if cur_pnl <= args.floor:
                 floor_price = entry + (args.floor / qty)
-                pnl = args.floor
-                return {"entry": entry, "exit": floor_price, "qty": qty,
-                        "pnl": pnl, "result": "FLOOR",
-                        "sl": sl_price, "tgt": tgt_price}
+                return _finalize(floor_price, "FLOOR")
 
     # EOD
     exit_price = filtered[-1]["close"]
-    pnl = (exit_price - entry) * qty
-    return {"entry": entry, "exit": exit_price, "qty": qty,
-            "pnl": pnl, "result": "EOD",
-            "sl": sl_price, "tgt": tgt_price}
+    return _finalize(exit_price, "EOD")
 
 
 def main():
@@ -303,6 +305,7 @@ def main():
     print(f"  OWN SCANNER BACKTEST — {start_date} to {end_date}")
     print(f"  Indexes: {', '.join(INDEXES)} | {args.lots}L | ₹{args.max_loss:,.0f} SL cap | ₹{args.floor:,.0f} floor")
     print(f"  ITM depth: {args.itm_min}-{args.itm_max} pts | Gap threshold: {args.gap_threshold}%")
+    print(f"  Slippage: {args.slippage}% | Charges: real (STT+brokerage+exchange+GST)")
     print(f"  Skip hours: {SKIP_HOURS} | Cooldown: {args.cooldown} min | Max signals/day: {args.max_signals_per_day}")
     print(f"{'='*100}\n")
 
@@ -397,11 +400,18 @@ def main():
     green_days = sum(1 for d in day_results if d["pnl"] >= 0 and d["trades"] > 0)
     red_days = sum(1 for d in day_results if d["pnl"] < 0)
 
+    total_gross = sum(t.get("gross_pnl", t["pnl"]) for t in all_trades)
+    total_charges = sum(t.get("charges", 0) for t in all_trades)
+    total_slippage = sum(t.get("slippage", 0) * t["qty"] for t in all_trades)
+
     print(f"  Period:        {start_date} → {end_date}")
     print(f"  Trading days:  {trading_days} (with signals)")
     print(f"  Total signals: {len(all_signals)}  |  Total trades: {len(all_trades)}")
     print(f"  Win rate:      {win_rate:.1f}% ({wins}W / {losses}L)")
-    print(f"  Total P&L:     ₹{total_pnl:+,.0f}")
+    print(f"  Gross P&L:     ₹{total_gross:+,.0f}")
+    print(f"  Charges:       ₹{total_charges:,.0f}  ({len(all_trades)} trades × avg ₹{total_charges/max(len(all_trades),1):.0f})")
+    print(f"  Slippage cost: ₹{total_slippage:,.0f}  ({args.slippage}%% on entry)")
+    print(f"  Net P&L:       ₹{total_pnl:+,.0f}")
     print(f"  Avg daily:     ₹{total_pnl / max(trading_days, 1):+,.0f}")
     print(f"  Avg win:       ₹{avg_win:+,.0f}")
     print(f"  Avg loss:      ₹{avg_loss:+,.0f}")
