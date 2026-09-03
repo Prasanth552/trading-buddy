@@ -222,6 +222,15 @@ def api_performance(_: None = Depends(require_auth)) -> JSONResponse:
     return JSONResponse(compute_stats(db.closed_trades_with_context()))
 
 
+@app.get("/api/ml")
+def api_ml(_: None = Depends(require_auth)) -> JSONResponse:
+    try:
+        from src.ml.bot import ml_status
+        return JSONResponse(ml_status())
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse({"enabled": False, "error": str(exc)})
+
+
 @app.get("/api/attention")
 def api_attention(_: None = Depends(require_auth)) -> JSONResponse:
     from src.utils.attention import attention_items
@@ -475,6 +484,7 @@ _PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
 <h2>Open positions <span id=posnote class=note></span></h2><div class=scroll id=positions></div>
 <h2>Recent trades</h2><div class=scroll id=trades></div>
 <h2>Recent signals</h2><div class=scroll id=signals></div>
+<h2>🤖 ML Scanner</h2><div class=grid id=mlstats></div><div class=scroll id=mlsignals></div>
 <h2>Latest news</h2><div class=scroll id=news></div>
 <h2>⚙️ Needs attention</h2><div id=attention></div>
 <script>
@@ -552,6 +562,23 @@ async function load(){
     ['Entry',r=>r.entry],['Stop',r=>r.stop],['Target',r=>r.target]]);
   const N=await (await fetch('/api/news')).json();
   $('news').innerHTML=tbl(N,[['Sent',r=>r.sentiment||'-'],['Sym',r=>r.symbol||'-'],['Headline',r=>(r.headline||'').slice(0,70)]],true);
+  const ML=await (await fetch('/api/ml')).json();
+  if(ML.enabled&&ML.summary){
+   const ms=ML.summary;
+   $('mlstats').innerHTML=[
+    ['Trades',ms.total_trades||0],
+    ['Win rate',ms.win_rate||'—'],
+    ['Open',ms.open_trades||0],
+    ['Net P&L',pnl(ms.net_pnl)]
+   ].map(c=>'<div class=card><div class=k>'+c[0]+'</div><div class=v>'+c[1]+'</div></div>').join('');
+   const sigs=ML.signals||[];
+   $('mlsignals').innerHTML=tbl(sigs,[['Time',r=>(r.ts||'').slice(11,16)],
+    ['Index',r=>r.index_sym],['Spot',r=>r.spot?Math.round(r.spot).toLocaleString('en-IN'):'-'],
+    ['Conf',r=>r.confidence?(r.confidence*100).toFixed(0)+'%':'-'],
+    ['Strike',r=>'PE '+r.strike],['Entry',r=>'₹'+Math.round(r.entry)],
+    ['Status',r=>r.status],['Exit',r=>r.exit_reason||'-'],
+    ['P&L',r=>r.pnl!=null?pnl(Math.round(r.pnl)):'-']]);
+  }else{$('mlstats').innerHTML='<div class=empty>ML scanner not active</div>';$('mlsignals').innerHTML=''}
   const A=await (await fetch('/api/attention')).json();
   $('attention').innerHTML=A.map(a=>'<div class="att '+a.level+'">'+(a.level==='error'?'⛔ ':a.level==='warn'?'⚠️ ':'✅ ')+a.msg+'</div>').join('');
  }catch(e){$('sub').textContent='error loading: '+e}
