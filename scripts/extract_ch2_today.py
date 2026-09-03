@@ -501,11 +501,6 @@ def run_state_machine_with_debug(messages):
                 debug_log.append({"msg_id": msg.id, "action": "NOT_ACTIVE → cleared trigger_held"})
             continue
 
-        # OPERATOR EXIT: "exit", "safe exit", "book", "if u hold exit"
-        if re.search(r'\b(?:EXIT|BOOK)\b', upper) and len(clean_text) < 60:
-            debug_log.append({"msg_id": msg.id, "action": f"OPERATOR EXIT: '{text.strip()[:40]}'"})
-            continue
-
         # RE-ENTRY patterns (Above X again/focus, Near same range, etc.)
         reentry_m = _RE_REENTRY.search(upper)
         if reentry_m:
@@ -593,23 +588,6 @@ def run_state_machine_with_debug(messages):
             debug_log.append({"msg_id": msg.id, "action": f"BUFFER START: {_cl._ch2_pending.get('symbol')} {_cl._ch2_pending.get('strike')} {_cl._ch2_pending.get('opt_type')}"})
 
         if sig:
-            # SL above trigger for a BUY — auto-correct to 90% of trigger
-            if sig.action == "BUY" and sig.trigger_price > 0 and sig.stop_loss > sig.trigger_price:
-                old_sl = sig.stop_loss
-                sig = ParsedSignal(
-                    action=sig.action, symbol=sig.symbol, strike=sig.strike,
-                    option_type=sig.option_type, trigger_price=sig.trigger_price,
-                    stop_loss=round(sig.trigger_price * 0.90),
-                    targets=sig.targets,
-                )
-                debug_log.append({"msg_id": msg.id, "action": f"SL AUTO-CORRECTED: {old_sl} → {sig.stop_loss} for {sig.symbol} {int(sig.strike)} {sig.option_type}"})
-
-            # Skip non-index signals
-            INDEX_ONLY = {"NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY", "BSE"}
-            if sig.symbol not in INDEX_ONLY:
-                debug_log.append({"msg_id": msg.id, "action": f"SKIPPED non-index: {sig.symbol}"})
-                continue
-
             # If this completed a buffer, register under the original (first) msg too
             completed_buffer_start = None
             if had_pending and _cl._ch2_pending is None and buffer_start_id:

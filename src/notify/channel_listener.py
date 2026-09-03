@@ -82,7 +82,7 @@ PROFIT_TARGET = 1500  # ₹1,500 net profit per trade → auto-close
 MAX_LOSS_PER_TRADE = 8000  # ₹8,000 hard cap — no trade can lose more than this
 CH2_MAX_LOSS = 4000  # ₹4,000 hard cap for CH2 trades
 MAX_DAILY_LOSS = 10000  # ₹10,000 daily loss limit — stop trading after this
-CH2_INDEX_ONLY = {"NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY", "BSE"}
+CH2_INDEX_ONLY = {"NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY"}
 
 # CH2F (filtered) — optimized params from backtest
 CH2F_ENABLED = True
@@ -2614,39 +2614,6 @@ async def start_listener() -> None:
                     log.info("[CH2] NOT ACTIVE — nothing queued to cancel")
                 return
 
-            # Operator exit: "exit", "safe exit", "book", "if u hold exit"
-            if re.search(r'\b(?:EXIT|BOOK)\b', upper_ctl) and len(clean_ctl) < 60:
-                open_trades = []
-                with db.get_conn() as conn:
-                    open_trades = conn.execute(
-                        "SELECT id, symbol, price, qty, broker_key FROM trades "
-                        "WHERE status='OPEN' AND channel='ch2' "
-                        "ORDER BY created_at DESC").fetchall()
-                if open_trades:
-                    for ot in open_trades:
-                        ltp = None
-                        if ot["broker_key"]:
-                            try:
-                                from src.broker.upstox_data import UpstoxData
-                                ud = UpstoxData()
-                                ltp_d = ud._get("/v2/market-quote/ltp",
-                                                params={"instrument_key": ot["broker_key"]}).get("data", {})
-                                for v in ltp_d.values():
-                                    ltp = v.get("last_price")
-                                    break
-                            except Exception:
-                                pass
-                        if ltp:
-                            _close_trade_by_id(ot["id"], float(ltp), "operator_exit")
-                            log.info("[CH2] OPERATOR EXIT: closed %s (id=%d) at LTP=%.2f",
-                                     ot["symbol"], ot["id"], ltp)
-                            _notify(f"[CH2] Operator exit — closed {ot['symbol']} at {ltp:.1f}")
-                        else:
-                            log.warning("[CH2] OPERATOR EXIT: could not get LTP for %s", ot["symbol"])
-                    return
-                else:
-                    log.info("[CH2] Operator exit message but no open CH2 trades")
-
             # Re-entry: "Above X again/focus/new buy/plan", "same range again",
             # "Above last swing high", "Above X pe/ce side", "Below day low" etc.
             reentry_m = _RE_REENTRY.search(upper_ctl)
@@ -2778,28 +2745,6 @@ async def start_listener() -> None:
                      sig.trigger_price, sig.stop_loss, sig.targets)
 
             if channel == "ch2":
-                # SL above trigger for a BUY is nonsensical — auto-correct to 90% of trigger
-                if (sig.action == "BUY" and sig.trigger_price > 0
-                        and sig.stop_loss > sig.trigger_price):
-                    old_sl = sig.stop_loss
-                    sig = ParsedSignal(
-                        action=sig.action, symbol=sig.symbol, strike=sig.strike,
-                        option_type=sig.option_type, trigger_price=sig.trigger_price,
-                        stop_loss=round(sig.trigger_price * 0.90),
-                        targets=sig.targets,
-                    )
-                    log.warning("[CH2] SL %.0f > trigger %.0f — auto-corrected SL to %.0f",
-                                old_sl, sig.trigger_price, sig.stop_loss)
-                    _notify(f"⚠️ [CH2] SL auto-corrected: {old_sl:.0f} → {sig.stop_loss:.0f} "
-                            f"({sig.symbol} {int(sig.strike)} {sig.option_type})")
-
-                # Skip non-index signals when INDEX_ONLY
-                if sig.symbol not in CH2_INDEX_ONLY:
-                    log.info("[CH2] Skipping non-index signal: %s (INDEX_ONLY=%s)",
-                             sig.symbol, CH2_INDEX_ONLY)
-                    _notify(f"[CH2] Skipped non-index: {sig.symbol} {int(sig.strike)} {sig.option_type}")
-                    return
-
                 # If this completed a split buffer, register under the first msg too
                 completed_buffer_start = None
                 if had_pending and _ch2_pending is None and _ch2_buffer_start_id:
