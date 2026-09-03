@@ -404,9 +404,25 @@ def _calc_pnl(entry, exit_price, qty):
 #  DATA COLLECTION — build feature+label dataset across all days
 # ═══════════════════════════════════════════════════════════════════════════
 
-def collect_dataset(index_sym, date_start, date_end):
-    """Collect features + labels for every tradeable candle across date range."""
+def collect_features(index_sym, date_start, date_end):
+    """Collect features for every tradeable candle. No labels — those depend on params.
+    Cached to disk so subsequent runs with different params are instant."""
+    feat_cache = os.path.join(CACHE_DIR, f"features_{index_sym}_{date_start}_{date_end}.csv")
+    candles_cache = os.path.join(CACHE_DIR, f"spot_candles_{index_sym}_{date_start}_{date_end}.json")
+
+    if os.path.exists(feat_cache):
+        print(f"  Loading cached features: {feat_cache}")
+        df = pd.read_csv(feat_cache)
+        print(f"  Loaded {len(df)} candle samples")
+        # Load cached spot candles for labeling
+        spot_by_date = {}
+        if os.path.exists(candles_cache):
+            with open(candles_cache) as f:
+                spot_by_date = json.load(f)
+        return df, spot_by_date
+
     all_rows = []
+    spot_by_date = {}
     prev_close = None
     prev_range_pct = 0.0
     prev_change_pct = 0.0
@@ -425,8 +441,10 @@ def collect_dataset(index_sym, date_start, date_end):
             continue
 
         day_count += 1
-        sys.stdout.write(f"\r  Collecting {index_sym} {current} (day {day_count})...    ")
+        sys.stdout.write(f"\r  Fetching {index_sym} {current} (day {day_count})...    ")
         sys.stdout.flush()
+
+        spot_by_date[str(current)] = spot_candles
 
         df = compute_features(spot_candles)
         if df.empty:
@@ -453,26 +471,61 @@ def collect_dataset(index_sym, date_start, date_end):
                 continue
             if hour >= 15 and minute >= 25:
                 continue
-            if hour in SKIP_HOURS:
-                continue
             if row["candle_num"] < 5:
                 continue
 
-            label, pnl = label_candle_spot(spot_candles, int(row["candle_num"]), index_sym)
-            if label is None:
-                continue
-
             feat = {col: row[col] for col in FEATURE_COLS if col in row.index}
-            feat["label"] = label
-            feat["pnl"] = pnl
             feat["date"] = str(current)
             feat["time"] = row["time"]
+            feat["candle_idx"] = int(row["candle_num"])
             all_rows.append(feat)
 
         current += timedelta(days=1)
 
-    print(f"\r  Collected {len(all_rows)} candle samples across {day_count} days for {index_sym}       ")
-    return pd.DataFrame(all_rows)
+    feat_df = pd.DataFrame(all_rows)
+    feat_df.to_csv(feat_cache, index=False)
+    with open(candles_cache, "w") as f:
+        json.dump(spot_by_date, f)
+    print(f"\r  Cached {len(feat_df)} candle features across {day_count} days for {index_sym}       ")
+    return feat_df, spot_by_date
+
+
+def apply_labels(feat_df, spot_by_date, index_sym):
+    """Apply labels based on current params (floor, max-loss, skip-hours). Fast — no API calls."""
+    labels = []
+    pnls = []
+    keep = []
+
+    for _, row in feat_df.iterrows():
+        hour = int(row["hour"])
+        if hour in SKIP_HOURS:
+            keep.append(False)
+            labels.append(0)
+            pnls.append(0)
+            continue
+
+        d = row["date"]
+        candles = spot_by_date.get(d)
+        if not candles:
+            keep.append(False)
+            labels.append(0)
+            pnls.append(0)
+            continue
+
+        label, pnl = label_candle_spot(candles, int(row["candle_idx"]), index_sym)
+        if label is None:
+            keep.append(False)
+            labels.append(0)
+            pnls.append(0)
+        else:
+            keep.append(True)
+            labels.append(label)
+            pnls.append(pnl)
+
+    feat_df = feat_df.copy()
+    feat_df["label"] = labels
+    feat_df["pnl"] = pnls
+    return feat_df[keep].reset_index(drop=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -672,17 +725,16 @@ def main():
     print(f"  Slippage: {args.slippage}% | Charges: real")
     print(f"{'='*80}\n")
 
-    print("  Phase 1: Collecting data + computing features + labeling...\n")
-    dataset = collect_dataset(args.index, start_date, end_date)
+    print("  Phase 1: Loading/fetching features (cached after first run)...\n")
+    feat_df, spot_by_date = collect_features(args.index, start_date, end_date)
 
-    if dataset.empty:
+    if feat_df.empty:
         print("  No data collected!")
         return
 
-    # Save dataset
-    ds_path = os.path.join(CACHE_DIR, f"dataset_{args.index}_{start_date}_{end_date}.csv")
-    dataset.to_csv(ds_path, index=False)
-    print(f"  Dataset saved: {ds_path}")
+    print(f"\n  Phase 1b: Applying labels with current params (floor=₹{args.floor:,.0f}, SL=₹{args.max_loss:,.0f}, skip={SKIP_HOURS})...")
+    dataset = apply_labels(feat_df, spot_by_date, args.index)
+    print(f"  Labeled {len(dataset)} tradeable candles")
 
     print(f"\n  Phase 2: Walk-forward training + testing...\n")
     results, best_model = walk_forward_test(dataset)
