@@ -466,7 +466,7 @@ def collect_dataset(index_sym, date_start, date_end):
             feat["label"] = label
             feat["pnl"] = pnl
             feat["date"] = str(current)
-            feat["time"] = candle_time
+            feat["time"] = row["time"]
             all_rows.append(feat)
 
         current += timedelta(days=1)
