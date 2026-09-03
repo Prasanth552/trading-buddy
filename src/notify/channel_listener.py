@@ -82,8 +82,7 @@ PROFIT_TARGET = 1500  # ₹1,500 net profit per trade → auto-close
 MAX_LOSS_PER_TRADE = 8000  # ₹8,000 hard cap — no trade can lose more than this
 CH2_MAX_LOSS = 4000  # ₹4,000 hard cap for CH2 trades
 MAX_DAILY_LOSS = 10000  # ₹10,000 daily loss limit — stop trading after this
-CH2_INDEX_ONLY = {"NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY"}
-CH2_TRAIL_SL_BUFFER = 5  # trail SL to TGT - buffer (not exactly TGT) to survive pullbacks
+CH2_INDEX_ONLY = {"NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY", "BSE"}
 
 # CH2F (filtered) — optimized params from backtest
 CH2F_ENABLED = True
@@ -2158,7 +2157,7 @@ async def start_listener() -> None:
                         remaining = trade["targets_remaining"] or ""
                         if remaining:
                             next_tgts = [float(t) for t in remaining.split(",") if t.strip()]
-                            new_sl = trade["target_price"] - CH2_TRAIL_SL_BUFFER
+                            new_sl = entry  # cost-to-cost: trail SL to entry after TGT1
                             if next_tgts:
                                 new_tgt = next_tgts.pop(0)
                                 new_remaining = ",".join(str(t) for t in next_tgts) if next_tgts else None
@@ -2661,8 +2660,11 @@ async def start_listener() -> None:
                         log.info("[CH2] RE-ENTRY via chain from #%d",
                                  event.message.reply_to.reply_to_msg_id)
                 if not last and not has_reply:
-                    log.info("[CH2] RE-ENTRY SKIPPED — no reply chain, FALLBACK disabled")
-                    return
+                    last = _ch2_last_executed
+                    is_fallback = True
+                    if last:
+                        log.info("[CH2] RE-ENTRY FALLBACK to last_executed: %s %s",
+                                 last.symbol, int(last.strike))
                 if not last:
                     return
                 now_ts = _time.time()
@@ -2776,16 +2778,20 @@ async def start_listener() -> None:
                      sig.trigger_price, sig.stop_loss, sig.targets)
 
             if channel == "ch2":
-                # SL above trigger for a BUY is nonsensical — reject
+                # SL above trigger for a BUY is nonsensical — auto-correct to 90% of trigger
                 if (sig.action == "BUY" and sig.trigger_price > 0
                         and sig.stop_loss > sig.trigger_price):
-                    log.warning("[CH2] SL %.0f > trigger %.0f for BUY — rejecting signal %s %s %s",
-                                sig.stop_loss, sig.trigger_price,
-                                sig.symbol, int(sig.strike), sig.option_type)
-                    _notify(f"⚠️ [CH2] Signal rejected — SL {sig.stop_loss:.0f} > "
-                            f"entry {sig.trigger_price:.0f} ({sig.symbol} "
-                            f"{int(sig.strike)} {sig.option_type})")
-                    return
+                    old_sl = sig.stop_loss
+                    sig = ParsedSignal(
+                        action=sig.action, symbol=sig.symbol, strike=sig.strike,
+                        option_type=sig.option_type, trigger_price=sig.trigger_price,
+                        stop_loss=round(sig.trigger_price * 0.90),
+                        targets=sig.targets,
+                    )
+                    log.warning("[CH2] SL %.0f > trigger %.0f — auto-corrected SL to %.0f",
+                                old_sl, sig.trigger_price, sig.stop_loss)
+                    _notify(f"⚠️ [CH2] SL auto-corrected: {old_sl:.0f} → {sig.stop_loss:.0f} "
+                            f"({sig.symbol} {int(sig.strike)} {sig.option_type})")
 
                 # Skip non-index signals when INDEX_ONLY
                 if sig.symbol not in CH2_INDEX_ONLY:

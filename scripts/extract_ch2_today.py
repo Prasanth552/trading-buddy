@@ -211,7 +211,7 @@ def walk_candles_detailed(candles, entry, sl, targets, qty):
             if not remaining:
                 pnl = (hit - entry) * qty
                 return hit, "TGT_ALL", pnl, peak_pnl, trail
-            cur_sl = hit - 5
+            cur_sl = entry  # cost-to-cost: trail SL to entry after TGT1
 
         if cur_sl and c["low"] <= cur_sl:
             sl_pnl = (cur_sl - entry) * qty
@@ -516,10 +516,12 @@ def run_state_machine_with_debug(messages):
                 last = resolve_signal_via_chain(msg.reply_to.reply_to_msg_id)
                 if last:
                     debug_log.append({"msg_id": msg.id, "action": f"RE-ENTRY: chain resolved to {last.symbol} {int(last.strike)} {last.option_type}"})
-            # 2. No reply chain → skip (FALLBACK disabled)
+            # 2. Only fall back to last_executed if no reply chain at all
             if not last and not (msg.reply_to and msg.reply_to.reply_to_msg_id):
-                debug_log.append({"msg_id": msg.id, "action": "RE-ENTRY SKIPPED — no reply chain, FALLBACK disabled"})
-                continue
+                last = last_executed_sig
+                is_fallback = True
+                if last:
+                    debug_log.append({"msg_id": msg.id, "action": f"RE-ENTRY: no reply, FALLBACK to last_executed {last.symbol} {int(last.strike)}"})
             if not last:
                 debug_log.append({"msg_id": msg.id, "action": "RE-ENTRY pattern but chain resolution failed (no fallback)"})
                 continue
@@ -591,13 +593,19 @@ def run_state_machine_with_debug(messages):
             debug_log.append({"msg_id": msg.id, "action": f"BUFFER START: {_cl._ch2_pending.get('symbol')} {_cl._ch2_pending.get('strike')} {_cl._ch2_pending.get('opt_type')}"})
 
         if sig:
-            # SL above trigger for a BUY is nonsensical — skip
+            # SL above trigger for a BUY — auto-correct to 90% of trigger
             if sig.action == "BUY" and sig.trigger_price > 0 and sig.stop_loss > sig.trigger_price:
-                debug_log.append({"msg_id": msg.id, "action": f"REJECTED: SL {sig.stop_loss} > trigger {sig.trigger_price} for {sig.symbol} {int(sig.strike)} {sig.option_type}"})
-                continue
+                old_sl = sig.stop_loss
+                sig = ParsedSignal(
+                    action=sig.action, symbol=sig.symbol, strike=sig.strike,
+                    option_type=sig.option_type, trigger_price=sig.trigger_price,
+                    stop_loss=round(sig.trigger_price * 0.90),
+                    targets=sig.targets,
+                )
+                debug_log.append({"msg_id": msg.id, "action": f"SL AUTO-CORRECTED: {old_sl} → {sig.stop_loss} for {sig.symbol} {int(sig.strike)} {sig.option_type}"})
 
             # Skip non-index signals
-            INDEX_ONLY = {"NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY"}
+            INDEX_ONLY = {"NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY", "BSE"}
             if sig.symbol not in INDEX_ONLY:
                 debug_log.append({"msg_id": msg.id, "action": f"SKIPPED non-index: {sig.symbol}"})
                 continue
