@@ -300,6 +300,94 @@ def api_ml() -> JSONResponse:
         return JSONResponse({"enabled": False, "error": str(exc)})
 
 
+@app.get("/api/ml/all")
+def api_ml_all() -> JSONResponse:
+    """ML signals shaped like /api/all so the ML tab renders identically to channel tabs."""
+    try:
+        from src.ml.bot import get_recent_signals, init_ml_db
+        init_ml_db()
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse({"stats": {
+            "total": 0, "open": 0, "closed": 0, "wins": 0, "losses": 0,
+            "win_rate": 0, "total_pnl": 0, "best_trade": 0, "worst_trade": 0,
+            "avg_pnl": 0, "today_pnl": 0, "today_count": 0,
+            "total_charges": 0, "today_charges": 0, "capital": 0, "utilized": 0,
+            "pnl_curve": [], "now": mc.now_ist().strftime("%Y-%m-%d %H:%M:%S IST"),
+        }, "trades": []})
+
+    today_iso = mc.now_ist().date().isoformat()
+    with db.get_conn() as conn:
+        try:
+            row = conn.execute(f"""SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN status='OPEN' THEN 1 ELSE 0 END) AS open_count,
+                SUM(CASE WHEN status='CLOSED' THEN 1 ELSE 0 END) AS closed,
+                SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) AS wins,
+                SUM(CASE WHEN pnl IS NOT NULL AND pnl <= 0 THEN 1 ELSE 0 END) AS losses,
+                COALESCE(SUM(CASE WHEN pnl IS NOT NULL THEN pnl END),0) AS total_pnl,
+                COALESCE(MAX(pnl),0) AS best,
+                COALESCE(MIN(CASE WHEN pnl IS NOT NULL THEN pnl END),0) AS worst,
+                COALESCE(AVG(CASE WHEN pnl IS NOT NULL THEN pnl END),0) AS avg_pnl,
+                COALESCE(SUM(CASE WHEN pnl IS NOT NULL AND date='{today_iso}' THEN pnl END),0) AS today_pnl,
+                SUM(CASE WHEN date='{today_iso}' THEN 1 ELSE 0 END) AS today_count,
+                COALESCE(SUM(CASE WHEN status='OPEN' THEN entry*qty END),0) AS utilized
+            FROM ml_signals""").fetchone()
+            s = dict(row)
+            pnl_series = [dict(r) for r in conn.execute(
+                "SELECT ts, pnl FROM ml_signals WHERE pnl IS NOT NULL AND status='CLOSED' ORDER BY id"
+            ).fetchall()]
+            signals = [dict(r) for r in conn.execute(
+                "SELECT * FROM ml_signals ORDER BY id DESC LIMIT 100"
+            ).fetchall()]
+        except Exception:
+            return JSONResponse({"stats": {
+                "total": 0, "open": 0, "closed": 0, "wins": 0, "losses": 0,
+                "win_rate": 0, "total_pnl": 0, "best_trade": 0, "worst_trade": 0,
+                "avg_pnl": 0, "today_pnl": 0, "today_count": 0,
+                "total_charges": 0, "today_charges": 0, "capital": 0, "utilized": 0,
+                "pnl_curve": [], "now": mc.now_ist().strftime("%Y-%m-%d %H:%M:%S IST"),
+            }, "trades": []})
+
+    closed = s["closed"] or 0
+    wins = s["wins"] or 0
+    win_rate = (wins / closed * 100) if closed > 0 else 0
+    cumulative, running = [], 0
+    for r in pnl_series:
+        running += r["pnl"]
+        cumulative.append({"ts": r["ts"], "pnl": r["pnl"], "cumulative": round(running, 2)})
+
+    trades = []
+    for sig in signals:
+        trades.append({
+            "id": sig["id"], "ts": sig["ts"],
+            "symbol": f"{sig['index_sym']} PE {sig['strike']}",
+            "side": "BUY", "qty": sig["qty"],
+            "price": sig["entry"], "exit_price": sig.get("exit_price"),
+            "pnl": sig.get("pnl"), "mode": "ML",
+            "status": sig["status"],
+            "stop_price": sig["sl"], "target_price": sig["tgt"],
+            "index_entry": sig["spot"], "broker_key": None, "charges": None,
+            "confidence": sig["confidence"],
+            "exit_reason": sig.get("exit_reason"),
+        })
+
+    return JSONResponse({
+        "stats": {
+            "total": s["total"], "open": s["open_count"] or 0, "closed": closed,
+            "wins": wins, "losses": s["losses"] or 0, "win_rate": round(win_rate, 1),
+            "total_pnl": round(s["total_pnl"], 2),
+            "best_trade": round(s["best"], 2), "worst_trade": round(s["worst"], 2),
+            "avg_pnl": round(s["avg_pnl"], 2),
+            "today_pnl": round(s["today_pnl"], 2), "today_count": s["today_count"] or 0,
+            "total_charges": 0, "today_charges": 0,
+            "capital": 0, "utilized": round(s["utilized"], 2),
+            "pnl_curve": cumulative,
+            "now": mc.now_ist().strftime("%Y-%m-%d %H:%M:%S IST"),
+        },
+        "trades": trades,
+    })
+
+
 @app.get("/api/scan")
 def api_scan() -> JSONResponse:
     """Run the market scanner and return today's top signals."""
@@ -580,6 +668,7 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
   <button class="tab" onclick="switchCh('ch2f')" id="tab-ch2f"><span class=ico>F</span> CH2 Filtered</button>
   <button class="tab" onclick="switchCh('oeh')" id="tab-oeh"><span class=ico>O</span> OEH</button>
   <button class="tab" onclick="switchCh('oel')" id="tab-oel"><span class=ico>L</span> OEL</button>
+  <button class="tab" onclick="switchCh('ml')" id="tab-ml"><span class=ico>🤖</span> ML</button>
 </div>
 
 <div class=wrap>
@@ -613,13 +702,6 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
 <div class=sec>
   <div class=sec-h>Equity Curve</div>
   <div class=cw><canvas id=cv></canvas><div class="cl-label" id=cvl></div></div>
-</div>
-
-<!-- ML Scanner -->
-<div class=sec id=mlSec>
-  <div class=sec-h>ML Scanner <span class=badge id=mlBadge>-</span></div>
-  <div class=chips id=mlChips></div>
-  <div id=mlList></div>
 </div>
 
 <!-- Open positions -->
@@ -660,7 +742,7 @@ function wsConnect(){
   _ws.onmessage=e=>{
     try{
       const d=JSON.parse(e.data);
-      if(d.type==='tick'&&d.channels&&d.channels[CH]){
+      if(d.type==='tick'&&d.channels&&d.channels[CH]&&CH!=='ml'){
         const s=d.channels[CH];
         $('ck').textContent=d.now;
         // Update hero P&L instantly
@@ -835,7 +917,7 @@ function rH(T){
       '<div class=tc-top>'+
         '<div class="tc-icon '+(isW?'w':'l')+'">'+(isW?'W':'L')+'</div>'+
         '<div class=tc-body><div class=tc-sym>'+t.symbol+'</div>'+
-          '<div class=tc-meta>'+tf(t.ts)+' | Qty '+t.qty+'</div></div>'+
+          '<div class=tc-meta>'+tf(t.ts)+' | Qty '+t.qty+(t.confidence?' | <span class="scan-conf '+(t.confidence>=0.7?'hi':'md')+'" style="font-size:9px;padding:1px 5px">'+(t.confidence*100).toFixed(0)+'%</span>':'')+'</div></div>'+
         '<div class="tc-pnl '+pc(t.pnl)+'">'+inr(t.pnl)+'</div>'+
       '</div>'+
       '<div class=tc-detail>'+
@@ -891,55 +973,20 @@ function renderScan(data){
   }).join('');
 }
 
-function rML(ml){
-  if(!ml||!ml.enabled){$('mlBadge').textContent='off';$('mlChips').innerHTML='';
-    $('mlList').innerHTML='<div class=empty>ML scanner not active</div>';return}
-  const ms=ml.summary||{};
-  $('mlBadge').textContent=(ms.open_trades||0)+' open';
-  $('mlChips').innerHTML=[
-    {l:'Trades',v:String(ms.total_trades||0),c:''},
-    {l:'Win Rate',v:ms.win_rate||'—',c:(parseFloat(ms.win_rate)>=50?'pos':'')},
-    {l:'Net P&L',v:inr(ms.net_pnl),c:pc(ms.net_pnl)},
-    {l:'Open',v:String(ms.open_trades||0),c:''},
-  ].map(i=>'<div class=chip><div class=cl>'+i.l+'</div><div class="cv '+i.c+'">'+i.v+'</div></div>').join('');
-  const sigs=ml.signals||[];
-  if(!sigs.length){$('mlList').innerHTML='<div class=empty>No ML signals today</div>';return}
-  $('mlList').innerHTML=sigs.map(s=>{
-    const isW=s.pnl!=null&&s.pnl>0;
-    const conf=s.confidence?(s.confidence*100).toFixed(0)+'%':'-';
-    const cc=s.confidence>=0.7?'hi':s.confidence>=0.5?'md':'lo';
-    const st=s.status==='OPEN'?'<span class="pill op">OPEN</span>':
-             s.pnl>0?'<span class="pill cl">'+s.exit_reason+'</span>':
-             '<span class="pill sl">'+s.exit_reason+'</span>';
-    return '<div class=trade-card onclick="togCard(this)"><div class=tc-top>'+
-      '<div class="tc-icon '+(s.status==='OPEN'?'w':isW?'w':'l')+'">'+(s.status==='OPEN'?'⟳':isW?'W':'L')+'</div>'+
-      '<div class=tc-body><div class=tc-sym>'+s.index_sym+' PE '+s.strike+'</div>'+
-        '<div class=tc-meta>'+(s.ts||'').slice(11,16)+' | <span class="scan-conf '+cc+'" style="font-size:10px;padding:1px 6px">'+conf+'</span></div></div>'+
-      '<div class="tc-pnl '+(s.pnl!=null?pc(s.pnl):'')+'">'+(s.pnl!=null?inr(s.pnl):st)+'</div>'+
-    '</div>'+
-    '<div class=tc-detail><div class=tc-grid>'+
-      '<div class=tc-item>Spot <b>'+Math.round(s.spot).toLocaleString('en-IN')+'</b></div>'+
-      '<div class=tc-item>Entry <b>₹'+Math.round(s.entry)+'</b></div>'+
-      '<div class=tc-item>SL <b>₹'+Math.round(s.sl)+'</b></div>'+
-      '<div class=tc-item>TGT <b>₹'+Math.round(s.tgt)+'</b></div>'+
-      '<div class=tc-item>Qty <b>'+s.qty+'</b></div>'+
-      '<div class=tc-item>Exit <b>'+(s.exit_price?'₹'+Math.round(s.exit_price):'-')+'</b></div>'+
-    '</div></div></div>'
-  }).join('');
-}
-
 async function load(){
   if(_loading)return;
   _loading=true;
   try{
-    const q='?channel='+CH;
-    const d=await fetch('/api/all'+q).then(r=>r.json());
+    const isML=CH==='ml';
+    const url=isML?'/api/ml/all':('/api/all?channel='+CH);
+    const d=await fetch(url).then(r=>r.json());
     const s=d.stats,t=d.trades;
     AT=t;$('ck').textContent=s.now;$('sd').className='live-dot';
     rHero(s);rRing(s);rChips(s);rC(s.pnl_curve);rH(t);
     rO(t);
-    fetch('/api/ltp'+q).then(r=>r.json()).then(ltp=>{if(!ltp.error){LTP=ltp;rO(t)}}).catch(()=>{});
-    fetch('/api/ml').then(r=>r.json()).then(rML).catch(()=>{});
+    if(!isML){
+      fetch('/api/ltp?channel='+CH).then(r=>r.json()).then(ltp=>{if(!ltp.error){LTP=ltp;rO(t)}}).catch(()=>{});
+    }
   }catch(e){$('sd').className='live-dot off'}
   finally{_loading=false}
 }
