@@ -211,7 +211,7 @@ def walk_candles_detailed(candles, entry, sl, targets, qty):
             if not remaining:
                 pnl = (hit - entry) * qty
                 return hit, "TGT_ALL", pnl, peak_pnl, trail
-            cur_sl = hit
+            cur_sl = hit - 5
 
         if cur_sl and c["low"] <= cur_sl:
             sl_pnl = (cur_sl - entry) * qty
@@ -501,6 +501,11 @@ def run_state_machine_with_debug(messages):
                 debug_log.append({"msg_id": msg.id, "action": "NOT_ACTIVE → cleared trigger_held"})
             continue
 
+        # OPERATOR EXIT: "exit", "safe exit", "book", "if u hold exit"
+        if re.search(r'\b(?:EXIT|BOOK)\b', upper) and len(clean_text) < 60:
+            debug_log.append({"msg_id": msg.id, "action": f"OPERATOR EXIT: '{text.strip()[:40]}'"})
+            continue
+
         # RE-ENTRY patterns (Above X again/focus, Near same range, etc.)
         reentry_m = _RE_REENTRY.search(upper)
         if reentry_m:
@@ -511,12 +516,10 @@ def run_state_machine_with_debug(messages):
                 last = resolve_signal_via_chain(msg.reply_to.reply_to_msg_id)
                 if last:
                     debug_log.append({"msg_id": msg.id, "action": f"RE-ENTRY: chain resolved to {last.symbol} {int(last.strike)} {last.option_type}"})
-            # 2. Only fall back to last_executed if no reply chain at all
+            # 2. No reply chain → skip (FALLBACK disabled)
             if not last and not (msg.reply_to and msg.reply_to.reply_to_msg_id):
-                last = last_executed_sig
-                is_fallback = True
-                if last:
-                    debug_log.append({"msg_id": msg.id, "action": f"RE-ENTRY: no reply, FALLBACK to last_executed {last.symbol} {int(last.strike)}"})
+                debug_log.append({"msg_id": msg.id, "action": "RE-ENTRY SKIPPED — no reply chain, FALLBACK disabled"})
+                continue
             if not last:
                 debug_log.append({"msg_id": msg.id, "action": "RE-ENTRY pattern but chain resolution failed (no fallback)"})
                 continue
@@ -588,6 +591,17 @@ def run_state_machine_with_debug(messages):
             debug_log.append({"msg_id": msg.id, "action": f"BUFFER START: {_cl._ch2_pending.get('symbol')} {_cl._ch2_pending.get('strike')} {_cl._ch2_pending.get('opt_type')}"})
 
         if sig:
+            # SL above trigger for a BUY is nonsensical — skip
+            if sig.action == "BUY" and sig.trigger_price > 0 and sig.stop_loss > sig.trigger_price:
+                debug_log.append({"msg_id": msg.id, "action": f"REJECTED: SL {sig.stop_loss} > trigger {sig.trigger_price} for {sig.symbol} {int(sig.strike)} {sig.option_type}"})
+                continue
+
+            # Skip non-index signals
+            INDEX_ONLY = {"NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY"}
+            if sig.symbol not in INDEX_ONLY:
+                debug_log.append({"msg_id": msg.id, "action": f"SKIPPED non-index: {sig.symbol}"})
+                continue
+
             # If this completed a buffer, register under the original (first) msg too
             completed_buffer_start = None
             if had_pending and _cl._ch2_pending is None and buffer_start_id:
