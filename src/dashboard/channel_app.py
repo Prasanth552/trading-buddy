@@ -729,7 +729,7 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
 <script>
 const $=id=>document.getElementById(id);
 let AT=[],CF='all',LTP={},CH='ch1',VIEW='trades';
-let _loading=false,_scanCache=null,_scanCacheTs=0,_refreshTimer=null;
+let _loading=false,_abortCtrl=null,_scanCache=null,_scanCacheTs=0,_refreshTimer=null;
 const REFRESH_MS=30000,SCAN_CACHE_MS=300000;
 
 // WebSocket — live push updates
@@ -942,9 +942,12 @@ function sF(f){CF=f;rH(AT)}
 
 function switchCh(ch){
   if(ch===CH)return;
-  CH=ch;CF='all';
+  CH=ch;CF='all';LTP={};
   document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
   $('tab-'+ch).classList.add('active');
+  $('hv').textContent='...';$('hv').className='val';
+  $('hs').textContent='loading...';
+  $('chips').innerHTML='';$('ow').innerHTML='';$('hw').innerHTML='';
   load();
 }
 
@@ -974,21 +977,23 @@ function renderScan(data){
 }
 
 async function load(){
-  if(_loading)return;
-  _loading=true;
+  if(_abortCtrl)_abortCtrl.abort();
+  _abortCtrl=new AbortController();
+  const sig=_abortCtrl.signal;
+  const ch=CH;
   try{
-    const isML=CH==='ml';
-    const url=isML?'/api/ml/all':('/api/all?channel='+CH);
-    const d=await fetch(url).then(r=>r.json());
+    const isML=ch==='ml';
+    const url=isML?'/api/ml/all':('/api/all?channel='+ch);
+    const d=await fetch(url,{signal:sig}).then(r=>r.json());
+    if(ch!==CH)return;
     const s=d.stats,t=d.trades;
     AT=t;$('ck').textContent=s.now;$('sd').className='live-dot';
     rHero(s);rRing(s);rChips(s);rC(s.pnl_curve);rH(t);
     rO(t);
     if(!isML){
-      fetch('/api/ltp?channel='+CH).then(r=>r.json()).then(ltp=>{if(!ltp.error){LTP=ltp;rO(t)}}).catch(()=>{});
+      fetch('/api/ltp?channel='+ch,{signal:sig}).then(r=>r.json()).then(ltp=>{if(!ltp.error&&ch===CH){LTP=ltp;rO(t)}}).catch(()=>{});
     }
-  }catch(e){$('sd').className='live-dot off'}
-  finally{_loading=false}
+  }catch(e){if(e.name!=='AbortError')$('sd').className='live-dot off'}
 }
 
 function startRefresh(){
