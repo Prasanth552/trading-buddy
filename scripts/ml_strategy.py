@@ -35,7 +35,9 @@ parser.add_argument("--train-days", type=int, default=40, help="Training window 
 parser.add_argument("--test-days", type=int, default=10, help="Test window (trading days)")
 parser.add_argument("--min-confidence", type=float, default=0.70, help="Min model confidence to trade")
 parser.add_argument("--max-trades-per-day", type=int, default=5)
+parser.add_argument("--daily-loss-cap", type=int, default=0, help="Stop trading after N losses in a day (0=disabled)")
 parser.add_argument("--skip-hours", default="12,13")
+parser.add_argument("--holdout", type=int, default=0, help="Holdout last N trading days as unseen test set (single split, no walk-forward)")
 parser.add_argument("--predict-today", action="store_true", help="Generate signals for today using trained model")
 parser.add_argument("--cache-dir", default=None, help="Cache candle data to disk")
 args = parser.parse_args()
@@ -599,6 +601,19 @@ def walk_forward_test(df):
             lambda g: g.nlargest(args.max_trades_per_day, "confidence")
         ).reset_index(drop=True)
 
+        # Daily loss cap: stop after N losses in a day
+        if args.daily_loss_cap > 0:
+            kept = []
+            for d, grp in daily_trades.groupby("date"):
+                losses = 0
+                for _, row in grp.sort_values("time").iterrows():
+                    if losses >= args.daily_loss_cap:
+                        break
+                    kept.append(row)
+                    if row["label"] == 0:
+                        losses += 1
+            daily_trades = pd.DataFrame(kept) if kept else pd.DataFrame(columns=daily_trades.columns)
+
         wins = daily_trades["label"].sum()
         total = len(daily_trades)
         net_pnl = daily_trades["pnl"].sum()
@@ -721,7 +736,7 @@ def main():
     print(f"  ML STRATEGY FINDER — {args.index}")
     print(f"  Period: {start_date} → {end_date} ({args.days} days)")
     print(f"  Train: {args.train_days}d | Test: {args.test_days}d | Min confidence: {args.min_confidence:.0%}")
-    print(f"  {args.lots}L | ₹{args.max_loss:,.0f} SL cap | ₹{args.floor:,.0f} floor")
+    print(f"  {args.lots}L | ₹{args.max_loss:,.0f} SL cap | ₹{args.floor:,.0f} floor | Daily loss cap: {args.daily_loss_cap or 'off'}")
     print(f"  Slippage: {args.slippage}% | Charges: real")
     print(f"{'='*80}\n")
 
