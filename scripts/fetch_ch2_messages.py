@@ -28,7 +28,7 @@ api_id = int(os.getenv("TELEGRAM_API_ID", "0"))
 api_hash = os.getenv("TELEGRAM_API_HASH", "")
 ch2_id = int(os.getenv("SIGNAL_CHANNEL2_ID", "0"))
 
-session_path = os.path.join(os.path.dirname(__file__), "..", "data", "telegram_user.session")
+session_path = os.path.join(os.path.dirname(__file__), "..", "data", "telegram_reader.session")
 
 async def main():
     from telethon import TelegramClient
