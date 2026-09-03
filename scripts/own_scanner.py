@@ -50,6 +50,7 @@ parser.add_argument("--cooldown", type=int, default=30, help="Min minutes betwee
 parser.add_argument("--indexes", default="NIFTY,BANKNIFTY", help="Indexes to scan")
 parser.add_argument("--max-signals-per-day", type=int, default=8, help="Cap signals per day")
 parser.add_argument("--momentum-candles", type=int, default=3, help="Candles to check for momentum")
+parser.add_argument("--slippage", type=float, default=0.5, help="Slippage %% on entry (bid-ask spread)")
 args = parser.parse_args()
 
 end_date_str = args.end or datetime.now(IST).strftime("%Y-%m-%d")
@@ -57,8 +58,6 @@ end_date = date(*[int(x) for x in end_date_str.split("-")])
 start_date = end_date - timedelta(days=args.days - 1)
 SKIP_HOURS = set(int(h) for h in args.skip_hours.split(",") if h.strip())
 INDEXES = [s.strip() for s in args.indexes.split(",")]
-
-parser.add_argument("--slippage", type=float, default=0.5, help="Slippage %% on entry (bid-ask spread)")
 
 try:
     import config
