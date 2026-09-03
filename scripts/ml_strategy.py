@@ -22,7 +22,7 @@ load_dotenv()
 IST = ZoneInfo("Asia/Kolkata")
 
 parser = argparse.ArgumentParser(description="ML PE signal finder")
-parser.add_argument("--days", type=int, default=90, help="Total history days for train+test")
+parser.add_argument("--days", type=int, default=180, help="Total history days for train+test")
 parser.add_argument("--end", default=None, help="End date YYYY-MM-DD")
 parser.add_argument("--index", default="NIFTY", help="Index to analyze")
 parser.add_argument("--lots", type=int, default=3)
@@ -31,8 +31,8 @@ parser.add_argument("--floor", type=float, default=2000)
 parser.add_argument("--itm-min", type=int, default=300)
 parser.add_argument("--itm-max", type=int, default=900)
 parser.add_argument("--slippage", type=float, default=0.5)
-parser.add_argument("--train-days", type=int, default=60, help="Training window days")
-parser.add_argument("--test-days", type=int, default=20, help="Test window days")
+parser.add_argument("--train-days", type=int, default=40, help="Training window (trading days)")
+parser.add_argument("--test-days", type=int, default=10, help="Test window (trading days)")
 parser.add_argument("--min-confidence", type=float, default=0.70, help="Min model confidence to trade")
 parser.add_argument("--max-trades-per-day", type=int, default=5)
 parser.add_argument("--skip-hours", default="12,13")
@@ -310,77 +310,94 @@ FEATURE_COLS = [
 #  LABELING — simulate PE entry at each candle, label as win/loss
 # ═══════════════════════════════════════════════════════════════════════════
 
-def label_candle(index_sym, spot_price, candle_time, ref_date, all_opt_candles_cache):
-    """Simulate: if we bought PE at this candle, would we profit?
-    Returns (label, pnl) where label=1 means profitable after charges."""
-    strike = find_pe_strike(index_sym, spot_price)
-    cache_key = f"{index_sym}_{strike}_{ref_date}"
+PE_DELTA = 0.85  # deep ITM PE delta approximation
 
-    if cache_key not in all_opt_candles_cache:
-        inst_key, _ = find_option_instrument(index_sym, strike, ref_date)
-        if not inst_key:
-            return None, 0
-        opt_candles = fetch_option_candles(inst_key, ref_date)
-        all_opt_candles_cache[cache_key] = opt_candles
-    else:
-        opt_candles = all_opt_candles_cache[cache_key]
+def label_candle_spot(spot_candles, candle_idx, index_sym):
+    """Label using spot movement — no option master needed.
+    Deep ITM PE (~600pt ITM) has delta ~0.85, so:
+      option_price ≈ spot_price * delta_factor (for price level)
+      option_move ≈ -spot_move * PE_DELTA (PE gains when spot drops)
 
-    if not opt_candles:
+    Simulates SL/TGT/floor on estimated option prices.
+    Returns (label, estimated_pnl)."""
+    if candle_idx >= len(spot_candles) - 1:
         return None, 0
 
-    filtered = [c for c in opt_candles if c["date"][11:16] >= candle_time]
-    if not filtered:
-        return None, 0
-
-    raw_entry = filtered[0]["open"]
-    if raw_entry <= 0:
-        return None, 0
-
-    entry = raw_entry * (1 + args.slippage / 100)
+    spot_at_entry = spot_candles[candle_idx]["close"]
     lot_size = LOT_SIZES.get(index_sym, 75)
     qty = lot_size * args.lots
+
+    # Estimate option entry price: deep ITM PE ≈ ITM_depth * some factor
+    itm_depth = (args.itm_min + args.itm_max) / 2
+    est_opt_entry = itm_depth * 0.85  # rough option premium for deep ITM
+    entry = est_opt_entry * (1 + args.slippage / 100)
 
     sl_price = entry * 0.50
     tgt_price = entry * 1.25
 
     peak_pnl = 0
     floor_armed = False
-    cur_sl = sl_price
 
-    def _calc_net(exit_price):
-        gross = (exit_price - entry) * qty
-        charges = calc_charges(entry, exit_price, qty)["total"]
-        return gross - charges
+    remaining = spot_candles[candle_idx + 1:]
+    if not remaining:
+        return None, 0
 
-    for c in filtered:
-        low_pnl = (c["low"] - entry) * qty
-        if args.max_loss > 0 and low_pnl <= -args.max_loss:
+    for c in remaining:
+        # Spot moved by this much since entry
+        spot_move = c["low"] - spot_at_entry
+        # PE option moves opposite to spot
+        opt_low_est = entry + (-spot_move * PE_DELTA)  # worst case this candle
+        spot_move_high = c["high"] - spot_at_entry
+        opt_high_est = entry + (-spot_move_high * PE_DELTA)  # actually this is worst for PE
+
+        # For PE: spot down = option up, spot up = option down
+        # opt price change ≈ -(spot_change) * delta
+        opt_change_at_low = -(c["high"] - spot_at_entry) * PE_DELTA  # worst for PE (spot went up)
+        opt_change_at_high = -(c["low"] - spot_at_entry) * PE_DELTA  # best for PE (spot went down)
+
+        opt_price_worst = entry + opt_change_at_low
+        opt_price_best = entry + opt_change_at_high
+
+        # Hard SL cap check
+        worst_pnl = (opt_price_worst - entry) * qty
+        if args.max_loss > 0 and worst_pnl <= -args.max_loss:
             exit_price = entry - (args.max_loss / qty)
-            net = _calc_net(exit_price)
+            net = _calc_pnl(entry, exit_price, qty)
             return (1 if net > 0 else 0), net
 
-        if c["low"] <= cur_sl:
-            net = _calc_net(cur_sl)
+        # SL hit
+        if opt_price_worst <= sl_price:
+            net = _calc_pnl(entry, sl_price, qty)
             return (1 if net > 0 else 0), net
 
-        if c["high"] >= tgt_price:
-            net = _calc_net(tgt_price)
+        # TGT hit
+        if opt_price_best >= tgt_price:
+            net = _calc_pnl(entry, tgt_price, qty)
             return (1 if net > 0 else 0), net
 
-        candle_peak = (c["high"] - entry) * qty
-        peak_pnl = max(peak_pnl, candle_peak)
+        # Floor logic
+        best_pnl = (opt_price_best - entry) * qty
+        peak_pnl = max(peak_pnl, best_pnl)
         if peak_pnl >= args.floor:
             floor_armed = True
         if floor_armed:
-            cur_pnl = (c["low"] - entry) * qty
+            cur_pnl = (opt_price_worst - entry) * qty
             if cur_pnl <= args.floor:
                 floor_price = entry + (args.floor / qty)
-                net = _calc_net(floor_price)
+                net = _calc_pnl(entry, floor_price, qty)
                 return (1 if net > 0 else 0), net
 
-    exit_price = filtered[-1]["close"]
-    net = _calc_net(exit_price)
+    # EOD — use last candle's close
+    last_spot_move = -(remaining[-1]["close"] - spot_at_entry) * PE_DELTA
+    eod_price = entry + last_spot_move
+    net = _calc_pnl(entry, eod_price, qty)
     return (1 if net > 0 else 0), net
+
+
+def _calc_pnl(entry, exit_price, qty):
+    gross = (exit_price - entry) * qty
+    charges = calc_charges(entry, exit_price, qty)["total"]
+    return gross - charges
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -390,7 +407,6 @@ def label_candle(index_sym, spot_price, candle_time, ref_date, all_opt_candles_c
 def collect_dataset(index_sym, date_start, date_end):
     """Collect features + labels for every tradeable candle across date range."""
     all_rows = []
-    opt_cache = {}
     prev_close = None
     prev_range_pct = 0.0
     prev_change_pct = 0.0
@@ -442,10 +458,7 @@ def collect_dataset(index_sym, date_start, date_end):
             if row["candle_num"] < 5:
                 continue
 
-            candle_time = row["time"]
-            spot_now = row["close"]
-
-            label, pnl = label_candle(index_sym, spot_now, candle_time, current, opt_cache)
+            label, pnl = label_candle_spot(spot_candles, int(row["candle_num"]), index_sym)
             if label is None:
                 continue
 
