@@ -510,9 +510,9 @@ def walk_forward_test(df):
             i += test_window
             continue
 
-        X_train = train_df[FEATURE_COLS].fillna(0)
+        X_train = train_df[FEATURE_COLS].replace([np.inf, -np.inf], np.nan).fillna(0)
         y_train = train_df["label"]
-        X_test = test_df[FEATURE_COLS].fillna(0)
+        X_test = test_df[FEATURE_COLS].replace([np.inf, -np.inf], np.nan).fillna(0)
         y_test = test_df["label"]
 
         model = XGBClassifier(
