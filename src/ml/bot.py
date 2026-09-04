@@ -676,6 +676,15 @@ class MLScanner:
                     "range_pct": ((day_high - day_low) / day_open) * 100,
                 }
 
+    def _daily_reset(self):
+        """Reset daily state — called once per trading day before scanning."""
+        self.today_signals = []
+        self.today_losses = {}
+        self.today_trades = 0
+        self.last_candle_time = {}
+        self.load_prev_day()
+        log.info("Daily reset complete — ready for new trading day")
+
     def run(self):
         """Main loop — scan every 5 minutes during trading window."""
         init_ml_db()
@@ -686,8 +695,19 @@ class MLScanner:
                  INDEXES, MIN_CONFIDENCE * 100,
                  SCAN_START_HOUR, SCAN_START_MIN, SCAN_END_HOUR, SCAN_END_MIN)
 
+        last_reset_date = None
+
         while True:
             now = datetime.now(IST)
+            today = now.date()
+
+            # Daily reset — once per trading day before first scan
+            if today != last_reset_date and now.weekday() < 5:
+                current_mins = now.hour * 60 + now.minute
+                start_mins = SCAN_START_HOUR * 60 + SCAN_START_MIN
+                if current_mins >= start_mins - 10:
+                    self._daily_reset()
+                    last_reset_date = today
 
             # Only scan during trading window
             current_mins = now.hour * 60 + now.minute

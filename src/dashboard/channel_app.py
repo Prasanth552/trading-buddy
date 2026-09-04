@@ -942,12 +942,15 @@ function sF(f){CF=f;rH(AT)}
 
 function switchCh(ch){
   if(ch===CH)return;
-  CH=ch;CF='all';LTP={};
+  CH=ch;CF='all';LTP={};AT=[];
   document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
   $('tab-'+ch).classList.add('active');
   $('hv').textContent='...';$('hv').className='val';
   $('hs').textContent='loading...';
+  $('rp').textContent='--';$('rp').className='ring-pct';
   $('chips').innerHTML='';$('ow').innerHTML='';$('hw').innerHTML='';
+  $('oc').textContent='0';$('hc').textContent='0';
+  rC([]);
   load();
 }
 
@@ -984,16 +987,24 @@ async function load(){
   try{
     const isML=ch==='ml';
     const url=isML?'/api/ml/all':('/api/all?channel='+ch);
-    const d=await fetch(url,{signal:sig}).then(r=>r.json());
+    const resp=await fetch(url,{signal:sig});
     if(ch!==CH)return;
-    const s=d.stats,t=d.trades;
+    const d=await resp.json();
+    if(!d||!d.stats){
+      $('hv').textContent='No data';$('hv').className='val';
+      $('hs').textContent=isML?'ML scanner has no trades yet':'No data for this channel';
+      $('chips').innerHTML='';$('ow').innerHTML='';$('hw').innerHTML='';
+      rC([]);return;
+    }
+    const s=d.stats,t=d.trades||[];
     AT=t;$('ck').textContent=s.now;$('sd').className='live-dot';
     rHero(s);rRing(s);rChips(s);rC(s.pnl_curve);rH(t);
     rO(t);
     if(!isML){
       fetch('/api/ltp?channel='+ch,{signal:sig}).then(r=>r.json()).then(ltp=>{if(!ltp.error&&ch===CH){LTP=ltp;rO(t)}}).catch(()=>{});
     }
-  }catch(e){if(e.name!=='AbortError')$('sd').className='live-dot off'}
+  }catch(e){if(e.name!=='AbortError'){$('sd').className='live-dot off';
+    $('hv').textContent='Error';$('hs').textContent=String(e)}}
 }
 
 function startRefresh(){
