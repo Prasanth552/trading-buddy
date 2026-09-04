@@ -20,17 +20,11 @@ from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 from dataclasses import dataclass, field, asdict
 
-import numpy as np
-import pandas as pd
-from xgboost import XGBClassifier
-
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from dotenv import load_dotenv
 load_dotenv()
 
 import config
-from src.broker.upstox_data import UpstoxData, load_cached_token
-from src.notify.channel_listener import calc_charges
 from src.storage import db
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -108,6 +102,9 @@ class MLSignal:
 # ─── Feature Engine (same as ml_strategy.py) ─────────────────────────────
 
 def compute_features(candles):
+    import numpy as np
+    import pandas as pd
+
     if not candles or len(candles) < 5:
         return pd.DataFrame()
 
@@ -225,6 +222,7 @@ def _fetch_spot(uclient, index_sym, ref_date):
 
 
 def _label_spot(candles, idx, index_sym):
+    from src.notify.channel_listener import calc_charges
     if idx >= len(candles) - 1:
         return None, 0
     spot_at_entry = candles[idx]["close"]
@@ -274,6 +272,12 @@ def _label_spot(candles, idx, index_sym):
 
 def train_model(index_sym, end_dt=None):
     """Train XGBoost on last TRAIN_DAYS trading days. Returns fitted model."""
+    import numpy as np
+    import pandas as pd
+    from xgboost import XGBClassifier
+    from src.broker.upstox_data import UpstoxData
+    from src.notify.channel_listener import calc_charges
+
     os.makedirs(MODEL_DIR, exist_ok=True)
     os.makedirs(CACHE_DIR, exist_ok=True)
 
@@ -437,6 +441,7 @@ def get_recent_signals(limit=50):
 
 class MLScanner:
     def __init__(self):
+        from src.broker.upstox_data import UpstoxData
         self.models = {}
         self.uclient = UpstoxData()
         self.today_signals = []
@@ -473,6 +478,7 @@ class MLScanner:
 
     def scan_once(self):
         """Scan all indexes for signals on the latest candle."""
+        import numpy as np
         now = datetime.now(IST)
         signals_generated = []
 
@@ -567,6 +573,7 @@ class MLScanner:
 
     def check_exits(self):
         """Check open signals for exit conditions using latest candle data."""
+        from src.notify.channel_listener import calc_charges
         today = datetime.now(IST).date().isoformat()
         with db.get_conn() as conn:
             open_sigs = conn.execute(
