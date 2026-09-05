@@ -317,7 +317,8 @@ def run_walkforward(uclient, symbols, year, daily_budget=3, train_months=6):
     os.makedirs(CACHE_DIR, exist_ok=True)
 
     # Collect all trading days for the year + prior months for training
-    train_start = date(year - 1, 13 - train_months, 1)
+    start_month = 13 - train_months  # e.g. 6-month window → month 7
+    train_start = date(year - 1, start_month, 1) if start_month >= 1 else date(year - 2, start_month + 12, 1)
     today = date.today()
     test_end = min(date(year, 12, 31), today - timedelta(days=1))
 
