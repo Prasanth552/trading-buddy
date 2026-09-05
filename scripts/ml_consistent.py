@@ -214,36 +214,41 @@ def collect_day_data(uclient, sym, ref_date, prev_change=0, prev_range=0, sym_st
     df["prev_day_change_pct"] = prev_change
     df["prev_day_range_pct"] = prev_range
 
-    # Extended features
     stats = sym_stats or {}
     df["sym_avg_range"] = stats.get("avg_range", 1.0)
     df["sym_avg_volume"] = stats.get("avg_volume", 1.0)
     df["spot_magnitude"] = np.log(df["close"].clip(lower=1))
 
-    rows = []
-    for _, row in df.iterrows():
-        h = int(row["hour"])
-        m_val = int(row.get("minute", 0))
-        if h < SCAN_START[0] or (h == SCAN_START[0] and m_val < SCAN_START[1]):
-            continue
-        if h > SCAN_END[0] or (h == SCAN_END[0] and m_val > SCAN_END[1]):
-            continue
-        if h in SKIP_HOURS:
-            continue
-        if row["candle_num"] < 5:
-            continue
+    # Vectorized time filter — skip slow per-row Python checks
+    h = df["hour"].values
+    m = df["minute"].values
+    cn = df["candle_num"].values
+    time_mins = h * 60 + m
+    start_mins = SCAN_START[0] * 60 + SCAN_START[1]
+    end_mins = SCAN_END[0] * 60 + SCAN_END[1]
+    mask = (time_mins >= start_mins) & (time_mins <= end_mins) & (cn >= 5)
+    for skip_h in SKIP_HOURS:
+        mask &= (h != skip_h)
+    df_filtered = df[mask]
 
-        label, pnl = label_trade(candles, int(row["candle_num"]), sym)
+    if df_filtered.empty:
+        return [], candles
+
+    # Use itertuples (10-50x faster than iterrows)
+    ext_cols = EXTENDED_FEATURES
+    rows = []
+    for tup in df_filtered.itertuples(index=False):
+        cidx = int(tup.candle_num)
+        label, pnl = label_trade(candles, cidx, sym)
         if label is None:
             continue
-
-        feat = row[EXTENDED_FEATURES].to_dict()
+        feat = {col: getattr(tup, col) for col in ext_cols}
         feat["label"] = label
         feat["pnl"] = pnl
         feat["symbol"] = sym
-        feat["candle_idx"] = int(row["candle_num"])
-        feat["time"] = candles[int(row["candle_num"])]["date"][11:16]
-        feat["spot"] = row["close"]
+        feat["candle_idx"] = cidx
+        feat["time"] = candles[cidx]["date"][11:16]
+        feat["spot"] = tup.close
         rows.append(feat)
 
     return rows, candles
@@ -282,7 +287,12 @@ def compute_symbol_stats(uclient, sym, days):
 
 def _process_symbol(args):
     """Worker function for parallel feature pre-computation."""
-    sym, days_list, dd, stats = args
+    import pickle as _pkl
+    sym, days_list, dd, stats, cache_dir = args
+    sym_cache = os.path.join(cache_dir, f"feat_{sym}.pkl")
+    if os.path.exists(sym_cache):
+        with open(sym_cache, "rb") as f:
+            return sym, _pkl.load(f)
     result = []
     for d in days_list:
         pc, pr = dd.get((sym, d), (0, 0))
@@ -290,6 +300,8 @@ def _process_symbol(args):
         for r in rows:
             r["_date"] = d
         result.extend(rows)
+    with open(sym_cache, "wb") as f:
+        _pkl.dump(result, f)
     return sym, result
 
 
@@ -413,7 +425,7 @@ def run_walkforward(uclient, symbols, year, daily_budget=3, train_months=6):
         n_workers = min(mp.cpu_count(), 4, len(symbols))
         print(f"  Using {n_workers} parallel workers...")
 
-        work = [(sym, all_days, dict(day_data), sym_stats_global.get(sym))
+        work = [(sym, all_days, dict(day_data), sym_stats_global.get(sym), CACHE_DIR)
                 for sym in symbols]
 
         done_count = 0
