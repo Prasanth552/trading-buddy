@@ -280,6 +280,19 @@ def compute_symbol_stats(uclient, sym, days):
     }
 
 
+def _process_symbol(args):
+    """Worker function for parallel feature pre-computation."""
+    sym, days_list, dd, stats = args
+    result = []
+    for d in days_list:
+        pc, pr = dd.get((sym, d), (0, 0))
+        rows, _ = collect_day_data(None, sym, d, pc, pr, stats)
+        for r in rows:
+            r["_date"] = d
+        result.extend(rows)
+    return sym, result
+
+
 def train_universal_model(all_rows):
     """Train ONE XGBoost model on all symbols' pooled data."""
     if len(all_rows) < 200:
@@ -399,17 +412,6 @@ def run_walkforward(uclient, symbols, year, daily_budget=3, train_months=6):
         import multiprocessing as mp
         n_workers = min(mp.cpu_count(), 4, len(symbols))
         print(f"  Using {n_workers} parallel workers...")
-
-        def _process_symbol(args):
-            sym, days_list, dd, stats = args
-            result = []
-            for d in days_list:
-                pc, pr = dd.get((sym, d), (0, 0))
-                rows, _ = collect_day_data(None, sym, d, pc, pr, stats)
-                for r in rows:
-                    r["_date"] = d
-                result.extend(rows)
-            return sym, result
 
         work = [(sym, all_days, dict(day_data), sym_stats_global.get(sym))
                 for sym in symbols]
