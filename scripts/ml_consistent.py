@@ -28,12 +28,178 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dotenv import load_dotenv
 load_dotenv()
 
-from src.ml.bot import compute_features, FEATURE_COLS, CACHE_DIR
+from src.ml.bot import FEATURE_COLS, CACHE_DIR
 from src.broker.upstox_data import UpstoxData
-from src.notify.channel_listener import calc_charges
 import config
 
 IST = ZoneInfo("Asia/Kolkata")
+
+
+def _charges_total(entry_p, exit_p, qty):
+    """Inlined calc_charges — returns total only (no dict alloc)."""
+    buy_t = entry_p * qty
+    sell_t = exit_p * qty
+    tot_t = buy_t + sell_t
+    brok = 40.0
+    stt = sell_t * 0.001
+    exch = tot_t * 0.000495
+    sebi = tot_t * 0.000001
+    stamp = buy_t * 0.00003
+    gst = (brok + exch) * 0.18
+    return brok + stt + exch + sebi + stamp + gst
+
+
+def _rolling_mean(arr, w, min_p=None):
+    """Simple rolling mean using cumsum — 10x faster than pandas."""
+    if min_p is None:
+        min_p = w
+    n = len(arr)
+    out = np.full(n, np.nan)
+    cs = np.concatenate(([0.0], np.nancumsum(arr)))
+    for i in range(min_p - 1, n):
+        start = max(0, i - w + 1)
+        cnt = i - start + 1
+        out[i] = (cs[i + 1] - cs[start]) / cnt
+    return out
+
+
+def _rolling_std(arr, w, min_p=None):
+    """Rolling std using two-pass approach."""
+    if min_p is None:
+        min_p = w
+    n = len(arr)
+    out = np.full(n, np.nan)
+    for i in range(min_p - 1, n):
+        start = max(0, i - w + 1)
+        out[i] = np.std(arr[start:i + 1], ddof=1) if (i - start) > 0 else 0.0
+    return out
+
+
+def compute_features_fast(candles):
+    """Pure-numpy feature computation — ~10x faster than pandas version."""
+    n = len(candles)
+    if n < 5:
+        return None
+
+    op = np.array([c["open"] for c in candles], dtype=np.float64)
+    hi = np.array([c["high"] for c in candles], dtype=np.float64)
+    lo = np.array([c["low"] for c in candles], dtype=np.float64)
+    cl = np.array([c["close"] for c in candles], dtype=np.float64)
+    vol = np.array([c.get("volume", 0) for c in candles], dtype=np.float64)
+    hours = np.array([int(c["date"][11:13]) for c in candles], dtype=np.int32)
+    minutes = np.array([int(c["date"][14:16]) for c in candles], dtype=np.int32)
+    candle_num = np.arange(n, dtype=np.int32)
+
+    spot_open = op[0]
+
+    gap_pct = ((cl - spot_open) / spot_open) * 100
+    prev_cl = np.concatenate(([cl[0]], cl[:-1]))
+    gap_from_prev_close = ((op - prev_cl) / (prev_cl + 1e-10)) * 100
+    body = cl - op
+    body_pct = (body / (op + 1e-10)) * 100
+    rng = hi - lo
+    rng_pct = (rng / (op + 1e-10)) * 100
+    upper_wick = hi - np.maximum(op, cl)
+    lower_wick = np.minimum(op, cl) - lo
+    wick_ratio = upper_wick / (lower_wick + 0.01)
+    body_to_range = np.abs(body) / (rng + 0.01)
+
+    sma5 = _rolling_mean(cl, 5)
+    sma10 = _rolling_mean(cl, 10)
+    sma20 = _rolling_mean(cl, 20)
+    close_vs_sma5 = ((cl - sma5) / (sma5 + 1e-10)) * 100
+    close_vs_sma10 = ((cl - sma10) / (sma10 + 1e-10)) * 100
+    close_vs_sma20 = ((cl - sma20) / (sma20 + 1e-10)) * 100
+    prev_sma5 = np.concatenate(([sma5[0]], sma5[:-1]))
+    prev_sma10 = np.concatenate(([sma10[0]], sma10[:-1]))
+    sma5_slope = (sma5 - prev_sma5) / (prev_sma5 + 1e-10) * 100
+    sma10_slope = (sma10 - prev_sma10) / (prev_sma10 + 1e-10) * 100
+
+    roc_1 = np.concatenate(([0.0], np.diff(cl) / (cl[:-1] + 1e-10) * 100))
+    roc_3 = np.full(n, 0.0)
+    roc_3[3:] = (cl[3:] - cl[:-3]) / (cl[:-3] + 1e-10) * 100
+    roc_5 = np.full(n, 0.0)
+    roc_5[5:] = (cl[5:] - cl[:-5]) / (cl[:-5] + 1e-10) * 100
+    roc_10 = np.full(n, 0.0)
+    roc_10[10:] = (cl[10:] - cl[:-10]) / (cl[:-10] + 1e-10) * 100
+
+    delta = np.concatenate(([0.0], np.diff(cl)))
+    gain = np.clip(delta, 0, None)
+    loss = np.clip(-delta, 0, None)
+    avg_gain = _rolling_mean(gain, 14, 5)
+    avg_loss = _rolling_mean(loss, 14, 5)
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_14 = 100 - (100 / (1 + rs))
+
+    high_low = hi - lo
+    high_pc = np.abs(hi - prev_cl)
+    low_pc = np.abs(lo - prev_cl)
+    tr = np.maximum(high_low, np.maximum(high_pc, low_pc))
+    atr_14 = _rolling_mean(tr, 14, 5)
+    atr_pct = (atr_14 / (cl + 1e-10)) * 100
+
+    bb_mid = _rolling_mean(cl, 20, 5)
+    bb_std = _rolling_std(cl, 20, 5)
+    bb_upper = bb_mid + 2 * bb_std
+    bb_lower = bb_mid - 2 * bb_std
+    bb_pct = (cl - bb_lower) / (bb_upper - bb_lower + 1e-10)
+    bb_width = ((bb_upper - bb_lower) / (bb_mid + 1e-10)) * 100
+
+    cum_vol = np.cumsum(vol)
+    cum_vwap = np.cumsum(cl * vol)
+    vwap = cum_vwap / (cum_vol + 1)
+    close_vs_vwap = ((cl - vwap) / (vwap + 1e-10)) * 100
+
+    vol_sma10 = _rolling_mean(vol, 10, 3)
+    vol_ratio = vol / (vol_sma10 + 1)
+    vol_surge = (vol > vol_sma10 * 1.5).astype(np.float64)
+
+    is_red = (cl < op).astype(np.int32)
+    consec_red = np.zeros(n, dtype=np.float64)
+    for i in range(n):
+        if is_red[i]:
+            consec_red[i] = (consec_red[i - 1] + 1) if i > 0 else 1
+    is_green = (cl > op).astype(np.int32)
+    consec_green = np.zeros(n, dtype=np.float64)
+    for i in range(n):
+        if is_green[i]:
+            consec_green[i] = (consec_green[i - 1] + 1) if i > 0 else 1
+
+    day_high = np.maximum.accumulate(hi)
+    day_low = np.minimum.accumulate(lo)
+    pct_from_day_high = ((cl - day_high) / (day_high + 1e-10)) * 100
+    pct_from_day_low = ((cl - day_low) / (day_low + 1e-10)) * 100
+    day_range_pct = ((day_high - day_low) / (spot_open + 1e-10)) * 100
+
+    minutes_since_open = (hours - 9) * 60 + minutes - 15
+    is_first_hour = (minutes_since_open <= 60).astype(np.float64)
+    is_last_hour = (hours >= 15).astype(np.float64)
+
+    return {
+        "open": op, "high": hi, "low": lo, "close": cl, "volume": vol,
+        "hour": hours, "minute": minutes, "candle_num": candle_num,
+        "gap_pct": gap_pct, "gap_from_prev_close": gap_from_prev_close,
+        "candle_body_pct": body_pct, "candle_range_pct": rng_pct,
+        "upper_wick": upper_wick, "lower_wick": lower_wick,
+        "wick_ratio": wick_ratio, "body_to_range": body_to_range,
+        "close_vs_sma5": close_vs_sma5, "close_vs_sma10": close_vs_sma10,
+        "close_vs_sma20": close_vs_sma20,
+        "sma5_slope": sma5_slope, "sma10_slope": sma10_slope,
+        "roc_1": roc_1, "roc_3": roc_3, "roc_5": roc_5, "roc_10": roc_10,
+        "rsi_14": rsi_14, "atr_pct": atr_pct,
+        "bb_pct": bb_pct, "bb_width": bb_width,
+        "close_vs_vwap": close_vs_vwap,
+        "vol_ratio": vol_ratio, "vol_surge": vol_surge,
+        "consec_red": consec_red, "consec_green": consec_green,
+        "pct_from_day_high": pct_from_day_high, "pct_from_day_low": pct_from_day_low,
+        "day_range_pct": day_range_pct,
+        "minutes_since_open": minutes_since_open.astype(np.float64),
+        "is_first_hour": is_first_hour, "is_last_hour": is_last_hour,
+        "prev_day_change_pct": None, "prev_day_range_pct": None,
+        "candle_num_f": candle_num.astype(np.float64),
+        "hour_f": hours.astype(np.float64),
+    }
+
 
 # ─── Symbol universe ─────────────────────────────────────────────────────
 SYMBOLS = {
@@ -169,18 +335,15 @@ def label_trade(candles, idx, sym):
         if MAX_LOSS > 0 and w_pnl <= -MAX_LOSS:
             exit_p = est_entry - (MAX_LOSS / qty)
             gross = (exit_p - est_entry) * qty
-            charges = calc_charges(est_entry, exit_p, qty)["total"]
-            return (1 if gross - charges > 0 else 0), gross - charges
+            return (1 if gross - _charges_total(est_entry, exit_p, qty) > 0 else 0), gross - _charges_total(est_entry, exit_p, qty)
 
         if opt_p_worst <= sl_price:
             gross = (sl_price - est_entry) * qty
-            charges = calc_charges(est_entry, sl_price, qty)["total"]
-            return (1 if gross - charges > 0 else 0), gross - charges
+            return (1 if gross - _charges_total(est_entry, sl_price, qty) > 0 else 0), gross - _charges_total(est_entry, sl_price, qty)
 
         if opt_p_best >= tgt_price:
             gross = (tgt_price - est_entry) * qty
-            charges = calc_charges(est_entry, tgt_price, qty)["total"]
-            return (1 if gross - charges > 0 else 0), gross - charges
+            return (1 if gross - _charges_total(est_entry, tgt_price, qty) > 0 else 0), gross - _charges_total(est_entry, tgt_price, qty)
 
         b_pnl = (opt_p_best - est_entry) * qty
         peak_pnl = max(peak_pnl, b_pnl)
@@ -191,64 +354,70 @@ def label_trade(candles, idx, sym):
             if cur <= FLOOR:
                 floor_p = est_entry + (FLOOR / qty)
                 gross = (floor_p - est_entry) * qty
-                charges = calc_charges(est_entry, floor_p, qty)["total"]
-                return (1 if gross - charges > 0 else 0), gross - charges
+                return (1 if gross - _charges_total(est_entry, floor_p, qty) > 0 else 0), gross - _charges_total(est_entry, floor_p, qty)
 
     last_move = -(candles[-1]["close"] - spot) * PE_DELTA
     eod_p = est_entry + last_move
     gross = (eod_p - est_entry) * qty
-    charges = calc_charges(est_entry, eod_p, qty)["total"]
-    return (1 if gross - charges > 0 else 0), gross - charges
+    ch = _charges_total(est_entry, eod_p, qty)
+    return (1 if gross - ch > 0 else 0), gross - ch
 
 
 def collect_day_data(uclient, sym, ref_date, prev_change=0, prev_range=0, sym_stats=None):
-    """Collect features + labels for one symbol on one day."""
+    """Collect features + labels for one symbol on one day — numpy-fast version."""
     candles = fetch_candles(uclient, sym, ref_date)
     if not candles or len(candles) < 10:
         return [], candles
 
-    df = compute_features(candles)
-    if df.empty:
+    f = compute_features_fast(candles)
+    if f is None:
         return [], candles
 
-    df["prev_day_change_pct"] = prev_change
-    df["prev_day_range_pct"] = prev_range
-
+    n = len(candles)
     stats = sym_stats or {}
-    df["sym_avg_range"] = stats.get("avg_range", 1.0)
-    df["sym_avg_volume"] = stats.get("avg_volume", 1.0)
-    df["spot_magnitude"] = np.log(df["close"].clip(lower=1))
+    avg_range = stats.get("avg_range", 1.0)
+    avg_vol = stats.get("avg_volume", 1.0)
+    spot_mag = np.log(np.clip(f["close"], 1, None))
 
-    # Vectorized time filter — skip slow per-row Python checks
-    h = df["hour"].values
-    m = df["minute"].values
-    cn = df["candle_num"].values
-    time_mins = h * 60 + m
+    # Vectorized time filter
+    time_mins = f["hour"] * 60 + f["minute"]
     start_mins = SCAN_START[0] * 60 + SCAN_START[1]
     end_mins = SCAN_END[0] * 60 + SCAN_END[1]
-    mask = (time_mins >= start_mins) & (time_mins <= end_mins) & (cn >= 5)
+    mask = (time_mins >= start_mins) & (time_mins <= end_mins) & (f["candle_num"] >= 5)
     for skip_h in SKIP_HOURS:
-        mask &= (h != skip_h)
-    df_filtered = df[mask]
+        mask &= (f["hour"] != skip_h)
 
-    if df_filtered.empty:
+    indices = np.where(mask)[0]
+    if len(indices) == 0:
         return [], candles
 
-    # Use itertuples (10-50x faster than iterrows)
-    ext_cols = EXTENDED_FEATURES
     rows = []
-    for tup in df_filtered.itertuples(index=False):
-        cidx = int(tup.candle_num)
+    for i in indices:
+        cidx = int(f["candle_num"][i])
         label, pnl = label_trade(candles, cidx, sym)
         if label is None:
             continue
-        feat = {col: getattr(tup, col) for col in ext_cols}
+        feat = {}
+        for col in FEATURE_COLS:
+            if col == "candle_num":
+                feat[col] = float(f["candle_num_f"][i])
+            elif col == "hour":
+                feat[col] = float(f["hour_f"][i])
+            elif col == "prev_day_change_pct":
+                feat[col] = prev_change
+            elif col == "prev_day_range_pct":
+                feat[col] = prev_range
+            else:
+                feat[col] = float(f[col][i])
+        feat["sym_avg_range"] = avg_range
+        feat["sym_avg_volume"] = avg_vol
+        feat["spot_magnitude"] = float(spot_mag[i])
         feat["label"] = label
         feat["pnl"] = pnl
         feat["symbol"] = sym
         feat["candle_idx"] = cidx
         feat["time"] = candles[cidx]["date"][11:16]
-        feat["spot"] = tup.close
+        feat["spot"] = float(f["close"][i])
         rows.append(feat)
 
     return rows, candles
