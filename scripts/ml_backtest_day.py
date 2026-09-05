@@ -61,7 +61,24 @@ def run_day(target_date, indexes=None):
             print(f"  ⚠ No model for {idx}")
             continue
 
+        # Try cache first, then fetch directly
         candles = _fetch_spot(uclient, idx, target_date)
+        if not candles or len(candles) < 10:
+            # Direct fetch without cache
+            spot_key = SPOT_KEYS.get(idx)
+            print(f"  Fetching {idx} ({spot_key}) for {target_date}...")
+            from_dt = datetime(target_date.year, target_date.month, target_date.day, 9, 15, 0, tzinfo=IST)
+            to_dt = datetime(target_date.year, target_date.month, target_date.day, 15, 30, 0, tzinfo=IST)
+            try:
+                candles = uclient.historical_data(spot_key, from_dt, to_dt, "5minute")
+                print(f"  Got {len(candles) if candles else 0} candles")
+                if candles:
+                    cache_path = os.path.join(CACHE_DIR, f"spot_{idx}_{target_date}.json")
+                    with open(cache_path, "w") as f:
+                        json.dump(candles, f)
+            except Exception as e:
+                print(f"  ⚠ Fetch error: {e}")
+                candles = None
         if not candles or len(candles) < 10:
             print(f"  ⚠ No candles for {idx} on {target_date}")
             continue
