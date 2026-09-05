@@ -377,28 +377,41 @@ def run_walkforward(uclient, symbols, year, daily_budget=3, train_months=6):
     symbols = valid_symbols
     print(f"\n  {len(symbols)} symbols with sufficient data\n")
 
-    # ─── PRE-COMPUTE all features + labels ONCE ────────────────────────
-    print("Pre-computing features for all symbols × all days...")
-    # all_rows_by_date[date] = list of feature rows (with symbol, pnl, label)
+    # ─── PRE-COMPUTE all features + labels ONCE (with disk cache) ─────
+    import pickle
+    feature_cache_file = os.path.join(CACHE_DIR, f"features_{year}_{len(symbols)}sym.pkl")
     all_rows_by_date = defaultdict(list)
-    sym_stats_global = {}
-    for sym in symbols:
-        sym_stats_global[sym] = compute_symbol_stats(uclient, sym, all_days)
 
-    total_combos = len(symbols) * len(all_days)
-    done = 0
-    for sym in symbols:
-        for d in all_days:
-            done += 1
-            if done % 500 == 0:
-                print(f"  {done}/{total_combos} ({done*100//total_combos}%)...", flush=True)
-            pc, pr = day_data.get((sym, d), (0, 0))
-            rows, _ = collect_day_data(uclient, sym, d, pc, pr, sym_stats_global.get(sym))
-            for r in rows:
-                r["_date"] = d
-            all_rows_by_date[d].extend(rows)
+    if os.path.exists(feature_cache_file):
+        print(f"Loading cached features from {feature_cache_file}...")
+        with open(feature_cache_file, "rb") as f:
+            all_rows_by_date = pickle.load(f)
+        print(f"  Loaded — {sum(len(v) for v in all_rows_by_date.values())} total feature rows\n")
+    else:
+        print(f"Pre-computing features for {len(symbols)} symbols × {len(all_days)} days...")
+        sym_stats_global = {}
+        for sym in symbols:
+            sym_stats_global[sym] = compute_symbol_stats(uclient, sym, all_days)
 
-    print(f"  Done — {sum(len(v) for v in all_rows_by_date.values())} total feature rows\n")
+        for si, sym in enumerate(symbols):
+            t0 = time.time()
+            sym_rows = 0
+            for d in all_days:
+                pc, pr = day_data.get((sym, d), (0, 0))
+                rows, _ = collect_day_data(uclient, sym, d, pc, pr, sym_stats_global.get(sym))
+                for r in rows:
+                    r["_date"] = d
+                all_rows_by_date[d].extend(rows)
+                sym_rows += len(rows)
+            elapsed = time.time() - t0
+            print(f"  [{si+1}/{len(symbols)}] {sym}: {sym_rows} rows ({elapsed:.0f}s)", flush=True)
+
+        total_rows = sum(len(v) for v in all_rows_by_date.values())
+        print(f"  Done — {total_rows} total feature rows")
+        print(f"  Saving cache to {feature_cache_file}...")
+        with open(feature_cache_file, "wb") as f:
+            pickle.dump(dict(all_rows_by_date), f)
+        print(f"  Cached ✓\n")
 
     # Walk-forward loop
     all_daily_pnl = []
