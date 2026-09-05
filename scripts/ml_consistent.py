@@ -70,7 +70,7 @@ SYMBOLS = {
     # ─── Consumer ────────────────────────────────────────────────────
     "TITAN":       {"key": "NSE_EQ|INE280A01028",      "lot": 175,  "step": 20,  "lots": 1},
     "ASIANPAINT":  {"key": "NSE_EQ|INE021A01026",      "lot": 300,  "step": 10,  "lots": 1},
-    "NESTLEIND":   {"key": "NSE_EQ|INE239A01016",      "lot": 50,   "step": 50,  "lots": 1},
+    # NESTLEIND skipped — ISIN changed, Upstox rejects INE239A01016
     "BAJAJFINSV":  {"key": "NSE_EQ|INE918I01026",      "lot": 500,  "step": 10,  "lots": 1},
     "EICHERMOT":   {"key": "NSE_EQ|INE066A01021",      "lot": 175,  "step": 20,  "lots": 1},
     # ─── Energy / Infra / Metals ─────────────────────────────────────
