@@ -491,13 +491,14 @@ def train_universal_model(all_rows):
         return None
 
     model = XGBClassifier(
-        n_estimators=300, max_depth=4, learning_rate=0.03,
+        n_estimators=100, max_depth=3, learning_rate=0.1,
         subsample=0.8, colsample_bytree=0.7,
         min_child_weight=5,
         reg_alpha=0.1, reg_lambda=1.0,
         scale_pos_weight=neg / pos if pos > 0 else 1,
         eval_metric="logloss", verbosity=0,
         use_label_encoder=False,
+        tree_method="hist",
     )
     model.fit(X, y)
     return model
