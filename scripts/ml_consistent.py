@@ -367,6 +367,29 @@ def run_walkforward(uclient, symbols, year, daily_budget=3, train_months=6):
     symbols = valid_symbols
     print(f"\n  {len(symbols)} symbols with sufficient data\n")
 
+    # ─── PRE-COMPUTE all features + labels ONCE ────────────────────────
+    print("Pre-computing features for all symbols × all days...")
+    # all_rows_by_date[date] = list of feature rows (with symbol, pnl, label)
+    all_rows_by_date = defaultdict(list)
+    sym_stats_global = {}
+    for sym in symbols:
+        sym_stats_global[sym] = compute_symbol_stats(uclient, sym, all_days)
+
+    total_combos = len(symbols) * len(all_days)
+    done = 0
+    for sym in symbols:
+        for d in all_days:
+            done += 1
+            if done % 500 == 0:
+                print(f"  {done}/{total_combos} ({done*100//total_combos}%)...", flush=True)
+            pc, pr = day_data.get((sym, d), (0, 0))
+            rows, _ = collect_day_data(uclient, sym, d, pc, pr, sym_stats_global.get(sym))
+            for r in rows:
+                r["_date"] = d
+            all_rows_by_date[d].extend(rows)
+
+    print(f"  Done — {sum(len(v) for v in all_rows_by_date.values())} total feature rows\n")
+
     # Walk-forward loop
     all_daily_pnl = []
     all_daily_details = []
@@ -391,22 +414,14 @@ def run_walkforward(uclient, symbols, year, daily_budget=3, train_months=6):
         for ym in train_yms:
             train_days.extend(months[ym])
 
-        # Compute symbol stats from training period
-        sym_stats = {}
-        for sym in symbols:
-            sym_stats[sym] = compute_symbol_stats(uclient, sym, train_days)
-
-        # Build training dataset (all symbols pooled)
+        # Slice pre-computed rows for training
         print(f"  Training for {test_y}-{test_m:02d} "
               f"({len(train_days)} train days, {len(test_days)} test days)...",
               end=" ", flush=True)
 
         train_rows = []
         for d in train_days:
-            for sym in symbols:
-                pc, pr = day_data.get((sym, d), (0, 0))
-                rows, _ = collect_day_data(uclient, sym, d, pc, pr, sym_stats.get(sym))
-                train_rows.extend(rows)
+            train_rows.extend(all_rows_by_date.get(d, []))
 
         model = train_universal_model(train_rows)
         if model is None:
@@ -416,28 +431,19 @@ def run_walkforward(uclient, symbols, year, daily_budget=3, train_months=6):
         pos_rate = sum(1 for r in train_rows if r["label"] == 1) / len(train_rows) * 100
         print(f"OK ({len(train_rows)} samples, {pos_rate:.0f}% positive)")
 
-        # Test: for each day, collect all signals, rank, pick top N
+        # Test: for each day, score all signals, rank, pick top N
         month_pnl = 0
         month_trades = 0
         month_wins = 0
 
         for test_date in test_days:
-            day_signals = []
+            day_signals = all_rows_by_date.get(test_date, [])
 
-            for sym in symbols:
-                pc, pr = day_data.get((sym, test_date), (0, 0))
-                rows, candles = collect_day_data(
-                    uclient, sym, test_date, pc, pr, sym_stats.get(sym))
-
-                if not rows:
-                    continue
-
-                for row in rows:
-                    features = pd.DataFrame([{k: row[k] for k in EXTENDED_FEATURES}])
-                    features = features.replace([np.inf, -np.inf], np.nan).fillna(0)
-                    prob = model.predict_proba(features)[0][1]
-                    row["confidence"] = prob
-                    day_signals.append(row)
+            # Score each signal
+            for row in day_signals:
+                features = pd.DataFrame([{k: row[k] for k in EXTENDED_FEATURES}])
+                features = features.replace([np.inf, -np.inf], np.nan).fillna(0)
+                row["confidence"] = model.predict_proba(features)[0][1]
 
             # Rank by confidence, take top N
             day_signals.sort(key=lambda x: x["confidence"], reverse=True)
