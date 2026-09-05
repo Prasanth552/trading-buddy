@@ -294,30 +294,59 @@ def api_ltp(channel: str = "ch1") -> JSONResponse:
 @app.get("/api/ml")
 def api_ml() -> JSONResponse:
     try:
-        from src.ml.bot import ml_status
-        return JSONResponse(ml_status())
-    except Exception as exc:  # noqa: BLE001
-        return JSONResponse({"enabled": False, "error": str(exc)})
+        _ensure_db()
+        with db.get_conn() as conn:
+            tbl = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='ml_signals'"
+            ).fetchone()
+            if not tbl:
+                return JSONResponse({"enabled": False})
+            today = mc.now_ist().date().isoformat()
+            sigs = [dict(r) for r in conn.execute(
+                "SELECT * FROM ml_signals WHERE date=? ORDER BY id DESC", (today,)
+            ).fetchall()]
+            closed = [s for s in sigs if s["status"] == "CLOSED"]
+            wins = sum(1 for s in closed if (s["pnl"] or 0) > 0)
+            total_pnl = sum(s["pnl"] or 0 for s in closed)
+            return JSONResponse({
+                "enabled": True, "date": today, "signals": sigs,
+                "open_count": sum(1 for s in sigs if s["status"] == "OPEN"),
+                "closed_count": len(closed),
+                "summary": {
+                    "total_trades": len(closed),
+                    "wins": wins, "losses": len(closed) - wins,
+                    "win_rate": f"{wins/len(closed)*100:.0f}%" if closed else "—",
+                    "net_pnl": round(total_pnl, 2),
+                    "open_trades": sum(1 for s in sigs if s["status"] == "OPEN"),
+                },
+            })
+    except Exception:  # noqa: BLE001
+        return JSONResponse({"enabled": False})
+
+
+_ML_EMPTY = lambda: JSONResponse({"stats": {
+    "total": 0, "open": 0, "closed": 0, "wins": 0, "losses": 0,
+    "win_rate": 0, "total_pnl": 0, "best_trade": 0, "worst_trade": 0,
+    "avg_pnl": 0, "today_pnl": 0, "today_count": 0,
+    "total_charges": 0, "today_charges": 0, "capital": 0, "utilized": 0,
+    "pnl_curve": [], "now": mc.now_ist().strftime("%Y-%m-%d %H:%M:%S IST"),
+}, "trades": []})
 
 
 @app.get("/api/ml/all")
 def api_ml_all() -> JSONResponse:
     """ML signals shaped like /api/all so the ML tab renders identically to channel tabs."""
     try:
-        from src.ml.bot import get_recent_signals, init_ml_db
-        init_ml_db()
-    except Exception as exc:  # noqa: BLE001
-        return JSONResponse({"stats": {
-            "total": 0, "open": 0, "closed": 0, "wins": 0, "losses": 0,
-            "win_rate": 0, "total_pnl": 0, "best_trade": 0, "worst_trade": 0,
-            "avg_pnl": 0, "today_pnl": 0, "today_count": 0,
-            "total_charges": 0, "today_charges": 0, "capital": 0, "utilized": 0,
-            "pnl_curve": [], "now": mc.now_ist().strftime("%Y-%m-%d %H:%M:%S IST"),
-        }, "trades": []})
+        _ensure_db()
+        with db.get_conn() as conn:
+            # Check if ml_signals table exists
+            tbl = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='ml_signals'"
+            ).fetchone()
+            if not tbl:
+                return _ML_EMPTY()
 
-    today_iso = mc.now_ist().date().isoformat()
-    with db.get_conn() as conn:
-        try:
+            today_iso = mc.now_ist().date().isoformat()
             row = conn.execute(f"""SELECT
                 COUNT(*) AS total,
                 SUM(CASE WHEN status='OPEN' THEN 1 ELSE 0 END) AS open_count,
@@ -339,53 +368,47 @@ def api_ml_all() -> JSONResponse:
             signals = [dict(r) for r in conn.execute(
                 "SELECT * FROM ml_signals ORDER BY id DESC LIMIT 100"
             ).fetchall()]
-        except Exception:
-            return JSONResponse({"stats": {
-                "total": 0, "open": 0, "closed": 0, "wins": 0, "losses": 0,
-                "win_rate": 0, "total_pnl": 0, "best_trade": 0, "worst_trade": 0,
-                "avg_pnl": 0, "today_pnl": 0, "today_count": 0,
-                "total_charges": 0, "today_charges": 0, "capital": 0, "utilized": 0,
-                "pnl_curve": [], "now": mc.now_ist().strftime("%Y-%m-%d %H:%M:%S IST"),
-            }, "trades": []})
 
-    closed = s["closed"] or 0
-    wins = s["wins"] or 0
-    win_rate = (wins / closed * 100) if closed > 0 else 0
-    cumulative, running = [], 0
-    for r in pnl_series:
-        running += r["pnl"]
-        cumulative.append({"ts": r["ts"], "pnl": r["pnl"], "cumulative": round(running, 2)})
+        closed = s["closed"] or 0
+        wins = s["wins"] or 0
+        win_rate = (wins / closed * 100) if closed > 0 else 0
+        cumulative, running = [], 0
+        for r in pnl_series:
+            running += r["pnl"]
+            cumulative.append({"ts": r["ts"], "pnl": r["pnl"], "cumulative": round(running, 2)})
 
-    trades = []
-    for sig in signals:
-        trades.append({
-            "id": sig["id"], "ts": sig["ts"],
-            "symbol": f"{sig['index_sym']} PE {sig['strike']}",
-            "side": "BUY", "qty": sig["qty"],
-            "price": sig["entry"], "exit_price": sig.get("exit_price"),
-            "pnl": sig.get("pnl"), "mode": "ML",
-            "status": sig["status"],
-            "stop_price": sig["sl"], "target_price": sig["tgt"],
-            "index_entry": sig["spot"], "broker_key": None, "charges": None,
-            "confidence": sig["confidence"],
-            "exit_reason": sig.get("exit_reason"),
+        trades = []
+        for sig in signals:
+            trades.append({
+                "id": sig["id"], "ts": sig["ts"],
+                "symbol": f"{sig['index_sym']} PE {sig['strike']}",
+                "side": "BUY", "qty": sig["qty"],
+                "price": sig["entry"], "exit_price": sig.get("exit_price"),
+                "pnl": sig.get("pnl"), "mode": "ML",
+                "status": sig["status"],
+                "stop_price": sig["sl"], "target_price": sig["tgt"],
+                "index_entry": sig["spot"], "broker_key": None, "charges": None,
+                "confidence": sig["confidence"],
+                "exit_reason": sig.get("exit_reason"),
+            })
+
+        return JSONResponse({
+            "stats": {
+                "total": s["total"], "open": s["open_count"] or 0, "closed": closed,
+                "wins": wins, "losses": s["losses"] or 0, "win_rate": round(win_rate, 1),
+                "total_pnl": round(s["total_pnl"], 2),
+                "best_trade": round(s["best"], 2), "worst_trade": round(s["worst"], 2),
+                "avg_pnl": round(s["avg_pnl"], 2),
+                "today_pnl": round(s["today_pnl"], 2), "today_count": s["today_count"] or 0,
+                "total_charges": 0, "today_charges": 0,
+                "capital": 0, "utilized": round(s["utilized"], 2),
+                "pnl_curve": cumulative,
+                "now": mc.now_ist().strftime("%Y-%m-%d %H:%M:%S IST"),
+            },
+            "trades": trades,
         })
-
-    return JSONResponse({
-        "stats": {
-            "total": s["total"], "open": s["open_count"] or 0, "closed": closed,
-            "wins": wins, "losses": s["losses"] or 0, "win_rate": round(win_rate, 1),
-            "total_pnl": round(s["total_pnl"], 2),
-            "best_trade": round(s["best"], 2), "worst_trade": round(s["worst"], 2),
-            "avg_pnl": round(s["avg_pnl"], 2),
-            "today_pnl": round(s["today_pnl"], 2), "today_count": s["today_count"] or 0,
-            "total_charges": 0, "today_charges": 0,
-            "capital": 0, "utilized": round(s["utilized"], 2),
-            "pnl_curve": cumulative,
-            "now": mc.now_ist().strftime("%Y-%m-%d %H:%M:%S IST"),
-        },
-        "trades": trades,
-    })
+    except Exception as exc:  # noqa: BLE001
+        return _ML_EMPTY()
 
 
 @app.get("/api/scan")
