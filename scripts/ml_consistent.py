@@ -118,6 +118,8 @@ def fetch_candles(uclient, sym, ref_date):
     if os.path.exists(cache):
         with open(cache) as f:
             return json.load(f)
+    if uclient is None:
+        return None
     y, m, d = ref_date.year, ref_date.month, ref_date.day
     from_dt = datetime(y, m, d, 9, 15, 0, tzinfo=IST)
     to_dt = datetime(y, m, d, 15, 30, 0, tzinfo=IST)
@@ -379,6 +381,7 @@ def run_walkforward(uclient, symbols, year, daily_budget=3, train_months=6):
 
     # ─── PRE-COMPUTE all features + labels ONCE (with disk cache) ─────
     import pickle
+    from concurrent.futures import ProcessPoolExecutor, as_completed
     feature_cache_file = os.path.join(CACHE_DIR, f"features_{year}_{len(symbols)}sym.pkl")
     all_rows_by_date = defaultdict(list)
 
@@ -393,18 +396,36 @@ def run_walkforward(uclient, symbols, year, daily_budget=3, train_months=6):
         for sym in symbols:
             sym_stats_global[sym] = compute_symbol_stats(uclient, sym, all_days)
 
-        for si, sym in enumerate(symbols):
-            t0 = time.time()
-            sym_rows = 0
-            for d in all_days:
-                pc, pr = day_data.get((sym, d), (0, 0))
-                rows, _ = collect_day_data(uclient, sym, d, pc, pr, sym_stats_global.get(sym))
+        import multiprocessing as mp
+        n_workers = min(mp.cpu_count(), 4, len(symbols))
+        print(f"  Using {n_workers} parallel workers...")
+
+        def _process_symbol(args):
+            sym, days_list, dd, stats = args
+            result = []
+            for d in days_list:
+                pc, pr = dd.get((sym, d), (0, 0))
+                rows, _ = collect_day_data(None, sym, d, pc, pr, stats)
                 for r in rows:
                     r["_date"] = d
-                all_rows_by_date[d].extend(rows)
-                sym_rows += len(rows)
-            elapsed = time.time() - t0
-            print(f"  [{si+1}/{len(symbols)}] {sym}: {sym_rows} rows ({elapsed:.0f}s)", flush=True)
+                result.extend(rows)
+            return sym, result
+
+        work = [(sym, all_days, dict(day_data), sym_stats_global.get(sym))
+                for sym in symbols]
+
+        done_count = 0
+        with ProcessPoolExecutor(max_workers=n_workers) as pool:
+            futures = {pool.submit(_process_symbol, w): w[0] for w in work}
+            for fut in as_completed(futures):
+                sym_name = futures[fut]
+                done_count += 1
+                sym_rows = fut.result()
+                _, rows = sym_rows
+                for r in rows:
+                    all_rows_by_date[r["_date"]].append(r)
+                print(f"  [{done_count}/{len(symbols)}] {sym_name}: {len(rows)} rows ✓",
+                      flush=True)
 
         total_rows = sum(len(v) for v in all_rows_by_date.values())
         print(f"  Done — {total_rows} total feature rows")
