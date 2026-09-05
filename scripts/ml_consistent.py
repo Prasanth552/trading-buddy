@@ -63,7 +63,7 @@ SYMBOLS = {
     "TECHM":       {"key": "NSE_EQ|INE669C01036",      "lot": 600,  "step": 10,  "lots": 1},
     # ─── Pharma ──────────────────────────────────────────────────────
     "SUNPHARMA":   {"key": "NSE_EQ|INE044A01036",      "lot": 350,  "step": 10,  "lots": 1},
-    "DRREDDY":     {"key": "NSE_EQ|INE089A01023",      "lot": 125,  "step": 20,  "lots": 1},
+    # DRREDDY skipped — ISIN changed, Upstox rejects INE089A01023
     "CIPLA":       {"key": "NSE_EQ|INE059A01026",      "lot": 650,  "step": 10,  "lots": 1},
     "DIVISLAB":    {"key": "NSE_EQ|INE361B01024",      "lot": 100,  "step": 20,  "lots": 1},
     "APOLLOHOSP":  {"key": "NSE_EQ|INE437A01024",      "lot": 125,  "step": 50,  "lots": 1},
@@ -81,7 +81,7 @@ SYMBOLS = {
     "COALINDIA":   {"key": "NSE_EQ|INE522F01014",      "lot": 2100, "step": 2,   "lots": 1},
     "JSWSTEEL":    {"key": "NSE_EQ|INE019A01038",      "lot": 900,  "step": 5,   "lots": 1},
     "TATASTEEL":   {"key": "NSE_EQ|INE081A01020",      "lot": 1500, "step": 5,   "lots": 1},
-    "BPCL":        {"key": "NSE_EQ|INE541A01028",      "lot": 1800, "step": 2,   "lots": 1},
+    # BPCL skipped — ISIN changed, Upstox rejects INE541A01028
     "GRASIM":      {"key": "NSE_EQ|INE047A01021",      "lot": 475,  "step": 10,  "lots": 1},
     "ULTRACEMCO":  {"key": "NSE_EQ|INE481G01011",      "lot": 50,   "step": 50,  "lots": 1},
     "M_M":         {"key": "NSE_EQ|INE101A01026",      "lot": 350,  "step": 10,  "lots": 1},
@@ -347,22 +347,32 @@ def run_walkforward(uclient, symbols, year, daily_budget=3, train_months=6):
         prev_change = 0
         prev_range = 0
         fetched = 0
+        consecutive_fails = 0
+        skipped_early = False
         for d in all_days:
             day_data[(sym, d)] = (prev_change, prev_range)
             candles = fetch_candles(uclient, sym, d)
             if candles and len(candles) > 1:
                 fetched += 1
+                consecutive_fails = 0
                 o = candles[0]["open"]
                 c = candles[-1]["close"]
                 h = max(c_["high"] for c_ in candles)
                 l = min(c_["low"] for c_ in candles)
                 prev_change = ((c - o) / o) * 100
                 prev_range = ((h - l) / o) * 100
-        if fetched > len(all_days) * 0.5:
+            else:
+                consecutive_fails += 1
+                if consecutive_fails >= 10 and fetched == 0:
+                    skipped_early = True
+                    break
+        if skipped_early:
+            print(f"  [{si+1}/{len(symbols)}] {sym}: 0 days — BAD ISIN, skipped early")
+        elif fetched > len(all_days) * 0.5:
             valid_symbols.append(sym)
             print(f"  [{si+1}/{len(symbols)}] {sym}: {fetched}/{len(all_days)} days ✓")
         else:
-            print(f"  [{si+1}/{len(symbols)}] {sym}: {fetched}/{len(all_days)} days ✗ SKIPPED (too few)")
+            print(f"  [{si+1}/{len(symbols)}] {sym}: {fetched}/{len(all_days)} days ✗ SKIPPED")
 
     symbols = valid_symbols
     print(f"\n  {len(symbols)} symbols with sufficient data\n")
