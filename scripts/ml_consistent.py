@@ -37,13 +37,60 @@ IST = ZoneInfo("Asia/Kolkata")
 
 # ─── Symbol universe ─────────────────────────────────────────────────────
 SYMBOLS = {
-    "NIFTY":      {"key": "NSE_INDEX|Nifty 50",      "lot": 75,  "step": 50,  "lots": 3},
-    "SENSEX":     {"key": "BSE_INDEX|SENSEX",         "lot": 20,  "step": 100, "lots": 3},
-    "ITC":        {"key": "NSE_EQ|INE154A01025",      "lot": 1600,"step": 5,   "lots": 1},
-    "BHARTIARTL": {"key": "NSE_EQ|INE397D01024",      "lot": 475, "step": 10,  "lots": 1},
-    "MARUTI":     {"key": "NSE_EQ|INE585B01010",      "lot": 100, "step": 50,  "lots": 1},
-    "RELIANCE":   {"key": "NSE_EQ|INE002A01018",      "lot": 250, "step": 20,  "lots": 1},
-    "ICICIBANK":  {"key": "NSE_EQ|INE090A01021",      "lot": 700, "step": 10,  "lots": 1},
+    # ─── Indexes ──────────────────────────────────────────────────────
+    "NIFTY":       {"key": "NSE_INDEX|Nifty 50",      "lot": 75,   "step": 50,  "lots": 3},
+    "SENSEX":      {"key": "BSE_INDEX|SENSEX",         "lot": 20,   "step": 100, "lots": 3},
+    "BANKNIFTY":   {"key": "NSE_INDEX|Nifty Bank",     "lot": 15,   "step": 100, "lots": 3},
+    # ─── Large-cap F&O stocks ─────────────────────────────────────────
+    "RELIANCE":    {"key": "NSE_EQ|INE002A01018",      "lot": 250,  "step": 20,  "lots": 1},
+    "HDFCBANK":    {"key": "NSE_EQ|INE040A01034",      "lot": 550,  "step": 10,  "lots": 1},
+    "ICICIBANK":   {"key": "NSE_EQ|INE090A01021",      "lot": 700,  "step": 10,  "lots": 1},
+    "INFY":        {"key": "NSE_EQ|INE009A01021",      "lot": 400,  "step": 10,  "lots": 1},
+    "TCS":         {"key": "NSE_EQ|INE467B01029",      "lot": 175,  "step": 20,  "lots": 1},
+    "SBIN":        {"key": "NSE_EQ|INE062A01020",      "lot": 1500, "step": 5,   "lots": 1},
+    "AXISBANK":    {"key": "NSE_EQ|INE238A01034",      "lot": 625,  "step": 10,  "lots": 1},
+    "KOTAKBANK":   {"key": "NSE_EQ|INE237A01036",      "lot": 400,  "step": 10,  "lots": 1},
+    "ITC":         {"key": "NSE_EQ|INE154A01025",      "lot": 1600, "step": 5,   "lots": 1},
+    "LT":          {"key": "NSE_EQ|INE018A01030",      "lot": 150,  "step": 20,  "lots": 1},
+    "BHARTIARTL":  {"key": "NSE_EQ|INE397D01024",      "lot": 475,  "step": 10,  "lots": 1},
+    "HINDUNILVR":  {"key": "NSE_EQ|INE030A01027",      "lot": 300,  "step": 10,  "lots": 1},
+    "MARUTI":      {"key": "NSE_EQ|INE585B01010",      "lot": 100,  "step": 50,  "lots": 1},
+    "TATAMOTORS":  {"key": "NSE_EQ|INE155A01022",      "lot": 1400, "step": 5,   "lots": 1},
+    "BAJFINANCE":  {"key": "NSE_EQ|INE296A01032",      "lot": 125,  "step": 50,  "lots": 1},
+    # ─── IT / Tech ───────────────────────────────────────────────────
+    "HCLTECH":     {"key": "NSE_EQ|INE860A01027",      "lot": 350,  "step": 10,  "lots": 1},
+    "WIPRO":       {"key": "NSE_EQ|INE075A01022",      "lot": 1500, "step": 5,   "lots": 1},
+    "TECHM":       {"key": "NSE_EQ|INE669C01036",      "lot": 600,  "step": 10,  "lots": 1},
+    # ─── Pharma ──────────────────────────────────────────────────────
+    "SUNPHARMA":   {"key": "NSE_EQ|INE044A01036",      "lot": 350,  "step": 10,  "lots": 1},
+    "DRREDDY":     {"key": "NSE_EQ|INE089A01023",      "lot": 125,  "step": 20,  "lots": 1},
+    "CIPLA":       {"key": "NSE_EQ|INE059A01026",      "lot": 650,  "step": 10,  "lots": 1},
+    "DIVISLAB":    {"key": "NSE_EQ|INE361B01024",      "lot": 100,  "step": 20,  "lots": 1},
+    "APOLLOHOSP":  {"key": "NSE_EQ|INE437A01024",      "lot": 125,  "step": 50,  "lots": 1},
+    # ─── Consumer ────────────────────────────────────────────────────
+    "TITAN":       {"key": "NSE_EQ|INE280A01028",      "lot": 175,  "step": 20,  "lots": 1},
+    "ASIANPAINT":  {"key": "NSE_EQ|INE021A01026",      "lot": 300,  "step": 10,  "lots": 1},
+    "NESTLEIND":   {"key": "NSE_EQ|INE239A01016",      "lot": 50,   "step": 50,  "lots": 1},
+    "BAJAJFINSV":  {"key": "NSE_EQ|INE918I01026",      "lot": 500,  "step": 10,  "lots": 1},
+    "EICHERMOT":   {"key": "NSE_EQ|INE066A01021",      "lot": 175,  "step": 20,  "lots": 1},
+    # ─── Energy / Infra / Metals ─────────────────────────────────────
+    "ADANIENT":    {"key": "NSE_EQ|INE423A01024",      "lot": 500,  "step": 10,  "lots": 1},
+    "POWERGRID":   {"key": "NSE_EQ|INE752E01010",      "lot": 2700, "step": 2,   "lots": 1},
+    "NTPC":        {"key": "NSE_EQ|INE733E01010",      "lot": 2775, "step": 2,   "lots": 1},
+    "ONGC":        {"key": "NSE_EQ|INE213A01029",      "lot": 3075, "step": 2,   "lots": 1},
+    "COALINDIA":   {"key": "NSE_EQ|INE522F01014",      "lot": 2100, "step": 2,   "lots": 1},
+    "JSWSTEEL":    {"key": "NSE_EQ|INE019A01038",      "lot": 900,  "step": 5,   "lots": 1},
+    "TATASTEEL":   {"key": "NSE_EQ|INE081A01020",      "lot": 1500, "step": 5,   "lots": 1},
+    "BPCL":        {"key": "NSE_EQ|INE541A01028",      "lot": 1800, "step": 2,   "lots": 1},
+    "GRASIM":      {"key": "NSE_EQ|INE047A01021",      "lot": 475,  "step": 10,  "lots": 1},
+    "ULTRACEMCO":  {"key": "NSE_EQ|INE481G01011",      "lot": 50,   "step": 50,  "lots": 1},
+    "M_M":         {"key": "NSE_EQ|INE101A01026",      "lot": 350,  "step": 10,  "lots": 1},
+    "INDUSINDBK":  {"key": "NSE_EQ|INE095A01012",      "lot": 500,  "step": 10,  "lots": 1},
+    "HEROMOTOCO":  {"key": "NSE_EQ|INE158A01026",      "lot": 150,  "step": 20,  "lots": 1},
+    "TATACONSUM":  {"key": "NSE_EQ|INE192A01025",      "lot": 900,  "step": 5,   "lots": 1},
+    "HINDALCO":    {"key": "NSE_EQ|INE038A01020",      "lot": 1075, "step": 5,   "lots": 1},
+    "SBILIFE":     {"key": "NSE_EQ|INE123W01016",      "lot": 375,  "step": 10,  "lots": 1},
+    "HDFCLIFE":    {"key": "NSE_EQ|INE795G01014",      "lot": 1100, "step": 5,   "lots": 1},
 }
 
 # ─── Trading config ──────────────────────────────────────────────────────
@@ -269,9 +316,10 @@ def run_walkforward(uclient, symbols, year, daily_budget=3, train_months=6):
 
     os.makedirs(CACHE_DIR, exist_ok=True)
 
-    # Collect all trading days for the year + prior 6 months for training
-    train_start = date(year - 1, 7, 1)  # 6 months before year start
-    test_end = date(year, 12, 31)
+    # Collect all trading days for the year + prior months for training
+    train_start = date(year - 1, 13 - train_months, 1)
+    today = date.today()
+    test_end = min(date(year, 12, 31), today - timedelta(days=1))
 
     print("Collecting trading days (this takes a while)...")
     all_days = get_trading_days(uclient, train_start, test_end)
@@ -291,23 +339,32 @@ def run_walkforward(uclient, symbols, year, daily_budget=3, train_months=6):
         return
 
     # Precompute prev-day data for all symbols on all days
-    print("Building feature cache for all symbols...")
+    print(f"Building feature cache for {len(symbols)} symbols × {len(all_days)} days...")
     day_data = {}  # (sym, date) -> (prev_change, prev_range)
-    for sym in symbols:
+    valid_symbols = []
+    for si, sym in enumerate(symbols):
         prev_change = 0
         prev_range = 0
+        fetched = 0
         for d in all_days:
             day_data[(sym, d)] = (prev_change, prev_range)
             candles = fetch_candles(uclient, sym, d)
             if candles and len(candles) > 1:
+                fetched += 1
                 o = candles[0]["open"]
                 c = candles[-1]["close"]
                 h = max(c_["high"] for c_ in candles)
                 l = min(c_["low"] for c_ in candles)
                 prev_change = ((c - o) / o) * 100
                 prev_range = ((h - l) / o) * 100
-            # else keep previous values
-        print(f"  {sym}: cached {len(all_days)} days")
+        if fetched > len(all_days) * 0.5:
+            valid_symbols.append(sym)
+            print(f"  [{si+1}/{len(symbols)}] {sym}: {fetched}/{len(all_days)} days ✓")
+        else:
+            print(f"  [{si+1}/{len(symbols)}] {sym}: {fetched}/{len(all_days)} days ✗ SKIPPED (too few)")
+
+    symbols = valid_symbols
+    print(f"\n  {len(symbols)} symbols with sufficient data\n")
 
     # Walk-forward loop
     all_daily_pnl = []
