@@ -7,6 +7,9 @@ import os, sys, json
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
+
 import numpy as np
 import pandas as pd
 
@@ -28,7 +31,7 @@ from src.notify.channel_listener import calc_charges
 IST = ZoneInfo("Asia/Kolkata")
 
 
-def run_day(target_date, indexes=None):
+def run_day(target_date, indexes=None, verbose=False, min_conf=None):
     indexes = indexes or INDEXES
     uclient = UpstoxData()
     os.makedirs(CACHE_DIR, exist_ok=True)
@@ -117,8 +120,14 @@ def run_day(target_date, indexes=None):
             features = row[FEATURE_COLS].to_frame().T
             features = features.replace([np.inf, -np.inf], np.nan).fillna(0)
             prob = model.predict_proba(features)[0][1]
+            threshold = min_conf if min_conf is not None else MIN_CONFIDENCE
+            time_str = candles[int(row["candle_num"])]["date"][11:16]
 
-            if prob < MIN_CONFIDENCE:
+            if verbose:
+                print(f"  {time_str} | spot={row['close']:.0f} | conf={prob*100:.1f}%"
+                      + (" ◀ SIGNAL" if prob >= threshold else ""))
+
+            if prob < threshold:
                 continue
 
             # Signal!
@@ -133,6 +142,7 @@ def run_day(target_date, indexes=None):
             # Simulate exit
             candle_idx = int(row["candle_num"])
             label, pnl = _label_spot(candles, candle_idx, idx)
+            time_str = candles[candle_idx]["date"][11:16]
 
             day_trades += 1
             total_trades += 1
@@ -166,8 +176,10 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--date", required=True, help="YYYY-MM-DD")
     p.add_argument("--index", default=None)
+    p.add_argument("--verbose", "-v", action="store_true", help="Show all candle confidence scores")
+    p.add_argument("--min-conf", type=float, default=None, help="Override min confidence (0-1)")
     a = p.parse_args()
 
     dt = datetime.strptime(a.date, "%Y-%m-%d").date()
     idxs = [a.index] if a.index else None
-    run_day(dt, idxs)
+    run_day(dt, idxs, verbose=a.verbose, min_conf=a.min_conf)
