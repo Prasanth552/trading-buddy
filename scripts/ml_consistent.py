@@ -479,10 +479,13 @@ def train_universal_model(all_rows):
     if len(all_rows) < 200:
         return None
 
-    data = pd.DataFrame(all_rows)
-    X = data[EXTENDED_FEATURES].replace([np.inf, -np.inf], np.nan).fillna(0)
-    y = data["label"]
-    pos = y.sum()
+    X = np.array(
+        [[r.get(k, 0) for k in EXTENDED_FEATURES] for r in all_rows],
+        dtype=np.float64
+    )
+    X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+    y = np.array([r["label"] for r in all_rows], dtype=np.int32)
+    pos = int(y.sum())
     neg = len(y) - pos
     if pos < 30 or neg < 30:
         return None
@@ -665,12 +668,18 @@ def run_walkforward(uclient, symbols, year, daily_budget=3, train_months=6):
 
         for test_date in test_days:
             day_signals = all_rows_by_date.get(test_date, [])
+            if not day_signals:
+                continue
 
-            # Score each signal
-            for row in day_signals:
-                features = pd.DataFrame([{k: row[k] for k in EXTENDED_FEATURES}])
-                features = features.replace([np.inf, -np.inf], np.nan).fillna(0)
-                row["confidence"] = model.predict_proba(features)[0][1]
+            # Batch scoring — one predict_proba call for ALL signals
+            feat_matrix = np.array(
+                [[row.get(k, 0) for k in EXTENDED_FEATURES] for row in day_signals],
+                dtype=np.float64
+            )
+            feat_matrix = np.nan_to_num(feat_matrix, nan=0.0, posinf=0.0, neginf=0.0)
+            probs = model.predict_proba(feat_matrix)[:, 1]
+            for i, row in enumerate(day_signals):
+                row["confidence"] = float(probs[i])
 
             # Rank by confidence, take top N
             day_signals.sort(key=lambda x: x["confidence"], reverse=True)
