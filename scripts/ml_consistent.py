@@ -682,9 +682,20 @@ def run_walkforward(uclient, symbols, year, daily_budget=3, train_months=6):
             for i, row in enumerate(day_signals):
                 row["confidence"] = float(probs[i])
 
-            # Rank by confidence, take top N
+            # Rank by confidence, pick top N with ONE per symbol + min confidence
+            min_conf = 0.60
             day_signals.sort(key=lambda x: x["confidence"], reverse=True)
-            selected = day_signals[:daily_budget]
+            selected = []
+            seen_syms = set()
+            for sig in day_signals:
+                if sig["confidence"] < min_conf:
+                    break
+                if sig["symbol"] in seen_syms:
+                    continue
+                seen_syms.add(sig["symbol"])
+                selected.append(sig)
+                if len(selected) >= daily_budget:
+                    break
 
             day_pnl = 0
             day_trades = 0
