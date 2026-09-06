@@ -448,6 +448,15 @@ def _find_signal_for_date(daily_candles, ref_date, stock_name, strategy):
     return None
 
 
+def _has_active_trade(conn, strategy, stock, expiry_date):
+    """Check if there's already an entry for this stock+strategy in the current expiry cycle."""
+    row = conn.execute(
+        "SELECT 1 FROM stock_strategy_results WHERE strategy=? AND stock=? "
+        "AND expiry_date=? AND skipped=0 LIMIT 1",
+        (strategy, stock, expiry_date.isoformat())).fetchone()
+    return row is not None
+
+
 def run_day(ref_date: date, lots: int = 1, *, force: bool = False) -> dict:
     init_stock_strategy_db()
 
@@ -477,39 +486,46 @@ def run_day(ref_date: date, lots: int = 1, *, force: bool = False) -> dict:
                 if sig is None:
                     r = {"skipped": True, "skip_reason": "no_signal", "net_pnl": 0}
                 else:
-                    if sig["direction"] == "bullish":
-                        r = run_bull_put_spread(daily, stock_name, ref_date, sig["expiry"],
-                                                lots=lots, profit_target_pct=params["profit_target_pct"],
-                                                stop_loss_mult=params["stop_loss_mult"],
-                                                close_dte=params["close_dte"])
-                    else:
-                        r = run_bear_call_spread(daily, stock_name, ref_date, sig["expiry"],
-                                                 lots=lots, profit_target_pct=params["profit_target_pct"],
-                                                 stop_loss_mult=params["stop_loss_mult"],
-                                                 close_dte=params["close_dte"])
-                    if sig:
+                    with db.get_conn() as conn:
+                        if _has_active_trade(conn, strat_name, stock_name, sig["expiry"]):
+                            r = {"skipped": True, "skip_reason": "already_in_trade", "net_pnl": 0}
+                        else:
+                            r = None
+                    if r is None:
+                        if sig["direction"] == "bullish":
+                            r = run_bull_put_spread(daily, stock_name, ref_date, sig["expiry"],
+                                                    lots=lots, profit_target_pct=params["profit_target_pct"],
+                                                    stop_loss_mult=params["stop_loss_mult"],
+                                                    close_dte=params["close_dte"])
+                        else:
+                            r = run_bear_call_spread(daily, stock_name, ref_date, sig["expiry"],
+                                                     lots=lots, profit_target_pct=params["profit_target_pct"],
+                                                     stop_loss_mult=params["stop_loss_mult"],
+                                                     close_dte=params["close_dte"])
                         r["rsi"] = sig["rsi"]
                         r["ema"] = sig["ema"]
+                        r["expiry_date"] = sig["expiry"].isoformat()
 
             strat_trades[stock_name] = r
             strat_pnl += r.get("net_pnl", 0) or 0
 
-            with db.get_conn() as conn:
-                conn.execute("""INSERT OR REPLACE INTO stock_strategy_results
-                    (date, strategy, stock, direction, lots, entry_date, exit_date,
-                     exit_reason, spot_entry, sell_strike, buy_strike, net_credit,
-                     exit_spread_val, gross_pnl, charges, net_pnl, dte_at_entry,
-                     rsi, ema, skipped, skip_reason, expiry_date)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (ref_date.isoformat(), strat_name, stock_name,
-                     r.get("direction"), lots,
+            if not r.get("skipped"):
+                with db.get_conn() as conn:
+                    conn.execute("""INSERT OR REPLACE INTO stock_strategy_results
+                        (date, strategy, stock, direction, lots, entry_date, exit_date,
+                         exit_reason, spot_entry, sell_strike, buy_strike, net_credit,
+                         exit_spread_val, gross_pnl, charges, net_pnl, dte_at_entry,
+                         rsi, ema, skipped, skip_reason, expiry_date)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (ref_date.isoformat(), strat_name, stock_name,
+                         r.get("direction"), lots,
                      r.get("entry_date"), r.get("exit_date"), r.get("exit_reason"),
                      r.get("spot_entry"), r.get("sell_strike"), r.get("buy_strike"),
                      r.get("net_credit"), r.get("exit_spread_val"),
                      r.get("gross_pnl"), r.get("charges"), r.get("net_pnl", 0),
                      r.get("dte_at_entry"), r.get("rsi"), r.get("ema"),
-                     1 if r.get("skipped") else 0, r.get("skip_reason"),
-                     r.get("exit_date")))
+                     0, None,
+                     r.get("expiry_date")))
 
         results[strat_name] = {"day_pnl": round(strat_pnl, 2), "stocks": strat_trades}
     return results
@@ -536,15 +552,22 @@ def _load_day_from_db(ref_date):
 # ---------------------------------------------------------------------------
 # Backfill + query helpers
 # ---------------------------------------------------------------------------
-def backfill(from_date: date, to_date: date, lots: int = 1):
+def backfill(from_date: date, to_date: date, lots: int = 1, *, force: bool = False):
+    if force:
+        init_stock_strategy_db()
+        with db.get_conn() as conn:
+            conn.execute("DELETE FROM stock_strategy_results WHERE date>=? AND date<=?",
+                         (from_date.isoformat(), to_date.isoformat()))
+            print(f"  Cleared existing data for {from_date} to {to_date}")
     d = from_date
     while d <= to_date:
         if d.weekday() < 5:
             print(f"  Running {d}...", end=" ", flush=True)
             try:
-                res = run_day(d, lots)
-                pnls = {s: res[s]["day_pnl"] for s in res}
-                print(f"ema20_rsi50={pnls.get('ema20_rsi50', 0):+,.0f}")
+                res = run_day(d, lots, force=force)
+                pnl = sum(res[s]["day_pnl"] for s in res if res[s]["day_pnl"])
+                active = sum(1 for s in res for st, r in res[s].get("stocks", {}).items() if not r.get("skipped"))
+                print(f"trades={active} pnl={pnl:+,.0f}")
             except Exception as e:
                 print(f"ERROR: {e}")
         d += timedelta(days=1)
@@ -675,8 +698,8 @@ if __name__ == "__main__":
     if args.backfill_from and args.backfill_to:
         f = date.fromisoformat(args.backfill_from)
         t = date.fromisoformat(args.backfill_to)
-        print(f"Backfilling {f} to {t}...")
-        backfill(f, t, args.lots)
+        print(f"Backfilling {f} to {t}{'  (force)' if args.force else ''}...")
+        backfill(f, t, args.lots, force=args.force)
     else:
         d = date.fromisoformat(args.date) if args.date else mc.now_ist().date()
         print(f"Running stock strategies for {d}...")
