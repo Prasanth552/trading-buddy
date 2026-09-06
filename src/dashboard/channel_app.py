@@ -397,6 +397,53 @@ def api_strategy_backfill(from_date: str = None, to_date: str = None) -> JSONRes
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+# ---------------------------------------------------------------------------
+# Stock Strategy API endpoints
+# ---------------------------------------------------------------------------
+@app.get("/api/stock-strategy/summary")
+def api_stock_strategy_summary(days: int = 90) -> JSONResponse:
+    cache_key = f"stock_sum:{days}"
+    now = _time.monotonic()
+    cached = _api_cache.get(cache_key)
+    if cached and now - cached[0] < 30:
+        return JSONResponse(cached[1])
+    try:
+        from src.strategy.stock_runner import get_daily_summary
+        payload = get_daily_summary(days)
+        _api_cache[cache_key] = (now, payload)
+        return JSONResponse(payload)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+@app.get("/api/stock-strategy/today")
+def api_stock_strategy_today() -> JSONResponse:
+    try:
+        from src.strategy.stock_runner import get_today_detail
+        return JSONResponse(get_today_detail())
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+@app.get("/api/stock-strategy/stocks")
+def api_stock_strategy_stocks(days: int = 90) -> JSONResponse:
+    try:
+        from src.strategy.stock_runner import get_stock_summary
+        return JSONResponse(get_stock_summary(days))
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+@app.post("/api/stock-strategy/backfill")
+def api_stock_strategy_backfill(from_date: str = None, to_date: str = None) -> JSONResponse:
+    try:
+        from datetime import date as _date
+        from src.strategy.stock_runner import backfill
+        fd = _date.fromisoformat(from_date) if from_date else _date.today() - __import__('datetime').timedelta(days=30)
+        td = _date.fromisoformat(to_date) if to_date else _date.today()
+        backfill(fd, td)
+        return JSONResponse({"status": "ok", "from": fd.isoformat(), "to": td.isoformat()})
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
 _ML_EMPTY = lambda: JSONResponse({"stats": {
     "total": 0, "open": 0, "closed": 0, "wins": 0, "losses": 0,
     "win_rate": 0, "total_pnl": 0, "best_trade": 0, "worst_trade": 0,
@@ -793,6 +840,7 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
   <button class="tab" onclick="switchCh('oeh')" id="tab-oeh"><span class=ico>O</span> OEH</button>
   <button class="tab" onclick="switchCh('oel')" id="tab-oel"><span class=ico>L</span> OEL</button>
   <button class="tab" onclick="switchCh('strat')" id="tab-strat"><span class=ico>S</span> Strategy</button>
+  <button class="tab" onclick="switchCh('stocks')" id="tab-stocks"><span class=ico>$</span> Stocks</button>
 </div>
 
 <div class=wrap>
@@ -876,11 +924,51 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
 
 </div>
 
+<!-- Stocks Strategy View -->
+<div class=wrap id=stocksView style="display:none">
+
+<!-- Strategy comparison -->
+<div class=sec>
+  <div class=sec-h>Stock Credit Spreads <span class=badge id=stockDays>-</span></div>
+  <div class=fpills id=stockPills></div>
+</div>
+
+<!-- Strategy cards -->
+<div class=sec>
+  <div id=stockCards style="display:grid;grid-template-columns:1fr;gap:8px"></div>
+</div>
+
+<!-- Equity curves -->
+<div class=sec>
+  <div class=sec-h>Equity Curves</div>
+  <div class=cw style="height:160px"><canvas id=stockChart></canvas></div>
+</div>
+
+<!-- Per-stock breakdown -->
+<div class=sec>
+  <div class=sec-h>Stock Breakdown</div>
+  <div id=stockBreakdown style="max-height:350px;overflow-y:auto"></div>
+</div>
+
+<!-- Today's trades -->
+<div class=sec>
+  <div class=sec-h>Today's trades</div>
+  <div id=stockToday></div>
+</div>
+
+<!-- Daily log -->
+<div class=sec>
+  <div class=sec-h>Daily log</div>
+  <div id=stockLog style="max-height:400px;overflow-y:auto"></div>
+</div>
+
+</div>
+
 <!-- Bottom nav -->
 <div class=bnav>
   <button class=active id=nav-trades onclick="switchView('trades')"><span class=nav-ico>&#9776;</span>Trades</button>
   <button id=nav-scan onclick="switchView('scan')"><span class=nav-ico>&#9881;</span>Scanner</button>
-  <button id=nav-refresh onclick="_stratCacheTs=0;_scanCacheTs=0;load()"><span class=nav-ico>&#8635;</span>Refresh</button>
+  <button id=nav-refresh onclick="_stratCacheTs=0;_scanCacheTs=0;_stocksCacheTs=0;load()"><span class=nav-ico>&#8635;</span>Refresh</button>
 </div>
 
 <script>
@@ -888,7 +976,8 @@ const $=id=>document.getElementById(id);
 let AT=[],CF='all',LTP={},CH='ch1',VIEW='trades';
 let _loading=false,_abortCtrl=null,_scanCache=null,_scanCacheTs=0,_refreshTimer=null;
 let _stratCache=null,_stratCacheTs=0,_stratFocus='kitchen_sink';
-const REFRESH_MS=30000,SCAN_CACHE_MS=300000,STRAT_CACHE_MS=120000;
+let _stocksCache=null,_stocksCacheTs=0,_stocksFocus='ema20_rsi50';
+const REFRESH_MS=30000,SCAN_CACHE_MS=300000,STRAT_CACHE_MS=120000,STOCKS_CACHE_MS=120000;
 
 // WebSocket — live push updates
 let _ws=null,_wsRetry=1000;
@@ -900,7 +989,7 @@ function wsConnect(){
   _ws.onmessage=e=>{
     try{
       const d=JSON.parse(e.data);
-      if(d.type==='tick'&&d.channels&&d.channels[CH]&&CH!=='strat'){
+      if(d.type==='tick'&&d.channels&&d.channels[CH]&&CH!=='strat'&&CH!=='stocks'){
         const s=d.channels[CH];
         $('ck').textContent=d.now;
         // Update hero P&L instantly
@@ -1104,13 +1193,16 @@ function switchCh(ch){
   document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
   $('tab-'+ch).classList.add('active');
 
-  const isStrat=ch==='strat';
-  document.querySelector('.wrap:not(#stratView)').style.display=isStrat?'none':'';
-  document.querySelector('.hero').style.display=isStrat?'none':'';
-  document.querySelector('.chips').style.display=isStrat?'none':'';
+  const isStrat=ch==='strat',isStocks=ch==='stocks';
+  const isSpecial=isStrat||isStocks;
+  document.querySelector('.wrap:not(#stratView):not(#stocksView)').style.display=isSpecial?'none':'';
+  document.querySelector('.hero').style.display=isSpecial?'none':'';
+  document.querySelector('.chips').style.display=isSpecial?'none':'';
   $('stratView').style.display=isStrat?'':'none';
+  $('stocksView').style.display=isStocks?'':'none';
 
   if(isStrat){loadStrat();return}
+  if(isStocks){loadStocks();return}
   $('hv').textContent='...';$('hv').className='val';
   $('hs').textContent='loading...';
   $('rp').textContent='--';$('rp').className='ring-pct';
@@ -1284,8 +1376,150 @@ function renderStratLog(data,sname){
 
 function focusStrat(s){_stratFocus=s;if(_stratCache)renderStrat(_stratCache)}
 
+// ── Stocks tab rendering ──
+async function loadStocks(){
+  if(_stocksCache&&Date.now()-_stocksCacheTs<STOCKS_CACHE_MS){renderStocks(_stocksCache);return}
+  $('stockCards').innerHTML='<div class="skel" style="height:90px"></div><div class="skel" style="height:90px;margin-top:8px"></div><div class="skel" style="height:90px;margin-top:8px"></div><div class="skel" style="height:90px;margin-top:8px"></div>';
+  $('stockToday').innerHTML='<div class="skel" style="height:60px"></div>';
+  $('stockLog').innerHTML='<div class="skel" style="height:200px"></div>';
+  $('stockBreakdown').innerHTML='<div class="skel" style="height:150px"></div>';
+  try{
+    const [sumResp,todayResp,stocksResp]=await Promise.all([
+      fetch('/api/stock-strategy/summary?days=120'),
+      fetch('/api/stock-strategy/today'),
+      fetch('/api/stock-strategy/stocks?days=120')
+    ]);
+    const sum=await sumResp.json(),today=await todayResp.json(),stocks=await stocksResp.json();
+    _stocksCache={sum,today,stocks};_stocksCacheTs=Date.now();
+    renderStocks(_stocksCache);
+  }catch(e){$('stockCards').innerHTML='<div class=empty>'+e+'</div>'}
+}
+
+function renderStocks(data){
+  const {sum,today,stocks}=data;
+  if(!sum||sum.error||!Object.keys(sum).length){$('stockCards').innerHTML='<div class=empty>No stock strategy data yet. Run backfill first.</div>';return}
+  const order=['ema20_rsi50','ema20_rsi60','ema20_rsi50_tight','ema20_rsi50_wide'];
+  const strats=order.filter(s=>sum[s]);
+  if(!strats.length){$('stockCards').innerHTML='<div class=empty>No data</div>';return}
+
+  $('stockPills').innerHTML=strats.map(s=>'<div class="fpill '+(_stocksFocus===s?'a':'')+'" onclick="focusStock(\''+s+'\')">'+s.replace(/_/g,' ')+'</div>').join('');
+
+  let maxTotal=-Infinity;strats.forEach(s=>{if(sum[s].total>maxTotal)maxTotal=sum[s].total});
+  $('stockDays').textContent=(sum[strats[0]]||{}).traded+' entry days';
+  $('stockCards').innerHTML=strats.map(s=>{
+    const d=sum[s];
+    const wr=d.win_rate;
+    const grade=wr>=80?'A+':wr>=70?'A':wr>=60?'B':wr>=50?'C':'F';
+    const gc=grade.startsWith('A')?'a':grade==='B'?'b':'c';
+    const isBest=d.total===maxTotal;
+    return '<div class="str-card '+(isBest?'best':'')+'">'+
+      '<div class=str-name>'+s.replace(/_/g,' ')+' <span class="str-badge '+gc+'">'+grade+'</span>'+(isBest?' <span class="str-badge a">BEST</span>':'')+'</div>'+
+      '<div class="str-pnl '+(d.total>=0?'pos':'neg')+'">'+inr(d.total)+'</div>'+
+      '<div class=str-stats>'+
+        '<span class=str-stat>Days <b>'+d.traded+'</b></span>'+
+        '<span class=str-stat>WR <b>'+wr+'%</b> ('+d.green+'/'+d.traded+')</span>'+
+        '<span class=str-stat>Avg <b>'+inr(d.avg_day)+'</b>/day</span>'+
+        '<span class=str-stat>Best <b>'+inr(d.max_day)+'</b></span>'+
+        '<span class=str-stat>Worst <b class=neg>'+inr(d.min_day)+'</b></span>'+
+      '</div></div>'
+  }).join('');
+
+  renderStockChart(sum,strats);
+  renderStockBreakdown(stocks);
+  renderStockToday(today,strats);
+  renderStockLog(sum[_stocksFocus],_stocksFocus);
+}
+
+function renderStockChart(sum,strats){
+  const c=$('stockChart'),x=c.getContext('2d'),dp=devicePixelRatio||1,r=c.getBoundingClientRect();
+  c.width=r.width*dp;c.height=r.height*dp;x.scale(dp,dp);
+  const W=r.width,H=r.height,p={t:14,b:24,l:50,r:8};
+  const cs=getComputedStyle(document.documentElement);
+  const mt=cs.getPropertyValue('--mt').trim(),bd=cs.getPropertyValue('--bd').trim();
+  const colors=['#22c55e','#3b82f6','#f59e0b','#ec4899'];
+  let allV=[];strats.forEach(s=>{const cum=sum[s].cumulative;cum.forEach(c=>allV.push(c.cumulative))});
+  if(!allV.length)return;
+  const mn=Math.min(0,...allV),mx=Math.max(0,...allV),rg=mx-mn||1;
+  const cw=W-p.l-p.r,ch=H-p.t-p.b;
+  const Y=v=>p.t+ch-(((v-mn)/rg)*ch);
+
+  x.strokeStyle=bd;x.lineWidth=.5;
+  for(let i=0;i<=3;i++){const yy=p.t+(ch/3)*i;x.beginPath();x.moveTo(p.l,yy);x.lineTo(W-p.r,yy);x.stroke();
+    x.fillStyle=mt;x.font='9px system-ui';x.textAlign='right';x.fillText(Math.round(mx-((mx-mn)/3)*i).toLocaleString('en-IN'),p.l-4,yy+3)}
+  if(mn<0&&mx>0){x.strokeStyle=mt;x.lineWidth=.8;x.setLineDash([3,3]);x.beginPath();x.moveTo(p.l,Y(0));x.lineTo(W-p.r,Y(0));x.stroke();x.setLineDash([])}
+
+  strats.forEach((s,si)=>{
+    const cum=sum[s].cumulative;if(!cum.length)return;
+    const X=i=>p.l+(i/(cum.length-1))*cw;
+    x.beginPath();x.moveTo(X(0),Y(cum[0].cumulative));
+    for(let i=1;i<cum.length;i++)x.lineTo(X(i),Y(cum[i].cumulative));
+    x.strokeStyle=colors[si];x.lineWidth=s===_stocksFocus?2.5:1.2;x.lineJoin='round';x.stroke();
+    const lv=cum[cum.length-1].cumulative;
+    x.beginPath();x.arc(X(cum.length-1),Y(lv),3,0,Math.PI*2);x.fillStyle=colors[si];x.fill();
+  });
+  const lx=p.l;
+  strats.forEach((s,si)=>{
+    const xp=lx+si*110;
+    x.fillStyle=colors[si];x.fillRect(xp,H-10,8,8);
+    x.fillStyle=mt;x.font='8px system-ui';x.textAlign='left';
+    x.fillText(s.replace(/_/g,' ').slice(0,12),xp+12,H-3);
+  });
+}
+
+function renderStockBreakdown(stocks){
+  if(!stocks||!stocks.length){$('stockBreakdown').innerHTML='<div class=empty>No data</div>';return}
+  const focused=stocks.filter(s=>s.strategy===_stocksFocus);
+  focused.sort((a,b)=>b.total_pnl-a.total_pnl);
+  $('stockBreakdown').innerHTML=focused.map(s=>{
+    const tag=s.total_pnl>0?'pos':s.total_pnl<0?'neg':'';
+    return '<div class=str-today-card>'+
+      '<div class=str-idx-row><span class=str-idx-name>'+s.stock+'</span>'+
+      '<span class="str-idx-pnl '+tag+'">'+inr(s.total_pnl)+'</span></div>'+
+      '<div class=str-idx-meta>'+s.trades+' trades | WR: '+s.win_rate+'% ('+s.wins+'/'+s.trades+')</div>'+
+    '</div>'
+  }).join('');
+}
+
+function renderStockToday(today,strats){
+  if(!today||!Object.keys(today).length){
+    $('stockToday').innerHTML='<div class=empty>No stock trades today</div>';return}
+  let html='';
+  strats.forEach(s=>{
+    const sd=today[s];if(!sd)return;
+    const tag=sd.day_pnl>0?'pos':sd.day_pnl<0?'neg':'';
+    html+='<div class=str-today-card><div class=str-idx-row><span class=str-idx-name>'+s.replace(/_/g,' ')+'</span><span class="str-idx-pnl '+tag+'">'+inr(sd.day_pnl)+'</span></div>';
+    Object.entries(sd.stocks||{}).forEach(([stock,r])=>{
+      html+='<div class=str-idx-meta>'+stock+': '+inr(r.net_pnl)+' | '+r.direction+' | '+(r.exit_reason||'active')+'</div>';
+    });
+    html+='</div>';
+  });
+  $('stockToday').innerHTML=html||'<div class=empty>No stock trades today</div>';
+}
+
+function renderStockLog(data,sname){
+  if(!data||!data.dates||!data.dates.length){$('stockLog').innerHTML='<div class=empty>No history</div>';return}
+  const mx=Math.max(...data.pnls.map(Math.abs))||1;
+  $('stockLog').innerHTML=data.dates.map((d,i)=>{
+    const p=data.pnls[i];const isGreen=p>0;
+    const pct=Math.abs(p)/mx*100;
+    const col=isGreen?'var(--gn)':'var(--rd)';
+    const bg=isGreen?'var(--gd)':'var(--rdd)';
+    const wd=d.split('-');const short=wd[1]+'-'+wd[2];
+    const cum=data.cumulative[i];
+    const trades=cum?cum.trades:'?';
+    return '<div class=str-day-row>'+
+      '<span class=str-day-date>'+short+'</span>'+
+      '<div class=str-day-bar style="background:'+bg+'"><div class=str-day-fill style="width:'+pct+'%;background:'+col+'"></div></div>'+
+      '<span class="str-day-val '+(isGreen?'pos':'neg')+'">'+inr(p)+'</span>'+
+      '<span style="font-size:9px;color:var(--mt);width:30px;text-align:center">'+trades+'t</span></div>'
+  }).join('');
+}
+
+function focusStock(s){_stocksFocus=s;if(_stocksCache)renderStocks(_stocksCache)}
+
 async function load(){
   if(CH==='strat'){loadStrat();return}
+  if(CH==='stocks'){loadStocks();return}
   if(_abortCtrl)_abortCtrl.abort();
   _abortCtrl=new AbortController();
   const sig=_abortCtrl.signal;
