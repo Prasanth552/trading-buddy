@@ -36,11 +36,18 @@ INDEXES = {
         "iv_annual": 0.17,
         "vol_skip_range": 250,
     },
+    "SENSEX": {
+        "key": "BSE_INDEX|SENSEX",
+        "lot_size": 20,
+        "strike_step": 100,
+        "iv_annual": 0.13,
+        "vol_skip_range": 400,
+    },
 }
 
 LOTS = 1
 CACHE_DIR = os.path.join(config.DATA_DIR, "ml_cache")
-EXPIRY_WEEKDAY = {"NIFTY": 1, "BANKNIFTY": 2}
+EXPIRY_WEEKDAY = {"NIFTY": 1, "BANKNIFTY": 2, "SENSEX": 4}
 
 def calc_charges(entry_p, exit_p, qty):
     buy_t = entry_p * qty
@@ -326,7 +333,7 @@ def run_validation(from_date, to_date):
             day_pnl = 0.0
             day_traded = False
 
-            for idx_name in ["NIFTY", "BANKNIFTY"]:
+            for idx_name in ["NIFTY", "BANKNIFTY", "SENSEX"]:
                 candles = fetch_day_candles(uclient, idx_name, day)
                 if not candles or len(candles) < 20:
                     print(f"    {idx_name}: NO DATA")

@@ -49,6 +49,14 @@ INDEXES = {
         "orb_skip_range": 80,
         "iv_annual": 0.17,
     },
+    "SENSEX": {
+        "key": "BSE_INDEX|SENSEX",
+        "lot_size": 20,
+        "strike_step": 100,
+        "strangle_offset": 500,
+        "orb_skip_range": 130,
+        "iv_annual": 0.13,
+    },
 }
 
 LOTS = 1          # lots per trade
@@ -131,7 +139,7 @@ def candle_time_hm(candle):
 
 # ─── DTE estimation ───────────────────────────────────────────────────
 # NIFTY weekly expiry = Tuesday, BANKNIFTY = Wednesday
-EXPIRY_WEEKDAY = {"NIFTY": 1, "BANKNIFTY": 2}  # 0=Mon, 1=Tue, 2=Wed
+EXPIRY_WEEKDAY = {"NIFTY": 1, "BANKNIFTY": 2, "SENSEX": 4}  # 0=Mon..4=Fri
 
 def days_to_expiry(ref_date, idx_name):
     exp_wd = EXPIRY_WEEKDAY.get(idx_name, 3)
@@ -699,7 +707,7 @@ def run_all(year, start_month, end_month, strategy_filter=None):
         if i % 10 == 0:
             print(f"  Processing {day} ({i+1}/{total})...", flush=True)
 
-        for idx_name in ["NIFTY", "BANKNIFTY"]:
+        for idx_name in ["NIFTY", "BANKNIFTY", "SENSEX"]:
             candles = fetch_day_candles(uclient, idx_name, day)
             if not candles or len(candles) < 20:
                 skipped += 1
