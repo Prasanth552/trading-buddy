@@ -672,6 +672,32 @@ def run_walkforward(uclient, symbols, year, daily_budget=3, train_months=6):
             if not day_signals:
                 continue
 
+            # ── MARKET REGIME FILTER ──────────────────────────────
+            # Only trade PE on days where market shows early weakness.
+            # Read NIFTY candles for this day and check first 30 min.
+            nifty_candles = fetch_candles(None, "NIFTY", test_date)
+            skip_day = False
+            regime_tag = ""
+            if nifty_candles and len(nifty_candles) > 6:
+                open_price = nifty_candles[0]["open"]
+                # Check at ~9:45 (candle index 6 = 30 min after open)
+                check_idx = min(6, len(nifty_candles) - 1)
+                early_close = nifty_candles[check_idx]["close"]
+                early_return = ((early_close - open_price) / open_price) * 100
+                if early_return > 0.15:
+                    skip_day = True
+                    regime_tag = f"SKIP(mkt+{early_return:.1f}%)"
+                else:
+                    regime_tag = f"PE-OK(mkt{early_return:+.1f}%)"
+
+            if skip_day:
+                all_daily_pnl.append(0)
+                all_daily_details.append({
+                    "date": str(test_date), "trades": 0, "wins": 0,
+                    "pnl": 0, "details": [f"    {regime_tag} — skipped"],
+                })
+                continue
+
             # Batch scoring — one predict_proba call for ALL signals
             feat_matrix = np.array(
                 [[row.get(k, 0) for k in EXTENDED_FEATURES] for row in day_signals],
@@ -682,7 +708,8 @@ def run_walkforward(uclient, symbols, year, daily_budget=3, train_months=6):
             for i, row in enumerate(day_signals):
                 row["confidence"] = float(probs[i])
 
-            # Rank by confidence, pick top N with ONE per symbol + min confidence
+            # Also filter: only take stocks that are individually bearish
+            # (stock close < stock open at signal time = bearish candle context)
             min_conf = 0.60
             day_signals.sort(key=lambda x: x["confidence"], reverse=True)
             selected = []
@@ -700,7 +727,7 @@ def run_walkforward(uclient, symbols, year, daily_budget=3, train_months=6):
             day_pnl = 0
             day_trades = 0
             day_wins = 0
-            trade_details = []
+            trade_details = [f"    {regime_tag}"] if regime_tag else []
 
             for sig in selected:
                 day_trades += 1
