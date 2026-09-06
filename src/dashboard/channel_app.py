@@ -13,6 +13,7 @@ from typing import Any
 
 import asyncio
 import json
+import time as _time
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -26,6 +27,9 @@ load_dotenv()
 app = FastAPI(title="Channel Trades", docs_url=None, redoc_url=None)
 
 _db_ready = False
+
+_api_cache: dict[str, tuple[float, dict]] = {}
+_API_CACHE_TTL = 10  # seconds
 
 # ---------------------------------------------------------------------------
 # WebSocket hub — push updates to all connected clients
@@ -201,6 +205,11 @@ def api_stats(channel: str = "ch1") -> JSONResponse:
 @app.get("/api/all")
 def api_all(channel: str = "ch1") -> JSONResponse:
     """Combined stats + trades in one call to reduce round trips."""
+    cache_key = f"all:{channel}"
+    now = _time.monotonic()
+    cached = _api_cache.get(cache_key)
+    if cached and now - cached[0] < _API_CACHE_TTL:
+        return JSONResponse(cached[1])
     _ensure_db()
     cf = _ch_filter(channel)
     today_iso = mc.now_ist().date().isoformat()
@@ -240,7 +249,7 @@ def api_all(channel: str = "ch1") -> JSONResponse:
         running += r["pnl"]
         cumulative.append({"ts": r["ts"], "pnl": r["pnl"], "cumulative": round(running, 2)})
 
-    return JSONResponse({
+    payload = {
         "stats": {
             "total": s["total"], "open": s["open_count"] or 0, "closed": closed,
             "wins": wins, "losses": s["losses"] or 0, "win_rate": round(win_rate, 1),
@@ -253,7 +262,9 @@ def api_all(channel: str = "ch1") -> JSONResponse:
             "now": mc.now_ist().strftime("%Y-%m-%d %H:%M:%S IST"),
         },
         "trades": trades,
-    })
+    }
+    _api_cache[cache_key] = (now, payload)
+    return JSONResponse(payload)
 
 
 @app.get("/api/ltp")
@@ -322,6 +333,68 @@ def api_ml() -> JSONResponse:
             })
     except Exception:  # noqa: BLE001
         return JSONResponse({"enabled": False})
+
+
+@app.get("/api/strategy/summary")
+def api_strategy_summary(days: int = 30) -> JSONResponse:
+    cache_key = f"strat_sum:{days}"
+    now = _time.monotonic()
+    cached = _api_cache.get(cache_key)
+    if cached and now - cached[0] < 30:
+        return JSONResponse(cached[1])
+    try:
+        from src.strategy.live_runner import get_daily_summary
+        payload = get_daily_summary(days)
+        _api_cache[cache_key] = (now, payload)
+        return JSONResponse(payload)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@app.get("/api/strategy/today")
+def api_strategy_today() -> JSONResponse:
+    try:
+        from src.strategy.live_runner import get_today_detail
+        return JSONResponse(get_today_detail())
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@app.get("/api/strategy/history")
+def api_strategy_history(days: int = 30) -> JSONResponse:
+    try:
+        from src.strategy.live_runner import get_history
+        return JSONResponse(get_history(days))
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@app.post("/api/strategy/run")
+def api_strategy_run(run_date: str = None) -> JSONResponse:
+    """Trigger strategy run for a specific date (or today)."""
+    try:
+        from datetime import date as _date
+        from src.strategy.live_runner import run_day
+        d = _date.fromisoformat(run_date) if run_date else mc.now_ist().date()
+        res = run_day(d, lots=1, force=True)
+        summary = {s: {"day_pnl": data["day_pnl"]} for s, data in res.items()}
+        return JSONResponse({"date": d.isoformat(), "results": summary})
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@app.post("/api/strategy/backfill")
+def api_strategy_backfill(from_date: str = None, to_date: str = None) -> JSONResponse:
+    """Backfill strategy results for a date range."""
+    try:
+        from datetime import date as _date
+        from src.strategy.live_runner import backfill
+        fd = _date.fromisoformat(from_date) if from_date else _date.today() - __import__('datetime').timedelta(days=30)
+        td = _date.fromisoformat(to_date) if to_date else _date.today()
+        backfill(fd, td)
+        return JSONResponse({"status": "ok", "from": fd.isoformat(), "to": td.isoformat()})
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
 
 
 _ML_EMPTY = lambda: JSONResponse({"stats": {
@@ -660,7 +733,35 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
 .empty{padding:28px;text-align:center;color:var(--mt);font-size:12px;
   background:var(--sf);border-radius:12px;border:1px solid var(--bd)}
 
+/* Strategy cards */
+.str-card{background:var(--sf);border:1px solid var(--bd);border-radius:12px;padding:12px}
+.str-card.best{border-color:var(--gn);border-width:2px}
+.str-name{font-size:12px;font-weight:800;font-family:var(--mn);margin-bottom:4px;display:flex;align-items:center;gap:6px}
+.str-pnl{font-size:22px;font-weight:800;font-family:var(--mn);font-variant-numeric:tabular-nums}
+.str-stats{display:flex;gap:8px;margin-top:6px;flex-wrap:wrap}
+.str-stat{font-size:10px;color:var(--mt);background:var(--el);border-radius:6px;padding:2px 8px}
+.str-stat b{color:var(--tx);font-weight:600}
+.str-badge{font-size:9px;padding:2px 6px;border-radius:4px;font-weight:700}
+.str-badge.a{background:var(--gd);color:var(--gn)}
+.str-badge.b{background:var(--amd);color:var(--am)}
+.str-badge.c{background:var(--rdd);color:var(--rd)}
+.str-today-card{background:var(--sf);border:1px solid var(--bd);border-radius:10px;padding:10px 12px;margin-bottom:6px}
+.str-idx-row{display:flex;justify-content:space-between;align-items:center}
+.str-idx-name{font-size:12px;font-weight:700;font-family:var(--mn)}
+.str-idx-pnl{font-size:14px;font-weight:800;font-family:var(--mn)}
+.str-idx-meta{font-size:10px;color:var(--mt);margin-top:2px}
+.str-day-row{display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--bd)}
+.str-day-row:last-child{border-bottom:none}
+.str-day-date{font-size:11px;font-family:var(--mn);width:70px;flex-shrink:0;color:var(--mt)}
+.str-day-bar{flex:1;height:18px;border-radius:4px;position:relative;overflow:hidden}
+.str-day-fill{height:100%;border-radius:4px;min-width:2px}
+.str-day-val{font-size:11px;font-family:var(--mn);font-weight:700;width:65px;text-align:right;flex-shrink:0}
+
 .pos{color:var(--gn)}.neg{color:var(--rd)}
+
+/* Skeleton loading */
+@keyframes shimmer{0%{background-position:-200% 0}100%{background-position:200% 0}}
+.skel{border-radius:6px;background:linear-gradient(90deg,var(--el) 25%,var(--sf) 50%,var(--el) 75%);background-size:200% 100%;animation:shimmer 1.5s infinite}
 
 /* Bottom nav */
 .bnav{position:fixed;bottom:0;left:0;right:0;background:var(--sf);border-top:1px solid var(--bd);
@@ -691,7 +792,7 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
   <button class="tab" onclick="switchCh('ch2f')" id="tab-ch2f"><span class=ico>F</span> CH2 Filtered</button>
   <button class="tab" onclick="switchCh('oeh')" id="tab-oeh"><span class=ico>O</span> OEH</button>
   <button class="tab" onclick="switchCh('oel')" id="tab-oel"><span class=ico>L</span> OEL</button>
-  <button class="tab" onclick="switchCh('ml')" id="tab-ml"><span class=ico>🤖</span> ML</button>
+  <button class="tab" onclick="switchCh('strat')" id="tab-strat"><span class=ico>S</span> Strategy</button>
 </div>
 
 <div class=wrap>
@@ -742,18 +843,52 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
 
 </div>
 
+<!-- Strategy view (hidden by default) -->
+<div class=wrap id=stratView style="display:none">
+
+<div class=sec>
+  <div class=sec-h>Strategy comparison <span class=badge id=stratDays>-</span></div>
+  <div class=fpills id=stratPills></div>
+</div>
+
+<!-- Strategy summary cards -->
+<div style="padding:0 16px 12px">
+  <div id=stratCards style="display:grid;grid-template-columns:1fr;gap:8px"></div>
+</div>
+
+<!-- Strategy equity curves -->
+<div class=sec>
+  <div class=sec-h>Equity curves</div>
+  <div class=cw style="height:160px"><canvas id=stratChart></canvas></div>
+</div>
+
+<!-- Today's trades detail -->
+<div class=sec>
+  <div class=sec-h>Today's breakdown</div>
+  <div id=stratToday></div>
+</div>
+
+<!-- Daily history table -->
+<div class=sec>
+  <div class=sec-h>Daily log</div>
+  <div id=stratLog style="max-height:400px;overflow-y:auto"></div>
+</div>
+
+</div>
+
 <!-- Bottom nav -->
 <div class=bnav>
   <button class=active id=nav-trades onclick="switchView('trades')"><span class=nav-ico>&#9776;</span>Trades</button>
   <button id=nav-scan onclick="switchView('scan')"><span class=nav-ico>&#9881;</span>Scanner</button>
-  <button id=nav-refresh onclick="load()"><span class=nav-ico>&#8635;</span>Refresh</button>
+  <button id=nav-refresh onclick="_stratCacheTs=0;_scanCacheTs=0;load()"><span class=nav-ico>&#8635;</span>Refresh</button>
 </div>
 
 <script>
 const $=id=>document.getElementById(id);
 let AT=[],CF='all',LTP={},CH='ch1',VIEW='trades';
 let _loading=false,_abortCtrl=null,_scanCache=null,_scanCacheTs=0,_refreshTimer=null;
-const REFRESH_MS=30000,SCAN_CACHE_MS=300000;
+let _stratCache=null,_stratCacheTs=0,_stratFocus='kitchen_sink';
+const REFRESH_MS=30000,SCAN_CACHE_MS=300000,STRAT_CACHE_MS=120000;
 
 // WebSocket — live push updates
 let _ws=null,_wsRetry=1000;
@@ -765,7 +900,7 @@ function wsConnect(){
   _ws.onmessage=e=>{
     try{
       const d=JSON.parse(e.data);
-      if(d.type==='tick'&&d.channels&&d.channels[CH]&&CH!=='ml'){
+      if(d.type==='tick'&&d.channels&&d.channels[CH]&&CH!=='strat'){
         const s=d.channels[CH];
         $('ck').textContent=d.now;
         // Update hero P&L instantly
@@ -968,6 +1103,14 @@ function switchCh(ch){
   CH=ch;CF='all';LTP={};AT=[];
   document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
   $('tab-'+ch).classList.add('active');
+
+  const isStrat=ch==='strat';
+  document.querySelector('.wrap:not(#stratView)').style.display=isStrat?'none':'';
+  document.querySelector('.hero').style.display=isStrat?'none':'';
+  document.querySelector('.chips').style.display=isStrat?'none':'';
+  $('stratView').style.display=isStrat?'':'none';
+
+  if(isStrat){loadStrat();return}
   $('hv').textContent='...';$('hv').className='val';
   $('hs').textContent='loading...';
   $('rp').textContent='--';$('rp').className='ring-pct';
@@ -1002,20 +1145,159 @@ function renderScan(data){
   }).join('');
 }
 
+// ── Strategy tab rendering ──
+async function loadStrat(){
+  if(_stratCache&&Date.now()-_stratCacheTs<STRAT_CACHE_MS){renderStrat(_stratCache);return}
+  $('stratCards').innerHTML='<div class="skel" style="height:90px"></div><div class="skel" style="height:90px;margin-top:8px"></div><div class="skel" style="height:90px;margin-top:8px"></div>';
+  $('stratToday').innerHTML='<div class="skel" style="height:60px"></div>';
+  $('stratLog').innerHTML='<div class="skel" style="height:200px"></div>';
+  try{
+    const [sumResp,todayResp]=await Promise.all([
+      fetch('/api/strategy/summary?days=45'),
+      fetch('/api/strategy/today')
+    ]);
+    const sum=await sumResp.json(),today=await todayResp.json();
+    _stratCache={sum,today};_stratCacheTs=Date.now();
+    renderStrat(_stratCache);
+  }catch(e){$('stratCards').innerHTML='<div class=empty>'+e+'</div>'}
+}
+
+function renderStrat(data){
+  const {sum,today}=data;
+  if(!sum||sum.error){$('stratCards').innerHTML='<div class=empty>No strategy data yet. Run backfill first.</div>';return}
+  const order=['kitchen_sink','vf_920_sl30','entry_945_sl30'];
+  const strats=order.filter(s=>sum[s]);
+  if(!strats.length){$('stratCards').innerHTML='<div class=empty>No strategy data</div>';return}
+
+  // Strategy pills
+  $('stratPills').innerHTML=strats.map(s=>'<div class="fpill '+(_stratFocus===s?'a':'')+'" onclick="focusStrat(\''+s+'\')">'+s.replace(/_/g,' ')+'</div>').join('');
+
+  // Summary cards
+  let maxTotal=-Infinity;strats.forEach(s=>{if(sum[s].total>maxTotal)maxTotal=sum[s].total});
+  $('stratDays').textContent=sum[strats[0]].traded+' days';
+  $('stratCards').innerHTML=strats.map(s=>{
+    const d=sum[s];
+    const wr=d.win_rate;
+    const grade=wr>=90?'A+':wr>=80?'A':wr>=70?'B':wr>=60?'C':'F';
+    const gc=grade.startsWith('A')?'a':grade==='B'?'b':'c';
+    const isBest=d.total===maxTotal;
+    return '<div class="str-card '+(isBest?'best':'')+'">'+
+      '<div class=str-name>'+s.replace(/_/g,' ')+' <span class="str-badge '+gc+'">'+grade+'</span>'+(isBest?' <span class="str-badge a">BEST</span>':'')+'</div>'+
+      '<div class="str-pnl '+(d.total>=0?'pos':'neg')+'">'+inr(d.total)+'</div>'+
+      '<div class=str-stats>'+
+        '<span class=str-stat>Win <b>'+d.green+'/'+d.traded+'</b> ('+wr+'%)</span>'+
+        '<span class=str-stat>Avg <b>'+inr(d.avg_day)+'</b>/day</span>'+
+        '<span class=str-stat>Best <b>'+inr(d.max_day)+'</b></span>'+
+        '<span class=str-stat>Worst <b class=neg>'+inr(d.min_day)+'</b></span>'+
+        '<span class=str-stat>3 lots <b>'+inr(d.avg_day*3)+'</b>/day</span>'+
+      '</div></div>'
+  }).join('');
+
+  // Equity curves (all 3 on one chart)
+  renderStratChart(sum,strats);
+
+  // Today's detail
+  renderStratToday(today,strats);
+
+  // Daily log for focused strategy
+  renderStratLog(sum[_stratFocus],_stratFocus);
+}
+
+function renderStratChart(sum,strats){
+  const c=$('stratChart'),x=c.getContext('2d'),dp=devicePixelRatio||1,r=c.getBoundingClientRect();
+  c.width=r.width*dp;c.height=r.height*dp;x.scale(dp,dp);
+  const W=r.width,H=r.height,p={t:14,b:24,l:44,r:8};
+  const cs=getComputedStyle(document.documentElement);
+  const mt=cs.getPropertyValue('--mt').trim(),bd=cs.getPropertyValue('--bd').trim();
+  const colors=['#22c55e','#3b82f6','#f59e0b'];
+
+  let allV=[];strats.forEach(s=>{const cum=sum[s].cumulative;cum.forEach(c=>allV.push(c.cumulative))});
+  if(!allV.length)return;
+  const mn=Math.min(0,...allV),mx=Math.max(0,...allV),rg=mx-mn||1;
+  const cw=W-p.l-p.r,ch=H-p.t-p.b;
+  const Y=v=>p.t+ch-(((v-mn)/rg)*ch);
+
+  // Grid
+  x.strokeStyle=bd;x.lineWidth=.5;
+  for(let i=0;i<=3;i++){const yy=p.t+(ch/3)*i;x.beginPath();x.moveTo(p.l,yy);x.lineTo(W-p.r,yy);x.stroke();
+    x.fillStyle=mt;x.font='9px system-ui';x.textAlign='right';x.fillText(Math.round(mx-((mx-mn)/3)*i).toLocaleString('en-IN'),p.l-4,yy+3)}
+
+  // Zero line
+  if(mn<0&&mx>0){x.strokeStyle=mt;x.lineWidth=.8;x.setLineDash([3,3]);x.beginPath();x.moveTo(p.l,Y(0));x.lineTo(W-p.r,Y(0));x.stroke();x.setLineDash([])}
+
+  // Lines
+  strats.forEach((s,si)=>{
+    const cum=sum[s].cumulative;if(!cum.length)return;
+    const X=i=>p.l+(i/(cum.length-1))*cw;
+    x.beginPath();x.moveTo(X(0),Y(cum[0].cumulative));
+    for(let i=1;i<cum.length;i++)x.lineTo(X(i),Y(cum[i].cumulative));
+    x.strokeStyle=colors[si];x.lineWidth=s===_stratFocus?2.5:1.2;x.lineJoin='round';x.stroke();
+    // End dot
+    const lv=cum[cum.length-1].cumulative;
+    x.beginPath();x.arc(X(cum.length-1),Y(lv),3,0,Math.PI*2);x.fillStyle=colors[si];x.fill();
+  });
+
+  // Legend at bottom
+  const lx=p.l;
+  strats.forEach((s,si)=>{
+    const xp=lx+si*120;
+    x.fillStyle=colors[si];x.fillRect(xp,H-10,8,8);
+    x.fillStyle=mt;x.font='9px system-ui';x.textAlign='left';
+    x.fillText(s.replace(/_/g,' ').slice(0,14),xp+12,H-3);
+  });
+}
+
+function renderStratToday(today,strats){
+  if(!today||!Object.keys(today).length){
+    $('stratToday').innerHTML='<div class=empty>No trades today yet</div>';return}
+  const idxOrder=['NIFTY','BANKNIFTY','SENSEX'];
+  let html='';
+  strats.forEach(s=>{
+    const sd=today[s];if(!sd)return;
+    const tag=sd.day_pnl>0?'pos':sd.day_pnl<0?'neg':'';
+    html+='<div class=str-today-card><div class=str-idx-row><span class=str-idx-name>'+s.replace(/_/g,' ')+'</span><span class="str-idx-pnl '+tag+'">'+inr(sd.day_pnl)+'</span></div>';
+    idxOrder.forEach(idx=>{
+      const r=sd.indexes[idx];if(!r)return;
+      if(r.skipped){html+='<div class=str-idx-meta>'+idx+': skipped ('+r.skip_reason+')</div>';return}
+      html+='<div class=str-idx-meta>'+idx+': '+inr(r.net_pnl)+' | DTE='+r.dte+' | '+(r.exit_reason||'time')+'</div>';
+    });
+    html+='</div>';
+  });
+  $('stratToday').innerHTML=html||'<div class=empty>No trades today</div>';
+}
+
+function renderStratLog(data,sname){
+  if(!data||!data.dates||!data.dates.length){$('stratLog').innerHTML='<div class=empty>No history</div>';return}
+  const mx=Math.max(...data.pnls.map(Math.abs))||1;
+  $('stratLog').innerHTML=data.dates.map((d,i)=>{
+    const p=data.pnls[i];const isGreen=p>0;
+    const pct=Math.abs(p)/mx*100;
+    const col=isGreen?'var(--gn)':'var(--rd)';
+    const bg=isGreen?'var(--gd)':'var(--rdd)';
+    const wd=d.split('-');const short=wd[1]+'-'+wd[2];
+    return '<div class=str-day-row>'+
+      '<span class=str-day-date>'+short+'</span>'+
+      '<div class=str-day-bar style="background:'+bg+'"><div class=str-day-fill style="width:'+pct+'%;background:'+col+'"></div></div>'+
+      '<span class="str-day-val '+(isGreen?'pos':'neg')+'">'+inr(p)+'</span></div>'
+  }).join('');
+}
+
+function focusStrat(s){_stratFocus=s;if(_stratCache)renderStrat(_stratCache)}
+
 async function load(){
+  if(CH==='strat'){loadStrat();return}
   if(_abortCtrl)_abortCtrl.abort();
   _abortCtrl=new AbortController();
   const sig=_abortCtrl.signal;
   const ch=CH;
   try{
-    const isML=ch==='ml';
-    const url=isML?'/api/ml/all':('/api/all?channel='+ch);
+    const url='/api/all?channel='+ch;
     const resp=await fetch(url,{signal:sig});
     if(ch!==CH)return;
     const d=await resp.json();
     if(!d||!d.stats){
       $('hv').textContent='No data';$('hv').className='val';
-      $('hs').textContent=isML?'ML scanner has no trades yet':'No data for this channel';
+      $('hs').textContent='No data for this channel';
       $('chips').innerHTML='';$('ow').innerHTML='';$('hw').innerHTML='';
       rC([]);return;
     }
@@ -1023,9 +1305,7 @@ async function load(){
     AT=t;$('ck').textContent=s.now;$('sd').className='live-dot';
     rHero(s);rRing(s);rChips(s);rC(s.pnl_curve);rH(t);
     rO(t);
-    if(!isML){
-      fetch('/api/ltp?channel='+ch,{signal:sig}).then(r=>r.json()).then(ltp=>{if(!ltp.error&&ch===CH){LTP=ltp;rO(t)}}).catch(()=>{});
-    }
+    fetch('/api/ltp?channel='+ch,{signal:sig}).then(r=>r.json()).then(ltp=>{if(!ltp.error&&ch===CH){LTP=ltp;rO(t)}}).catch(()=>{});
   }catch(e){if(e.name!=='AbortError'){$('sd').className='live-dot off';
     $('hv').textContent='Error';$('hs').textContent=String(e)}}
 }
