@@ -444,6 +444,62 @@ def api_stock_strategy_backfill(from_date: str = None, to_date: str = None) -> J
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+@app.get("/api/strategy/trades")
+def api_strategy_trades(strategy: str = None, date: str = None, days: int = 45) -> JSONResponse:
+    """Full trade detail rows for strategy tab drill-down."""
+    try:
+        from src.strategy.live_runner import init_strategy_db
+        init_strategy_db()
+        with db.get_conn() as conn:
+            if date:
+                rows = conn.execute(
+                    "SELECT * FROM strategy_results WHERE date=? ORDER BY strategy, idx",
+                    (date,)).fetchall()
+            elif strategy:
+                from datetime import date as _d, timedelta as _td
+                cutoff = (_d.today() - _td(days=days)).isoformat()
+                rows = conn.execute(
+                    "SELECT * FROM strategy_results WHERE strategy=? AND date>=? ORDER BY date DESC, idx",
+                    (strategy, cutoff)).fetchall()
+            else:
+                from datetime import date as _d, timedelta as _td
+                cutoff = (_d.today() - _td(days=days)).isoformat()
+                rows = conn.execute(
+                    "SELECT * FROM strategy_results WHERE date>=? ORDER BY date DESC, strategy, idx",
+                    (cutoff,)).fetchall()
+        return JSONResponse([dict(r) for r in rows])
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@app.get("/api/stock-strategy/trades")
+def api_stock_strategy_trades(strategy: str = None, date: str = None, days: int = 120) -> JSONResponse:
+    """Full trade detail rows for stocks tab drill-down."""
+    try:
+        from src.strategy.stock_runner import init_stock_strategy_db
+        init_stock_strategy_db()
+        with db.get_conn() as conn:
+            if date:
+                rows = conn.execute(
+                    "SELECT * FROM stock_strategy_results WHERE date=? AND skipped=0 ORDER BY strategy, stock",
+                    (date,)).fetchall()
+            elif strategy:
+                from datetime import date as _d, timedelta as _td
+                cutoff = (_d.today() - _td(days=days)).isoformat()
+                rows = conn.execute(
+                    "SELECT * FROM stock_strategy_results WHERE strategy=? AND date>=? AND skipped=0 ORDER BY date DESC, stock",
+                    (strategy, cutoff)).fetchall()
+            else:
+                from datetime import date as _d, timedelta as _td
+                cutoff = (_d.today() - _td(days=days)).isoformat()
+                rows = conn.execute(
+                    "SELECT * FROM stock_strategy_results WHERE date>=? AND skipped=0 ORDER BY date DESC, strategy, stock",
+                    (cutoff,)).fetchall()
+        return JSONResponse([dict(r) for r in rows])
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
 _ML_EMPTY = lambda: JSONResponse({"stats": {
     "total": 0, "open": 0, "closed": 0, "wins": 0, "losses": 0,
     "win_rate": 0, "total_pnl": 0, "best_trade": 0, "worst_trade": 0,
@@ -797,12 +853,54 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
 .str-idx-name{font-size:12px;font-weight:700;font-family:var(--mn)}
 .str-idx-pnl{font-size:14px;font-weight:800;font-family:var(--mn)}
 .str-idx-meta{font-size:10px;color:var(--mt);margin-top:2px}
-.str-day-row{display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--bd)}
+
+/* Trade detail cards */
+.trd-group{margin-bottom:8px}
+.trd-hdr{display:flex;justify-content:space-between;align-items:center;padding:10px 12px;
+  background:var(--sf);border:1px solid var(--bd);border-radius:10px;cursor:pointer;
+  -webkit-tap-highlight-color:transparent;transition:border-radius .15s}
+.trd-hdr.open{border-radius:10px 10px 0 0;border-bottom-color:transparent}
+.trd-hdr:active{background:var(--el)}
+.trd-lbl{font-size:12px;font-weight:700;font-family:var(--mn);display:flex;align-items:center;gap:6px}
+.trd-arrow{font-size:10px;transition:transform .2s;color:var(--mt)}
+.trd-arrow.open{transform:rotate(90deg)}
+.trd-rt{display:flex;align-items:center;gap:8px}
+.trd-count{font-size:9px;color:var(--mt);background:var(--el);border-radius:4px;padding:1px 6px}
+.trd-body{display:none;border:1px solid var(--bd);border-top:none;border-radius:0 0 10px 10px;
+  background:var(--bg);overflow:hidden}
+.trd-body.open{display:block}
+
+.trd-card{padding:10px 12px;border-bottom:1px solid var(--bd)}
+.trd-card:last-child{border-bottom:none}
+.trd-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
+.trd-sym{font-size:12px;font-weight:700;font-family:var(--mn)}
+.trd-tag{font-size:9px;padding:2px 7px;border-radius:4px;font-weight:700;text-transform:uppercase}
+.trd-tag.bull{background:var(--gd);color:var(--gn)}
+.trd-tag.bear{background:var(--rdd);color:var(--rd)}
+.trd-tag.sl{background:var(--rdd);color:var(--rd)}
+.trd-tag.tp{background:var(--gd);color:var(--gn)}
+.trd-tag.time{background:var(--el);color:var(--mt)}
+.trd-tag.dte{background:var(--amd);color:var(--am)}
+.trd-tag.skip{background:var(--el);color:var(--mt)}
+.trd-grid{display:grid;grid-template-columns:1fr 1fr;gap:4px 12px}
+.trd-row{display:flex;justify-content:space-between;align-items:center}
+.trd-k{font-size:10px;color:var(--mt)}
+.trd-v{font-size:10px;font-weight:600;font-family:var(--mn);font-variant-numeric:tabular-nums}
+.trd-sep{border-top:1px dashed var(--bd);margin:6px 0}
+.trd-foot{display:flex;justify-content:space-between;align-items:center;margin-top:6px}
+.trd-net{font-size:16px;font-weight:800;font-family:var(--mn)}
+.trd-charges{font-size:9px;color:var(--mt)}
+
+/* Day log rows */
+.str-day-row{display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--bd);cursor:pointer;-webkit-tap-highlight-color:transparent}
 .str-day-row:last-child{border-bottom:none}
+.str-day-row:active{background:var(--el)}
 .str-day-date{font-size:11px;font-family:var(--mn);width:70px;flex-shrink:0;color:var(--mt)}
 .str-day-bar{flex:1;height:18px;border-radius:4px;position:relative;overflow:hidden}
 .str-day-fill{height:100%;border-radius:4px;min-width:2px}
 .str-day-val{font-size:11px;font-family:var(--mn);font-weight:700;width:65px;text-align:right;flex-shrink:0}
+.str-day-detail{display:none;padding:0 12px 8px;background:var(--bg)}
+.str-day-detail.open{display:block}
 
 .pos{color:var(--gn)}.neg{color:var(--rd)}
 
@@ -910,16 +1008,16 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
   <div class=cw style="height:160px"><canvas id=stratChart></canvas></div>
 </div>
 
-<!-- Today's trades detail -->
+<!-- Today's trades detail (interactive) -->
 <div class=sec>
-  <div class=sec-h>Today's breakdown</div>
+  <div class=sec-h>Today's trades</div>
   <div id=stratToday></div>
 </div>
 
-<!-- Daily history table -->
+<!-- Trade history (expandable per-day) -->
 <div class=sec>
-  <div class=sec-h>Daily log</div>
-  <div id=stratLog style="max-height:400px;overflow-y:auto"></div>
+  <div class=sec-h>Daily log <span style="font-size:10px;color:var(--mt);font-weight:400">(tap to expand)</span></div>
+  <div id=stratLog style="max-height:500px;overflow-y:auto;padding:0 2px"></div>
 </div>
 
 </div>
@@ -950,16 +1048,16 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
   <div id=stockBreakdown style="max-height:350px;overflow-y:auto"></div>
 </div>
 
-<!-- Today's trades -->
+<!-- Today's trades (interactive) -->
 <div class=sec>
   <div class=sec-h>Today's trades</div>
   <div id=stockToday></div>
 </div>
 
-<!-- Daily log -->
+<!-- Trade history (expandable per-day) -->
 <div class=sec>
-  <div class=sec-h>Daily log</div>
-  <div id=stockLog style="max-height:400px;overflow-y:auto"></div>
+  <div class=sec-h>Daily log <span style="font-size:10px;color:var(--mt);font-weight:400">(tap to expand)</span></div>
+  <div id=stockLog style="max-height:500px;overflow-y:auto;padding:0 2px"></div>
 </div>
 
 </div>
@@ -1339,6 +1437,48 @@ function renderStratChart(sum,strats){
   });
 }
 
+function _exitTag(reason){
+  if(!reason)return '<span class="trd-tag time">TIME</span>';
+  const r=reason.toLowerCase();
+  if(r.includes('sl')||r.includes('stop'))return '<span class="trd-tag sl">SL</span>';
+  if(r.includes('trail'))return '<span class="trd-tag tp">TRAIL</span>';
+  if(r.includes('profit')||r.includes('tp'))return '<span class="trd-tag tp">TP</span>';
+  if(r.includes('dte'))return '<span class="trd-tag dte">DTE</span>';
+  if(r.includes('skip'))return '<span class="trd-tag skip">SKIP</span>';
+  return '<span class="trd-tag time">'+reason.slice(0,10).toUpperCase()+'</span>';
+}
+
+function _stratTradeCard(r){
+  if(r.skipped)return '<div class=trd-card><div class=trd-top><span class=trd-sym>'+r.idx+'</span><span class="trd-tag skip">SKIPPED</span></div><div class=trd-k>'+(r.skip_reason||'no data')+'</div></div>';
+  const pnlCls=(r.net_pnl||0)>=0?'pos':'neg';
+  const entryP=(r.ce_entry||0)+(r.pe_entry||0);
+  const exitP=(r.ce_exit||0)+(r.pe_exit||0);
+  return '<div class=trd-card>'+
+    '<div class=trd-top><span class=trd-sym>'+r.idx+' <span style="font-weight:400;font-size:10px;color:var(--mt)">ATM '+Math.round(r.atm_strike||0)+'</span></span>'+_exitTag(r.exit_reason)+'</div>'+
+    '<div class=trd-grid>'+
+      '<div class=trd-row><span class=trd-k>Entry</span><span class=trd-v>'+(r.entry_time||'-')+'</span></div>'+
+      '<div class=trd-row><span class=trd-k>Exit</span><span class=trd-v>'+(r.exit_time||'-')+'</span></div>'+
+      '<div class=trd-row><span class=trd-k>CE entry</span><span class=trd-v>'+((r.ce_entry||0).toFixed(1))+'</span></div>'+
+      '<div class=trd-row><span class=trd-k>CE exit</span><span class=trd-v>'+((r.ce_exit||0).toFixed(1))+'</span></div>'+
+      '<div class=trd-row><span class=trd-k>PE entry</span><span class=trd-v>'+((r.pe_entry||0).toFixed(1))+'</span></div>'+
+      '<div class=trd-row><span class=trd-k>PE exit</span><span class=trd-v>'+((r.pe_exit||0).toFixed(1))+'</span></div>'+
+      '<div class=trd-row><span class=trd-k>Total entry</span><span class=trd-v>'+entryP.toFixed(1)+'</span></div>'+
+      '<div class=trd-row><span class=trd-k>Total exit</span><span class=trd-v>'+exitP.toFixed(1)+'</span></div>'+
+    '</div>'+
+    '<div class=trd-sep></div>'+
+    '<div class=trd-grid>'+
+      '<div class=trd-row><span class=trd-k>Lots</span><span class=trd-v>'+(r.lots||1)+'</span></div>'+
+      '<div class=trd-row><span class=trd-k>DTE</span><span class=trd-v>'+(r.dte||'-')+'</span></div>'+
+      '<div class=trd-row><span class=trd-k>CE P&L</span><span class="trd-v '+((r.ce_pnl||0)>=0?'pos':'neg')+'">'+inr(r.ce_pnl||0)+'</span></div>'+
+      '<div class=trd-row><span class=trd-k>PE P&L</span><span class="trd-v '+((r.pe_pnl||0)>=0?'pos':'neg')+'">'+inr(r.pe_pnl||0)+'</span></div>'+
+    '</div>'+
+    '<div class=trd-foot>'+
+      '<div><span class="trd-net '+pnlCls+'">'+inr(r.net_pnl||0)+'</span></div>'+
+      '<span class=trd-charges>Charges: '+inr(r.charges||0)+'</span>'+
+    '</div>'+
+  '</div>';
+}
+
 function renderStratToday(today,strats){
   if(!today||!Object.keys(today).length){
     $('stratToday').innerHTML='<div class=empty>No trades today yet</div>';return}
@@ -1346,16 +1486,38 @@ function renderStratToday(today,strats){
   let html='';
   strats.forEach(s=>{
     const sd=today[s];if(!sd)return;
-    const tag=sd.day_pnl>0?'pos':sd.day_pnl<0?'neg':'';
-    html+='<div class=str-today-card><div class=str-idx-row><span class=str-idx-name>'+s.replace(/_/g,' ')+'</span><span class="str-idx-pnl '+tag+'">'+inr(sd.day_pnl)+'</span></div>';
-    idxOrder.forEach(idx=>{
-      const r=sd.indexes[idx];if(!r)return;
-      if(r.skipped){html+='<div class=str-idx-meta>'+idx+': skipped ('+r.skip_reason+')</div>';return}
-      html+='<div class=str-idx-meta>'+idx+': '+inr(r.net_pnl)+' | DTE='+r.dte+' | '+(r.exit_reason||'time')+'</div>';
-    });
-    html+='</div>';
+    const pnlCls=sd.day_pnl>0?'pos':sd.day_pnl<0?'neg':'';
+    const id='st_'+s;
+    const trades=idxOrder.map(idx=>sd.indexes[idx]).filter(Boolean);
+    html+='<div class=trd-group>'+
+      '<div class=trd-hdr onclick="togTrd(\''+id+'\')">'+
+        '<span class=trd-lbl><span class="trd-arrow" id="'+id+'_a">&#9654;</span>'+s.replace(/_/g,' ')+'</span>'+
+        '<div class=trd-rt><span class=trd-count>'+trades.length+' idx</span><span class="str-idx-pnl '+pnlCls+'">'+inr(sd.day_pnl)+'</span></div>'+
+      '</div>'+
+      '<div class=trd-body id="'+id+'">'+trades.map(r=>_stratTradeCard(r)).join('')+'</div>'+
+    '</div>';
   });
   $('stratToday').innerHTML=html||'<div class=empty>No trades today</div>';
+}
+
+function togTrd(id){
+  const b=$(id),a=$(id+'_a'),h=b.previousElementSibling;
+  const open=b.classList.toggle('open');
+  a.classList.toggle('open',open);
+  h.classList.toggle('open',open);
+}
+
+async function loadStratDayDetail(dt,container){
+  if(container.dataset.loaded){container.classList.toggle('open');return}
+  container.innerHTML='<div class="skel" style="height:60px;margin:8px"></div>';
+  container.classList.add('open');
+  try{
+    const resp=await fetch('/api/strategy/trades?date='+dt+'&strategy='+_stratFocus);
+    const rows=await resp.json();
+    if(!rows.length){container.innerHTML='<div style="padding:8px;font-size:10px;color:var(--mt)">No data</div>';container.dataset.loaded='1';return}
+    container.innerHTML=rows.map(r=>_stratTradeCard(r)).join('');
+    container.dataset.loaded='1';
+  }catch(e){container.innerHTML='<div style="padding:8px;color:var(--rd)">'+e+'</div>'}
 }
 
 function renderStratLog(data,sname){
@@ -1367,10 +1529,12 @@ function renderStratLog(data,sname){
     const col=isGreen?'var(--gn)':'var(--rd)';
     const bg=isGreen?'var(--gd)':'var(--rdd)';
     const wd=d.split('-');const short=wd[1]+'-'+wd[2];
-    return '<div class=str-day-row>'+
+    const detId='sld_'+d.replace(/-/g,'');
+    return '<div class=str-day-row onclick="loadStratDayDetail(\''+d+'\',$( \''+detId+'\'))">'+
       '<span class=str-day-date>'+short+'</span>'+
       '<div class=str-day-bar style="background:'+bg+'"><div class=str-day-fill style="width:'+pct+'%;background:'+col+'"></div></div>'+
-      '<span class="str-day-val '+(isGreen?'pos':'neg')+'">'+inr(p)+'</span></div>'
+      '<span class="str-day-val '+(isGreen?'pos':'neg')+'">'+inr(p)+'</span></div>'+
+      '<div class=str-day-detail id="'+detId+'"></div>'
   }).join('');
 }
 
@@ -1480,20 +1644,67 @@ function renderStockBreakdown(stocks){
   }).join('');
 }
 
+function _stockTradeCard(r){
+  const pnlCls=(r.net_pnl||0)>=0?'pos':'neg';
+  const dirTag=r.direction==='bull_put'?'<span class="trd-tag bull">BULL PUT</span>':'<span class="trd-tag bear">BEAR CALL</span>';
+  return '<div class=trd-card>'+
+    '<div class=trd-top><span class=trd-sym>'+r.stock+'</span><div style="display:flex;gap:4px">'+dirTag+_exitTag(r.exit_reason)+'</div></div>'+
+    '<div class=trd-grid>'+
+      '<div class=trd-row><span class=trd-k>Entry</span><span class=trd-v>'+(r.entry_date||r.date||'-')+'</span></div>'+
+      '<div class=trd-row><span class=trd-k>Exit</span><span class=trd-v>'+(r.exit_date||'-')+'</span></div>'+
+      '<div class=trd-row><span class=trd-k>Spot</span><span class=trd-v>'+((r.spot_entry||0).toFixed(1))+'</span></div>'+
+      '<div class=trd-row><span class=trd-k>DTE</span><span class=trd-v>'+(r.dte_at_entry||'-')+'</span></div>'+
+      '<div class=trd-row><span class=trd-k>Sell strike</span><span class=trd-v>'+(r.sell_strike||'-')+'</span></div>'+
+      '<div class=trd-row><span class=trd-k>Buy strike</span><span class=trd-v>'+(r.buy_strike||'-')+'</span></div>'+
+      '<div class=trd-row><span class=trd-k>Net credit</span><span class=trd-v>'+((r.net_credit||0).toFixed(2))+'</span></div>'+
+      '<div class=trd-row><span class=trd-k>Exit spread</span><span class=trd-v>'+((r.exit_spread_val||0).toFixed(2))+'</span></div>'+
+    '</div>'+
+    '<div class=trd-sep></div>'+
+    '<div class=trd-grid>'+
+      '<div class=trd-row><span class=trd-k>RSI</span><span class=trd-v>'+((r.rsi||0).toFixed(1))+'</span></div>'+
+      '<div class=trd-row><span class=trd-k>EMA20</span><span class=trd-v>'+((r.ema||0).toFixed(1))+'</span></div>'+
+      '<div class=trd-row><span class=trd-k>Lots</span><span class=trd-v>'+(r.lots||1)+'</span></div>'+
+      '<div class=trd-row><span class=trd-k>Expiry</span><span class=trd-v>'+(r.expiry_date||'-')+'</span></div>'+
+    '</div>'+
+    '<div class=trd-foot>'+
+      '<div><span class="trd-net '+pnlCls+'">'+inr(r.net_pnl||0)+'</span></div>'+
+      '<span class=trd-charges>Charges: '+inr(r.charges||0)+'</span>'+
+    '</div>'+
+  '</div>';
+}
+
 function renderStockToday(today,strats){
   if(!today||!Object.keys(today).length){
     $('stockToday').innerHTML='<div class=empty>No stock trades today</div>';return}
   let html='';
   strats.forEach(s=>{
     const sd=today[s];if(!sd)return;
-    const tag=sd.day_pnl>0?'pos':sd.day_pnl<0?'neg':'';
-    html+='<div class=str-today-card><div class=str-idx-row><span class=str-idx-name>'+s.replace(/_/g,' ')+'</span><span class="str-idx-pnl '+tag+'">'+inr(sd.day_pnl)+'</span></div>';
-    Object.entries(sd.stocks||{}).forEach(([stock,r])=>{
-      html+='<div class=str-idx-meta>'+stock+': '+inr(r.net_pnl)+' | '+r.direction+' | '+(r.exit_reason||'active')+'</div>';
-    });
-    html+='</div>';
+    const pnlCls=sd.day_pnl>0?'pos':sd.day_pnl<0?'neg':'';
+    const id='skt_'+s;
+    const trades=Object.values(sd.stocks||{});
+    if(!trades.length)return;
+    html+='<div class=trd-group>'+
+      '<div class=trd-hdr onclick="togTrd(\''+id+'\')">'+
+        '<span class=trd-lbl><span class="trd-arrow" id="'+id+'_a">&#9654;</span>'+s.replace(/_/g,' ')+'</span>'+
+        '<div class=trd-rt><span class=trd-count>'+trades.length+' stocks</span><span class="str-idx-pnl '+pnlCls+'">'+inr(sd.day_pnl)+'</span></div>'+
+      '</div>'+
+      '<div class=trd-body id="'+id+'">'+trades.map(r=>_stockTradeCard(r)).join('')+'</div>'+
+    '</div>';
   });
   $('stockToday').innerHTML=html||'<div class=empty>No stock trades today</div>';
+}
+
+async function loadStockDayDetail(dt,container){
+  if(container.dataset.loaded){container.classList.toggle('open');return}
+  container.innerHTML='<div class="skel" style="height:60px;margin:8px"></div>';
+  container.classList.add('open');
+  try{
+    const resp=await fetch('/api/stock-strategy/trades?date='+dt+'&strategy='+_stocksFocus);
+    const rows=await resp.json();
+    if(!rows.length){container.innerHTML='<div style="padding:8px;font-size:10px;color:var(--mt)">No trades</div>';container.dataset.loaded='1';return}
+    container.innerHTML=rows.map(r=>_stockTradeCard(r)).join('');
+    container.dataset.loaded='1';
+  }catch(e){container.innerHTML='<div style="padding:8px;color:var(--rd)">'+e+'</div>'}
 }
 
 function renderStockLog(data,sname){
@@ -1507,11 +1718,13 @@ function renderStockLog(data,sname){
     const wd=d.split('-');const short=wd[1]+'-'+wd[2];
     const cum=data.cumulative[i];
     const trades=cum?cum.trades:'?';
-    return '<div class=str-day-row>'+
+    const detId='skld_'+d.replace(/-/g,'');
+    return '<div class=str-day-row onclick="loadStockDayDetail(\''+d+'\',$( \''+detId+'\'))">'+
       '<span class=str-day-date>'+short+'</span>'+
       '<div class=str-day-bar style="background:'+bg+'"><div class=str-day-fill style="width:'+pct+'%;background:'+col+'"></div></div>'+
       '<span class="str-day-val '+(isGreen?'pos':'neg')+'">'+inr(p)+'</span>'+
-      '<span style="font-size:9px;color:var(--mt);width:30px;text-align:center">'+trades+'t</span></div>'
+      '<span style="font-size:9px;color:var(--mt);width:30px;text-align:center">'+trades+'t</span></div>'+
+      '<div class=str-day-detail id="'+detId+'"></div>'
   }).join('');
 }
 
