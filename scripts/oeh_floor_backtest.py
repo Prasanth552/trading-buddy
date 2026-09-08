@@ -138,7 +138,7 @@ def check_floor_hit_bs(stock_name, strike, entry, floor_price, sl_price, trade_d
 with get_conn() as conn:
     rows = conn.execute(
         "SELECT id, ts, symbol, qty, price, exit_price, pnl, stop_price, target_price, status, charges "
-        "FROM trades WHERE channel='oeh' AND date(ts) >= '2026-09-01' ORDER BY ts"
+        "FROM trades WHERE channel='oeh' ORDER BY ts"
     ).fetchall()
 
 print(f"{'='*120}")
