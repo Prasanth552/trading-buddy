@@ -109,7 +109,8 @@ OEH_RUN_TIME = "09:20"          # IST — check after first 5-min candle
 OEH_LIST_TIME = "09:16"         # IST — early list using 1-min candle
 OEH_MAX_TRADES = 5              # max trades per scan
 OEH_SL_PCT = 0.30               # 30% of premium as stop-loss
-OEH_TARGET_MULT = 2.0           # target = 2x entry premium
+OEH_TARGET_MULT = 2.0           # original 1-lot target = 2x entry premium
+OEH_FLOOR_MULT = 1.5            # 2-lot floor target = 1.5x entry (50% of target move × 2 lots = same P&L as 1-lot full target)
 OEH_TOLERANCE = 0.05            # ₹0.05 tolerance for high <= open check
 OEH_MIN_DROP_PCT = 0.3          # skip candidates with <0.3% drop (weak signal)
 OEH_BLOCKLIST = {"GODREJCP", "GRASIM"}  # repeat losers — skip these
@@ -123,6 +124,7 @@ OEL_LIST_TIME = "09:16"
 OEL_MAX_TRADES = 5
 OEL_SL_PCT = 0.30
 OEL_TARGET_MULT = 2.0
+OEL_FLOOR_MULT = 1.5            # same floor logic as OEH
 OEL_TOLERANCE = 0.05
 OEL_MIN_RISE_PCT = 0.3
 OEL_BLOCKLIST: set[str] = set()
@@ -1622,7 +1624,7 @@ async def _run_oeh_scan():
             continue
 
         parsed.stop_loss = round(parsed.trigger_price * (1 - OEH_SL_PCT), 2)
-        parsed.targets = [round(parsed.trigger_price * OEH_TARGET_MULT, 2)]
+        parsed.targets = [round(parsed.trigger_price * OEH_FLOOR_MULT, 2)]
 
         result = execute_signal(parsed, channel="oeh", max_lots=2)
         if result["placed"]:
@@ -1631,10 +1633,11 @@ async def _run_oeh_scan():
                 f"BUY {result['symbol']} x{result['qty']} @ {result['entry']:.2f} "
                 f"(OEH drop={c['drop_pct']:.1f}%)"
             )
+            full_tgt = round(parsed.trigger_price * OEH_TARGET_MULT, 2)
             _notify(
-                f"*[OEH] Trade placed*\n"
+                f"*[OEH] Trade placed (2 lots)*\n"
                 f"{result['symbol']} x{result['qty']}\n"
-                f"Entry: {result['entry']} | SL: {result['sl']} | Target: {result['target']}\n"
+                f"Entry: {result['entry']} | SL: {result['sl']} | Floor TGT: {result['target']} (full: {full_tgt})\n"
                 f"Signal: {c['symbol']} Open={c['open']:.2f} Hi={c['max_high']:.2f} "
                 f"(drop {c['drop_pct']:.1f}% in 15min)"
             )
@@ -1884,19 +1887,20 @@ async def _run_oel_scan():
             continue
 
         parsed.stop_loss = round(parsed.trigger_price * (1 - OEL_SL_PCT), 2)
-        parsed.targets = [round(parsed.trigger_price * OEL_TARGET_MULT, 2)]
+        parsed.targets = [round(parsed.trigger_price * OEL_FLOOR_MULT, 2)]
 
-        result = execute_signal(parsed, channel="oel", max_lots=1)
+        result = execute_signal(parsed, channel="oel", max_lots=2)
         if result["placed"]:
             executed += 1
             summary_lines.append(
                 f"BUY {result['symbol']} x{result['qty']} @ {result['entry']:.2f} "
                 f"(OEL rise={c['rise_pct']:.1f}%)"
             )
+            full_tgt = round(parsed.trigger_price * OEL_TARGET_MULT, 2)
             _notify(
-                f"*[OEL] Trade placed*\n"
+                f"*[OEL] Trade placed (2 lots)*\n"
                 f"{result['symbol']} x{result['qty']}\n"
-                f"Entry: {result['entry']} | SL: {result['sl']} | Target: {result['target']}\n"
+                f"Entry: {result['entry']} | SL: {result['sl']} | Floor TGT: {result['target']} (full: {full_tgt})\n"
                 f"Signal: {c['symbol']} Open={c['open']:.2f} Low={c['min_low']:.2f} "
                 f"(rise {c['rise_pct']:.1f}% in 15min)"
             )
