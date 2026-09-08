@@ -1624,7 +1624,7 @@ async def _run_oeh_scan():
         parsed.stop_loss = round(parsed.trigger_price * (1 - OEH_SL_PCT), 2)
         parsed.targets = [round(parsed.trigger_price * OEH_TARGET_MULT, 2)]
 
-        result = execute_signal(parsed, channel="oeh", max_lots=1)
+        result = execute_signal(parsed, channel="oeh", max_lots=2)
         if result["placed"]:
             executed += 1
             summary_lines.append(
