@@ -95,8 +95,20 @@ async def _ws_push_loop():
                         "closed": closed,
                         "win_rate": round(wins / closed * 100, 1) if closed > 0 else 0,
                     }
-            await _ws_broadcast({"type": "tick", "channels": payload,
-                                 "now": mc.now_ist().strftime("%Y-%m-%d %H:%M:%S IST")})
+            # Include live strategy positions if any are OPEN
+            live_data = None
+            try:
+                from src.strategy.intraday_tracker import get_live_summary
+                live_sum = get_live_summary()
+                if any(d.get("status") == "LIVE" for d in live_sum.values()):
+                    live_data = live_sum
+            except Exception:
+                pass
+            msg = {"type": "tick", "channels": payload,
+                   "now": mc.now_ist().strftime("%Y-%m-%d %H:%M:%S IST")}
+            if live_data:
+                msg["live_strategies"] = live_data
+            await _ws_broadcast(msg)
         except Exception:
             pass
 
@@ -358,6 +370,18 @@ def api_strategy_today() -> JSONResponse:
         return JSONResponse(get_today_detail())
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@app.get("/api/strategy/live")
+def api_strategy_live() -> JSONResponse:
+    """Live intraday positions with OPEN/CLOSED status and unrealized P&L."""
+    try:
+        from src.strategy.intraday_tracker import get_live_summary, get_live_positions
+        summary = get_live_summary()
+        positions = get_live_positions()
+        return JSONResponse({"summary": summary, "positions": positions})
+    except Exception as exc:
+        return JSONResponse({"error": str(exc), "summary": {}, "positions": []}, status_code=200)
 
 
 @app.get("/api/strategy/history")
@@ -902,6 +926,28 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
 .str-day-detail{display:none;padding:0 12px 8px;background:var(--bg)}
 .str-day-detail.open{display:block}
 
+/* Live position cards */
+.live-wrap{display:grid;gap:6px}
+.live-card{background:var(--sf);border:1px solid var(--bd);border-radius:10px;padding:10px 12px}
+.live-card.open{border-left:3px solid var(--bl)}
+.live-card.closed{border-left:3px solid var(--mt);opacity:.85}
+.live-hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
+.live-strat{font-size:12px;font-weight:700;font-family:var(--mn)}
+.live-status{font-size:9px;padding:2px 8px;border-radius:4px;font-weight:700;text-transform:uppercase}
+.live-status.open{background:var(--bl);color:#fff;animation:pulse 2s infinite}
+.live-status.closed{background:var(--el);color:var(--mt)}
+.live-status.waiting{background:var(--amd);color:var(--am)}
+.live-status.skipped{background:var(--el);color:var(--mt)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.6}}
+.live-pnl{font-size:20px;font-weight:800;font-family:var(--mn);font-variant-numeric:tabular-nums}
+.live-positions{display:grid;gap:4px;margin-top:6px}
+.live-pos{display:flex;justify-content:space-between;align-items:center;padding:4px 8px;background:var(--el);border-radius:6px}
+.live-idx{font-size:11px;font-weight:600;font-family:var(--mn);width:80px}
+.live-premiums{font-size:9px;color:var(--mt);flex:1;text-align:center}
+.live-pos-pnl{font-size:11px;font-weight:700;font-family:var(--mn);width:70px;text-align:right}
+.live-meta{display:flex;gap:6px;margin-top:4px;flex-wrap:wrap}
+.live-chip{font-size:9px;color:var(--mt);background:var(--el);border-radius:4px;padding:1px 6px}
+
 .pos{color:var(--gn)}.neg{color:var(--rd)}
 
 /* Skeleton loading */
@@ -991,6 +1037,12 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
 
 <!-- Strategy view (hidden by default) -->
 <div class=wrap id=stratView style="display:none">
+
+<!-- Live positions (shown during market hours) -->
+<div class=sec id=liveSection>
+  <div class=sec-h>Live positions <span class=live-dot id=liveDot></span> <span style="font-size:10px;color:var(--mt);font-weight:400" id=liveTime></span></div>
+  <div id=livePositions></div>
+</div>
 
 <div class=sec>
   <div class=sec-h>Strategy comparison <span class=badge id=stratDays>-</span></div>
@@ -1087,18 +1139,20 @@ function wsConnect(){
   _ws.onmessage=e=>{
     try{
       const d=JSON.parse(e.data);
-      if(d.type==='tick'&&d.channels&&d.channels[CH]&&CH!=='strat'&&CH!=='stocks'){
+      if(d.type==='tick'){
+        // Live strategy position updates via WS
+        if(d.live_strategies&&CH==='strat'){
+          renderLive({summary:d.live_strategies,positions:[]});
+        }
+        if(d.channels&&d.channels[CH]&&CH!=='strat'&&CH!=='stocks'){
         const s=d.channels[CH];
         $('ck').textContent=d.now;
-        // Update hero P&L instantly
         $('hv').textContent=inr(s.today_pnl);
         $('hv').className='val '+(s.today_pnl>=0?'pos':'neg');
         $('hs').textContent=s.today_count+' trades today | Total: '+inr(s.total_pnl);
-        // Update win rate ring
         const wr=s.closed>0?s.win_rate:0;
         $('rp').textContent=s.closed>0?wr+'%':'--';
         $('rp').className='ring-pct '+(wr>=50?'pos':'neg');
-        // Update tab badges
         for(const[ch,cs]of Object.entries(d.channels)){
           const tab=$('tab-'+ch);
           if(tab){
@@ -1108,6 +1162,7 @@ function wsConnect(){
             if(badge){badge.textContent=txt;badge.className='ws-badge '+(pnl>=0?'pos':'neg')}
             else{const sp=document.createElement('span');sp.className='ws-badge '+(pnl>=0?'pos':'neg');sp.textContent=txt;tab.appendChild(sp)}
           }
+        }
         }
       }
     }catch(err){}
@@ -1335,20 +1390,99 @@ function renderScan(data){
   }).join('');
 }
 
+// ── Live positions ──
+let _liveTimer=null;
+async function loadLive(){
+  try{
+    const resp=await fetch('/api/strategy/live');
+    const data=await resp.json();
+    renderLive(data);
+  }catch(e){$('livePositions').innerHTML=''}
+}
+
+function renderLive(data){
+  const sum=data.summary||{};
+  const pos=data.positions||[];
+  if(!Object.keys(sum).length&&!pos.length){$('liveSection').style.display='none';return}
+  $('liveSection').style.display='';
+
+  const hasOpen=pos.length?pos.some(p=>p.status==='OPEN'):Object.values(sum).some(s=>s.status==='LIVE');
+  $('liveDot').className=hasOpen?'live-dot':'live-dot off';
+  const lastUpdate=pos.reduce((a,p)=>p.updated_at>a?p.updated_at:a,'');
+  $('liveTime').textContent=lastUpdate?lastUpdate.slice(11,16):'';
+
+  const order=['kitchen_sink','vf_920_sl30','entry_945_sl30'];
+  // Build per-strategy position lists: from full positions array, or from summary.positions
+  const posByStrat={};
+  if(pos.length){pos.forEach(p=>{if(!posByStrat[p.strategy])posByStrat[p.strategy]=[];posByStrat[p.strategy].push(p)})}
+  let html='<div class=live-wrap>';
+  order.forEach(s=>{
+    const sd=sum[s];
+    if(!sd)return;
+    const sPos=posByStrat[s]||sd.positions||[];
+    const statusCls=sd.status.toLowerCase();
+    const pnlVal=sd.status==='LIVE'?sd.unrealized_pnl:sd.combined_pnl;
+    const pnlCls=pnlVal>0?'pos':pnlVal<0?'neg':'';
+
+    html+='<div class="live-card '+statusCls+'">'+
+      '<div class=live-hdr>'+
+        '<span class=live-strat>'+s.replace(/_/g,' ')+'</span>'+
+        '<span class="live-status '+statusCls+'">'+sd.status+'</span>'+
+      '</div>'+
+      '<div class="live-pnl '+pnlCls+'">'+inr(pnlVal)+'</div>'+
+      '<div class=live-positions>';
+
+    sPos.forEach(p=>{
+      if(p.skipped){
+        html+='<div class=live-pos><span class=live-idx>'+p.idx+'</span><span class=live-premiums>SKIPPED: '+(p.skip_reason||'')+'</span><span class=live-pos-pnl>-</span></div>';
+        return;
+      }
+      const pPnl=p.status==='OPEN'?(p.unrealized_pnl||0):(p.net_pnl||0);
+      const pc=pPnl>=0?'pos':'neg';
+      const ceNow=p.ce_current||p.ce_exit||p.ce_entry;
+      const peNow=p.pe_current||p.pe_exit||p.pe_entry;
+      html+='<div class=live-pos>'+
+        '<span class=live-idx>'+p.idx+' <span style="font-size:8px;color:var(--mt)">DTE'+p.dte+'</span></span>'+
+        '<span class=live-premiums>CE:'+p.ce_entry?.toFixed(1)+'→'+(ceNow||0).toFixed(1)+' PE:'+p.pe_entry?.toFixed(1)+'→'+(peNow||0).toFixed(1)+'</span>'+
+        '<span class="live-pos-pnl '+pc+'">'+inr(pPnl)+'</span>'+
+      '</div>';
+    });
+
+    html+='</div>';
+    if(sd.status==='CLOSED'){
+      html+='<div class=live-meta>';
+      sPos.filter(p=>!p.skipped).forEach(p=>{
+        html+='<span class=live-chip>'+p.idx+': '+(p.exit_reason||'?')+' @ '+(p.exit_time||'?')+'</span>';
+      });
+      html+='</div>';
+    }
+    html+='</div>';
+  });
+  html+='</div>';
+  $('livePositions').innerHTML=html;
+
+  // Auto-refresh live positions every 15s if any are OPEN
+  clearInterval(_liveTimer);
+  if(hasOpen){_liveTimer=setInterval(loadLive,15000)}
+}
+
 // ── Strategy tab rendering ──
 async function loadStrat(){
   if(_stratCache&&Date.now()-_stratCacheTs<STRAT_CACHE_MS){renderStrat(_stratCache);return}
   $('stratCards').innerHTML='<div class="skel" style="height:90px"></div><div class="skel" style="height:90px;margin-top:8px"></div><div class="skel" style="height:90px;margin-top:8px"></div>';
   $('stratToday').innerHTML='<div class="skel" style="height:60px"></div>';
   $('stratLog').innerHTML='<div class="skel" style="height:200px"></div>';
+  $('livePositions').innerHTML='<div class="skel" style="height:80px"></div>';
   try{
-    const [sumResp,todayResp]=await Promise.all([
+    const [sumResp,todayResp,liveResp]=await Promise.all([
       fetch('/api/strategy/summary?days=45'),
-      fetch('/api/strategy/today')
+      fetch('/api/strategy/today'),
+      fetch('/api/strategy/live')
     ]);
-    const sum=await sumResp.json(),today=await todayResp.json();
+    const sum=await sumResp.json(),today=await todayResp.json(),live=await liveResp.json();
     _stratCache={sum,today};_stratCacheTs=Date.now();
     renderStrat(_stratCache);
+    renderLive(live);
   }catch(e){$('stratCards').innerHTML='<div class=empty>'+e+'</div>'}
 }
 
