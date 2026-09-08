@@ -85,7 +85,7 @@ MAX_DAILY_LOSS = 10000  # ₹10,000 daily loss limit — stop trading after this
 CH2_INDEX_ONLY = {"NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY"}
 
 # CH2F (filtered) — optimized params from backtest
-CH2F_ENABLED = True
+CH2F_ENABLED = False
 CH2F_MAX_LOSS = 6000   # ₹6,000 SL cap (wider than ch2's ₹4K)
 CH2F_PROFIT_FLOOR = 2000  # ₹2,000 floor (higher than ch2's ₹1.5K)
 CH2F_PE_ONLY = True     # skip all CE signals
@@ -118,7 +118,7 @@ OEH_BLOCKLIST = {"GODREJCP", "GRASIM"}  # repeat losers — skip these
 # ---------------------------------------------------------------------------
 # OEL Scanner (Open=Low) — bullish counterpart to OEH
 # ---------------------------------------------------------------------------
-OEL_ENABLED = True
+OEL_ENABLED = False
 OEL_RUN_TIME = "09:20"
 OEL_LIST_TIME = "09:16"
 OEL_MAX_TRADES = 5
