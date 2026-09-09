@@ -496,6 +496,34 @@ def api_strategy_trades(strategy: str = None, date: str = None, days: int = 45) 
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+@app.get("/api/stock-strategy/active")
+def api_stock_strategy_active() -> JSONResponse:
+    """Active stock spread positions — entered before today, not yet exited."""
+    try:
+        from src.strategy.stock_runner import init_stock_strategy_db
+        init_stock_strategy_db()
+        today = mc.now_ist().date().isoformat()
+        with db.get_conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM stock_strategy_results "
+                "WHERE skipped=0 AND entry_date <= ? AND exit_date >= ? "
+                "ORDER BY strategy, stock",
+                (today, today)).fetchall()
+        result = {}
+        for r in rows:
+            r = dict(r)
+            s = r["strategy"]
+            if s not in result:
+                result[s] = {"day_pnl": 0.0, "stocks": {}}
+            result[s]["stocks"][r["stock"]] = r
+            result[s]["day_pnl"] += r["net_pnl"] or 0
+        for s in result:
+            result[s]["day_pnl"] = round(result[s]["day_pnl"], 2)
+        return JSONResponse(result)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
 @app.get("/api/stock-strategy/trades")
 def api_stock_strategy_trades(strategy: str = None, date: str = None, days: int = 120) -> JSONResponse:
     """Full trade detail rows for stocks tab drill-down."""
@@ -1680,13 +1708,24 @@ async function loadStocks(){
   $('stockLog').innerHTML='<div class="skel" style="height:200px"></div>';
   $('stockBreakdown').innerHTML='<div class="skel" style="height:150px"></div>';
   try{
-    const [sumResp,todayResp,stocksResp]=await Promise.all([
+    const [sumResp,todayResp,stocksResp,activeResp]=await Promise.all([
       fetch('/api/stock-strategy/summary?days=120'),
       fetch('/api/stock-strategy/today'),
-      fetch('/api/stock-strategy/stocks?days=120')
+      fetch('/api/stock-strategy/stocks?days=120'),
+      fetch('/api/stock-strategy/active')
     ]);
-    const sum=await sumResp.json(),today=await todayResp.json(),stocks=await stocksResp.json();
-    _stocksCache={sum,today,stocks};_stocksCacheTs=Date.now();
+    const sum=await sumResp.json(),today=await todayResp.json(),stocks=await stocksResp.json(),active=await activeResp.json();
+    // Merge: if today has no trades but active does, use active positions
+    const merged={};
+    for(const s of Object.keys(active||{})){
+      if(!today[s]||!Object.keys(today[s].stocks||{}).length){
+        merged[s]=active[s];
+        // Mark these as active (from previous entry)
+        for(const st of Object.keys(merged[s].stocks||{})){merged[s].stocks[st]._active=true}
+      }else{merged[s]=today[s]}
+    }
+    for(const s of Object.keys(today||{})){if(!merged[s])merged[s]=today[s]}
+    _stocksCache={sum,today:merged,stocks};_stocksCacheTs=Date.now();
     renderStocks(_stocksCache);
   }catch(e){$('stockCards').innerHTML='<div class=empty>'+e+'</div>'}
 }
@@ -1779,8 +1818,9 @@ function renderStockBreakdown(stocks){
 function _stockTradeCard(r){
   const pnlCls=(r.net_pnl||0)>=0?'pos':'neg';
   const dirTag=r.direction==='bull_put'?'<span class="trd-tag bull">BULL PUT</span>':'<span class="trd-tag bear">BEAR CALL</span>';
+  const activeTag=r._active?'<span class="trd-tag" style="background:#3b82f6;color:#fff">ACTIVE</span>':'';
   return '<div class=trd-card>'+
-    '<div class=trd-top><span class=trd-sym>'+r.stock+'</span><div style="display:flex;gap:4px">'+dirTag+_exitTag(r.exit_reason)+'</div></div>'+
+    '<div class=trd-top><span class=trd-sym>'+r.stock+'</span><div style="display:flex;gap:4px">'+activeTag+dirTag+_exitTag(r.exit_reason)+'</div></div>'+
     '<div class=trd-grid>'+
       '<div class=trd-row><span class=trd-k>Entry</span><span class=trd-v>'+(r.entry_date||r.date||'-')+'</span></div>'+
       '<div class=trd-row><span class=trd-k>Exit</span><span class=trd-v>'+(r.exit_date||'-')+'</span></div>'+
@@ -1809,20 +1849,26 @@ function renderStockToday(today,strats){
   if(!today||!Object.keys(today).length){
     $('stockToday').innerHTML='<div class=empty>No stock trades today</div>';return}
   let html='';
+  let hasActive=false;
   strats.forEach(s=>{
     const sd=today[s];if(!sd)return;
     const pnlCls=sd.day_pnl>0?'pos':sd.day_pnl<0?'neg':'';
     const id='skt_'+s;
     const trades=Object.values(sd.stocks||{});
     if(!trades.length)return;
+    if(trades.some(t=>t._active))hasActive=true;
+    const label=trades.some(t=>t._active)?'active':'stocks';
     html+='<div class=trd-group>'+
       '<div class=trd-hdr onclick="togTrd(\''+id+'\')">'+
         '<span class=trd-lbl><span class="trd-arrow" id="'+id+'_a">&#9654;</span>'+s.replace(/_/g,' ')+'</span>'+
-        '<div class=trd-rt><span class=trd-count>'+trades.length+' stocks</span><span class="str-idx-pnl '+pnlCls+'">'+inr(sd.day_pnl)+'</span></div>'+
+        '<div class=trd-rt><span class=trd-count>'+trades.length+' '+label+'</span><span class="str-idx-pnl '+pnlCls+'">'+inr(sd.day_pnl)+'</span></div>'+
       '</div>'+
       '<div class=trd-body id="'+id+'">'+trades.map(r=>_stockTradeCard(r)).join('')+'</div>'+
     '</div>';
   });
+  // Update section header if showing active positions
+  const hdr=document.querySelector('#stocksView .sec-h:last-of-type');
+  if(hdr&&hdr.textContent.includes("Today"))hdr.textContent=hasActive?"Active Positions":"Today's trades";
   $('stockToday').innerHTML=html||'<div class=empty>No stock trades today</div>';
 }
 
