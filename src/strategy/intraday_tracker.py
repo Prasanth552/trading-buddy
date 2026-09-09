@@ -386,24 +386,35 @@ def _notify(msg: str) -> None:
 def run_stock_strategies(ref_date: date):
     log.info("Running stock credit spread strategies for %s...", ref_date)
     try:
-        from src.strategy.stock_runner import run_day
+        from src.strategy.stock_runner import run_day, STRATEGIES
         res = run_day(ref_date, lots=1, force=True)
         for sname, data in res.items():
             trades = {k: v for k, v in data.get("stocks", {}).items() if not v.get("skipped")}
             if not trades:
                 continue
             log.info("  %s: %+,.0f (%d trades)", sname, data["day_pnl"], len(trades))
+            params = STRATEGIES.get(sname, {})
+            tgt_pct = params.get("profit_target_pct", 0.50)
+            sl_mult = params.get("stop_loss_mult", 2.0)
             for stock, t in trades.items():
                 direction = t.get("direction", "—")
-                tag = "BULL PUT" if "bull" in direction else "BEAR CALL"
+                is_bull = "bull" in direction
+                tag = "BULL PUT" if is_bull else "BEAR CALL"
+                sell = t.get("sell_strike", 0)
+                buy = t.get("buy_strike", 0)
+                credit = t.get("net_credit", 0)
+                tgt_spread = round(credit * (1 - tgt_pct), 2)
+                sl_spread = round(credit * (1 + sl_mult), 2)
+                pair = f"{int(sell)}/{int(buy)} PE" if is_bull else f"{int(sell)}/{int(buy)} CE"
                 _notify(
                     f"📈 *[STOCK] {tag} — {stock}*\n"
+                    f"Pair: {pair}\n"
+                    f"Spot: {t.get('spot_entry', 0):.1f} | Credit: {credit:.2f}\n"
+                    f"TGT: spread → {tgt_spread:.2f} ({tgt_pct*100:.0f}% profit) | "
+                    f"SL: spread → {sl_spread:.2f} ({sl_mult:.1f}x loss)\n"
+                    f"Expiry: {t.get('expiry_date', '—')} | DTE: {t.get('dte_at_entry', '—')}\n"
                     f"Strategy: {sname.replace('_', ' ')}\n"
-                    f"Spot: {t.get('spot_entry', 0):.1f} | "
-                    f"Sell: {t.get('sell_strike', '—')} | Buy: {t.get('buy_strike', '—')}\n"
-                    f"Credit: {t.get('net_credit', 0):.2f} | DTE: {t.get('dte_at_entry', '—')}\n"
-                    f"Expiry: {t.get('expiry_date', '—')} | "
-                    f"Exit: {t.get('exit_reason', '—')} on {t.get('exit_date', '—')}\n"
+                    f"Result: {t.get('exit_reason', '—')} on {t.get('exit_date', '—')} | "
                     f"P&L: ₹{t.get('net_pnl', 0):+,.0f}"
                 )
         return res
