@@ -96,7 +96,7 @@ def analyze_trade(tid, ts, sym, qty, entry, exit_price, pnl, sl_price, target_pr
     print(f"\n{'='*100}")
     print(f"Trade #{tid}: {sym} | Qty: {qty} ({'2 lots' if qty > 50 else '1 lot?'})")
     print(f"  Entry: {entry:.2f} | Floor Target (1.5x): {floor_price:.2f} | SL: {sl_price:.2f} | Old Target (2x): {target_price:.2f}")
-    print(f"  Status: {status} | Exit: {exit_price} | P&L: {pnl:+,.0f} | Peak: {peak_price}")
+    print(f"  Status: {status} | Exit: {exit_price} | P&L: {pnl:+,.0f if pnl else '—'} | Peak: {peak_price}")
     print(f"{'='*100}")
 
     from_dt = datetime.combine(trade_date, datetime.min.time()).replace(hour=9, minute=15)
@@ -230,8 +230,7 @@ def analyze_trade(tid, ts, sym, qty, entry, exit_price, pnl, sl_price, target_pr
         print(f"    Floor P&L (2 lots): {floor_pnl_2lot:+,.0f}")
         if floor_hit_time and sl_hit_time:
             print(f"    Floor hit BEFORE SL? Floor@{floor_hit_time} vs SL@{sl_hit_time}")
-    elif status == "CLOSED_SL":
-        double_loss = (pnl / qty * qty * 2) if qty else pnl * 2
+    elif status == "CLOSED_SL" and pnl:
         print(f"    2-lot SL loss would be: {pnl * 2:+,.0f} (vs 1-lot: {pnl:+,.0f})")
     elif status == "CLOSED":
         print(f"    Trade hit target — floor was definitely crossed")
