@@ -375,15 +375,37 @@ def _sync_to_results(ref_date, strategy_name, idx_name, pos,
 # ---------------------------------------------------------------------------
 # Stock strategies (unchanged — daily check at 15:35)
 # ---------------------------------------------------------------------------
+def _notify(msg: str) -> None:
+    try:
+        from src.notify.telegram_bot import TelegramNotifier
+        TelegramNotifier().send_message(msg)
+    except Exception:
+        log.warning("Could not send Telegram notification")
+
+
 def run_stock_strategies(ref_date: date):
     log.info("Running stock credit spread strategies for %s...", ref_date)
     try:
         from src.strategy.stock_runner import run_day
         res = run_day(ref_date, lots=1, force=True)
         for sname, data in res.items():
-            active = sum(1 for v in data.get("stocks", {}).values() if not v.get("skipped"))
-            if active:
-                log.info("  %s: %+,.0f (%d trades)", sname, data["day_pnl"], active)
+            trades = {k: v for k, v in data.get("stocks", {}).items() if not v.get("skipped")}
+            if not trades:
+                continue
+            log.info("  %s: %+,.0f (%d trades)", sname, data["day_pnl"], len(trades))
+            for stock, t in trades.items():
+                direction = t.get("direction", "—")
+                tag = "BULL PUT" if "bull" in direction else "BEAR CALL"
+                _notify(
+                    f"📈 *[STOCK] {tag} — {stock}*\n"
+                    f"Strategy: {sname.replace('_', ' ')}\n"
+                    f"Spot: {t.get('spot_entry', 0):.1f} | "
+                    f"Sell: {t.get('sell_strike', '—')} | Buy: {t.get('buy_strike', '—')}\n"
+                    f"Credit: {t.get('net_credit', 0):.2f} | DTE: {t.get('dte_at_entry', '—')}\n"
+                    f"Expiry: {t.get('expiry_date', '—')} | "
+                    f"Exit: {t.get('exit_reason', '—')} on {t.get('exit_date', '—')}\n"
+                    f"P&L: ₹{t.get('net_pnl', 0):+,.0f}"
+                )
         return res
     except Exception:
         log.exception("Stock strategy error")

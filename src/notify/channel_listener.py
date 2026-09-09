@@ -2008,6 +2008,66 @@ def _build_eod_report(target_date: str | None = None) -> str:
                 )
             lines.append("")
 
+    # --- Index Straddle Strategies ---
+    try:
+        from src.strategy.intraday_tracker import get_live_summary
+        strat_summary = get_live_summary()
+        if strat_summary:
+            strat_pnl = sum(d.get("combined_pnl", 0) for d in strat_summary.values())
+            strat_count = sum(d.get("closed_count", 0) for d in strat_summary.values())
+            if strat_count > 0:
+                icon = "🟢" if strat_pnl >= 0 else "🔴"
+                lines.append(f"{icon} *Index Straddles*")
+                for sname, d in strat_summary.items():
+                    sp = d.get("combined_pnl", 0)
+                    sc = d.get("closed_count", 0)
+                    so = d.get("open_count", 0)
+                    if sc or so:
+                        lines.append(f"  {sname}: ₹{sp:+,.0f} ({sc} closed{f', {so} open' if so else ''})")
+                lines.append(f"  P&L: ₹{strat_pnl:+,.0f}")
+                lines.append("")
+                grand_pnl += strat_pnl
+                grand_trades += strat_count
+    except Exception:
+        log.warning("Could not load strategy summary for EOD report")
+
+    # --- Stock Credit Spreads ---
+    try:
+        from src.strategy.stock_runner import get_today_detail
+        stock_today = get_today_detail()
+        if stock_today:
+            stock_total = 0
+            stock_count = 0
+            stock_lines = []
+            for sname, data in stock_today.items():
+                trades = data.get("stocks", {})
+                if not trades:
+                    continue
+                sp = data.get("day_pnl", 0)
+                stock_total += sp
+                sc = len(trades)
+                stock_count += sc
+                wins = sum(1 for t in trades.values() if (t.get("net_pnl") or 0) > 0)
+                stock_lines.append(f"  {sname.replace('_', ' ')}: ₹{sp:+,.0f} ({sc} trades, {wins}W)")
+                for stock, t in trades.items():
+                    tag = "BP" if "bull" in (t.get("direction") or "") else "BC"
+                    pnl = t.get("net_pnl") or 0
+                    icon_t = "✅" if pnl > 0 else "❌"
+                    stock_lines.append(
+                        f"    {icon_t} {stock} [{tag}] ₹{pnl:+,.0f} "
+                        f"({t.get('exit_reason', '—')})"
+                    )
+            if stock_count > 0:
+                icon = "🟢" if stock_total >= 0 else "🔴"
+                lines.append(f"{icon} *Stock Spreads*")
+                lines.extend(stock_lines)
+                lines.append(f"  P&L: ₹{stock_total:+,.0f}")
+                lines.append("")
+                grand_pnl += stock_total
+                grand_trades += stock_count
+    except Exception:
+        log.warning("Could not load stock strategy for EOD report")
+
     if grand_trades == 0:
         lines.append("No trades today.")
         return "\n".join(lines)
@@ -2018,8 +2078,8 @@ def _build_eod_report(target_date: str | None = None) -> str:
 
     lines.append("━" * 28)
     lines.append(f"{grand_icon} *TOTAL: ₹{grand_pnl:+,.0f}*")
-    lines.append(f"  Trades: {grand_trades} ({grand_wins}W / {grand_losses}L) | WR: {grand_wr}")
-    lines.append(f"  Charges: ₹{grand_charges:,.0f} | Net: ₹{net_pnl:+,.0f}")
+    lines.append(f"  Channel trades: {grand_wins}W / {grand_losses}L")
+    lines.append(f"  Charges: ₹{grand_charges:,.0f}")
     lines.append("")
     lines.append("_Trading Buddy • Auto-generated_")
 
