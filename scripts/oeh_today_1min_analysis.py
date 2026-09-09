@@ -96,7 +96,8 @@ def analyze_trade(tid, ts, sym, qty, entry, exit_price, pnl, sl_price, target_pr
     print(f"\n{'='*100}")
     print(f"Trade #{tid}: {sym} | Qty: {qty} ({'2 lots' if qty > 50 else '1 lot?'})")
     print(f"  Entry: {entry:.2f} | Floor Target (1.5x): {floor_price:.2f} | SL: {sl_price:.2f} | Old Target (2x): {target_price:.2f}")
-    print(f"  Status: {status} | Exit: {exit_price} | P&L: {pnl:+,.0f if pnl else '—'} | Peak: {peak_price}")
+    pnl_str = f"{pnl:+,.0f}" if pnl else "—"
+    print(f"  Status: {status} | Exit: {exit_price} | P&L: {pnl_str} | Peak: {peak_price}")
     print(f"{'='*100}")
 
     from_dt = datetime.combine(trade_date, datetime.min.time()).replace(hour=9, minute=15)
