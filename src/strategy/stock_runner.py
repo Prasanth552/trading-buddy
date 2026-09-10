@@ -73,8 +73,8 @@ STRATEGIES = {
     ),
     "ema20_rsi60": dict(
         ema_period=20, rsi_period=14, rsi_bull=60, rsi_bear=40,
-        entry_dte_range=(15, 28), profit_target_pct=0.50,
-        stop_loss_mult=2.0, close_dte=5,
+        entry_dte_range=(5, 35), profit_target_pct=0.50,
+        stop_loss_mult=2.0, close_dte=2,
     ),
     "ema20_rsi50_tight": dict(
         ema_period=20, rsi_period=14, rsi_bull=50, rsi_bear=50,
@@ -486,11 +486,7 @@ def run_day(ref_date: date, lots: int = 1, *, force: bool = False) -> dict:
                 if sig is None:
                     r = {"skipped": True, "skip_reason": "no_signal", "net_pnl": 0}
                 else:
-                    with db.get_conn() as conn:
-                        if _has_active_trade(conn, strat_name, stock_name, sig["expiry"]):
-                            r = {"skipped": True, "skip_reason": "already_in_trade", "net_pnl": 0}
-                        else:
-                            r = None
+                    r = None
                     if r is None:
                         if sig["direction"] == "bullish":
                             r = run_bull_put_spread(daily, stock_name, ref_date, sig["expiry"],
