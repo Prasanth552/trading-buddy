@@ -556,6 +556,52 @@ def run_trading_day(ref_date: date, lots: int = 1):
     if not _shutdown:
         run_stock_strategies(ref_date)
 
+    # Phase 4: Live stock spread execution (ema20_rsi60)
+    if not _shutdown:
+        try:
+            from src.strategy.stock_executor import (
+                enter_spread, monitor_open_positions, get_open_positions,
+                LIVE_STRATEGY,
+            )
+            closed = monitor_open_positions(ref_date)
+            if closed:
+                log.info("Stock spreads: closed %d positions", len(closed))
+                for c in closed:
+                    reason = c.get("exit_reason", "—")
+                    pnl = c.get("net_pnl", 0)
+                    _notify(
+                        f"📊 *[STOCK EXIT] {c['stock']}*\n"
+                        f"Reason: {reason} | P&L: ₹{pnl:+,.0f}"
+                    )
+
+            entered = enter_spread(ref_date, lots=1)
+            if entered:
+                log.info("Stock spreads: entered %d new positions", len(entered))
+                for e in entered:
+                    is_bull = "bull" in e["direction"]
+                    tag = "BULL PUT" if is_bull else "BEAR CALL"
+                    pair = (f"{int(e['sell_strike'])}/{int(e['buy_strike'])} PE"
+                            if is_bull else
+                            f"{int(e['sell_strike'])}/{int(e['buy_strike'])} CE")
+                    tgt_spread = round(e["net_credit"] * (1 - e["profit_target_pct"]), 2)
+                    sl_spread = round(e["net_credit"] * (1 + e["stop_loss_mult"]), 2)
+                    _notify(
+                        f"🔴 *[LIVE STOCK] {tag} — {e['stock']}*\n"
+                        f"Pair: {pair}\n"
+                        f"Sell: {e['sell_premium']:.2f} | Buy: {e['buy_premium']:.2f} | "
+                        f"Credit: {e['net_credit']:.2f}\n"
+                        f"TGT: spread → {tgt_spread:.2f} ({e['profit_target_pct']*100:.0f}% profit) | "
+                        f"SL: spread → {sl_spread:.2f} ({e['stop_loss_mult']:.1f}x loss)\n"
+                        f"Expiry: {e['expiry_date']} | DTE: {e['dte_at_entry']}\n"
+                        f"Strategy: {LIVE_STRATEGY.replace('_', ' ')}"
+                    )
+
+            open_pos = get_open_positions()
+            if open_pos:
+                log.info("Stock spreads: %d positions still open", len(open_pos))
+        except Exception:
+            log.exception("Live stock executor error")
+
     # Summary
     summary = get_live_summary(ref_date)
     grand_total = sum(d["combined_pnl"] for d in summary.values())
@@ -596,6 +642,14 @@ def main():
                 from src.strategy.live_runner import run_day
                 run_day(today, lots=1, force=True)
                 run_stock_strategies(today)
+                try:
+                    from src.strategy.stock_executor import (
+                        enter_spread, monitor_open_positions,
+                    )
+                    monitor_open_positions(today)
+                    enter_spread(today, lots=1)
+                except Exception:
+                    log.exception("Late-start stock executor error")
             else:
                 log.info("Today already tracked (%d positions)", done)
 

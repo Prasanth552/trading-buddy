@@ -552,6 +552,19 @@ def api_stock_strategy_trades(strategy: str = None, date: str = None, days: int 
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+@app.get("/api/stock-strategy/live")
+def api_stock_strategy_live() -> JSONResponse:
+    """Live stock spread positions (real prices via ema20_rsi60)."""
+    try:
+        from src.strategy.stock_executor import get_open_positions, get_all_positions
+        return JSONResponse({
+            "open": get_open_positions(),
+            "history": get_all_positions(days=90),
+        })
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
 _ML_EMPTY = lambda: JSONResponse({"stats": {
     "total": 0, "open": 0, "closed": 0, "wins": 0, "losses": 0,
     "win_rate": 0, "total_pnl": 0, "best_trade": 0, "worst_trade": 0,

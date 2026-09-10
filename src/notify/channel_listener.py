@@ -1921,7 +1921,7 @@ async def _run_oel_scan():
 def _build_eod_report(target_date: str | None = None) -> str:
     """Build a formatted EOD report for the given date (default: today)."""
     from zoneinfo import ZoneInfo
-    from datetime import datetime
+    from datetime import date, datetime
     from src.storage import db as _db
     IST = ZoneInfo(config.TIMEZONE)
 
@@ -2067,6 +2067,46 @@ def _build_eod_report(target_date: str | None = None) -> str:
                 grand_trades += stock_count
     except Exception:
         log.warning("Could not load stock strategy for EOD report")
+
+    # --- Live Stock Spreads (real prices) ---
+    try:
+        from src.strategy.stock_executor import get_today_entries, get_open_positions
+        live_entries = get_today_entries()
+        live_open = get_open_positions()
+        live_lines = []
+        live_total = 0
+        live_count = 0
+        if live_entries:
+            for e in live_entries:
+                tag = "BP" if "bull" in (e.get("direction") or "") else "BC"
+                status = e.get("status", "OPEN")
+                pnl = e.get("net_pnl") or 0
+                if status == "OPEN":
+                    live_lines.append(
+                        f"  ⏳ {e['stock']} [{tag}] {int(e['sell_strike'])}/{int(e['buy_strike'])} "
+                        f"credit={e['net_credit']:.2f} OPEN"
+                    )
+                else:
+                    icon_t = "✅" if pnl > 0 else "❌"
+                    live_total += pnl
+                    live_count += 1
+                    live_lines.append(
+                        f"  {icon_t} {e['stock']} [{tag}] ₹{pnl:+,.0f} ({e.get('exit_reason', '—')})"
+                    )
+        if live_open:
+            open_not_today = [p for p in live_open if p["entry_date"] != date.today().isoformat()]
+            if open_not_today:
+                live_lines.append(f"  Carrying {len(open_not_today)} older positions")
+        if live_lines:
+            lines.append("📊 *Live Stock Spreads (ema20 rsi60)*")
+            lines.extend(live_lines)
+            if live_count:
+                lines.append(f"  Closed P&L: ₹{live_total:+,.0f}")
+            lines.append("")
+            grand_pnl += live_total
+            grand_trades += live_count
+    except Exception:
+        log.warning("Could not load live stock spread data for EOD report")
 
     if grand_trades == 0:
         lines.append("No trades today.")
