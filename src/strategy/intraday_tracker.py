@@ -135,13 +135,15 @@ def enter_positions(strategy_name: str, ref_date: date, lots: int = 1):
         step = idx["strike_step"]
         dte = _days_to_expiry(ref_date, idx_name)
 
+        entry_min = params.get("entry_min", 30)
+        min_candles = 1 if entry_min <= 20 else 3
         candles = fetch_candles(uclient, idx_name, ref_date, "5minute")
-        if not candles or len(candles) < 3:
+        if not candles or len(candles) < min_candles:
             _save_skipped(ref_date, strategy_name, idx_name, lots, dte, "no_data")
             continue
 
-        # Vol filter check
-        if params.get("vol_filter"):
+        # Vol filter — skip if not enough candles to compute range
+        if params.get("vol_filter") and len(candles) >= 3:
             fr = _first_candle_range(candles)
             if fr > idx["vol_skip_range"]:
                 _save_skipped(ref_date, strategy_name, idx_name, lots, dte,
