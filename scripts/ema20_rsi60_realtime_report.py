@@ -33,6 +33,23 @@ udata = UpstoxData(access_token=token)
 uclient = UpstoxClient()
 master = uclient.load_instruments()
 
+# Debug: dump what instrument_types exist for stock options
+_debug_stocks = {"RELIANCE", "INFY", "SBIN", "TCS", "HDFCBANK", "TATAMOTORS", "BAJFINANCE"}
+_type_sample = {}
+for inst in master:
+    if inst.get("segment") == "NSE_FO" and inst.get("name") in _debug_stocks:
+        itype = inst.get("instrument_type", "?")
+        nm = inst.get("name")
+        k = f"{nm}|{itype}"
+        if k not in _type_sample:
+            _type_sample[k] = inst
+if _type_sample:
+    print("  MASTER DEBUG — instrument_types for stocks in NSE_FO:")
+    for k, inst in sorted(_type_sample.items()):
+        print(f"    {k:30} strike={inst.get('strike_price')} expiry={str(inst.get('expiry',''))[:10]} "
+              f"tsym={inst.get('trading_symbol','')[:30]}")
+    print()
+
 
 def real_charges(sell_prem, buy_prem, lot_size, lots, exit_sell=None, exit_buy=None):
     """Calculate actual F&O charges for a credit spread round-trip."""
