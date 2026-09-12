@@ -10,7 +10,7 @@ import config
 from src.storage.db import get_conn
 
 IST = ZoneInfo("Asia/Kolkata")
-today = datetime.now(IST).strftime("%Y-%m-%d")
+today = sys.argv[1] if len(sys.argv) > 1 else datetime.now(IST).strftime("%Y-%m-%d")
 
 print(f"{'#'*80}")
 print(f"  DAILY TRADE ANALYSIS — {today}")
