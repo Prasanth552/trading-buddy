@@ -33,22 +33,57 @@ udata = UpstoxData(access_token=token)
 uclient = UpstoxClient()
 master = uclient.load_instruments()
 
-# Debug: dump what instrument_types exist for stock options
+# Debug: find ANY instruments for these stocks regardless of field values
 _debug_stocks = {"RELIANCE", "INFY", "SBIN", "TCS", "HDFCBANK", "TATAMOTORS", "BAJFINANCE"}
-_type_sample = {}
+_found_any = {}
 for inst in master:
-    if inst.get("segment") == "NSE_FO" and inst.get("name") in _debug_stocks:
+    seg = inst.get("segment", "")
+    nm = inst.get("name", "")
+    if nm in _debug_stocks and "FO" in seg:
         itype = inst.get("instrument_type", "?")
-        nm = inst.get("name")
-        k = f"{nm}|{itype}"
-        if k not in _type_sample:
-            _type_sample[k] = inst
-if _type_sample:
-    print("  MASTER DEBUG — instrument_types for stocks in NSE_FO:")
-    for k, inst in sorted(_type_sample.items()):
-        print(f"    {k:30} strike={inst.get('strike_price')} expiry={str(inst.get('expiry',''))[:10]} "
-              f"tsym={inst.get('trading_symbol','')[:30]}")
-    print()
+        k = f"{nm}|{seg}|{itype}"
+        if k not in _found_any:
+            _found_any[k] = inst
+# Also search by trading_symbol containing stock name
+_found_tsym = {}
+for inst in master:
+    tsym = (inst.get("trading_symbol") or "").upper()
+    seg = inst.get("segment", "")
+    if "FO" in seg:
+        for stk in _debug_stocks:
+            if stk in tsym and stk not in _found_tsym:
+                _found_tsym[stk] = inst
+                break
+
+print("  MASTER DEBUG — by name field:")
+if _found_any:
+    for k, inst in sorted(_found_any.items()):
+        print(f"    {k:40} strike={inst.get('strike_price')} "
+              f"tsym={inst.get('trading_symbol','')[:35]} "
+              f"expiry={str(inst.get('expiry',''))[:10]}")
+else:
+    print("    NONE found by name field!")
+
+print("\n  MASTER DEBUG — by trading_symbol containing stock name:")
+if _found_tsym:
+    for stk, inst in sorted(_found_tsym.items()):
+        print(f"    {stk:15} seg={inst.get('segment')} name={inst.get('name')} "
+              f"itype={inst.get('instrument_type')} "
+              f"tsym={inst.get('trading_symbol','')[:35]} "
+              f"strike={inst.get('strike_price')} expiry={str(inst.get('expiry',''))[:10]}")
+else:
+    print("    NONE found by trading_symbol!")
+
+# Dump raw sample of first few NSE_FO instruments
+print("\n  MASTER DEBUG — first 3 NSE_FO instruments (raw keys):")
+nse_fo_count = 0
+for inst in master:
+    if inst.get("segment") == "NSE_FO":
+        if nse_fo_count < 3:
+            print(f"    {dict((k, v) for k, v in inst.items() if k in ('name','instrument_type','trading_symbol','strike_price','expiry','segment','asset_symbol'))}")
+            nse_fo_count += 1
+print(f"    ... total NSE_FO instruments: {sum(1 for i in master if i.get('segment') == 'NSE_FO')}")
+print()
 
 
 def real_charges(sell_prem, buy_prem, lot_size, lots, exit_sell=None, exit_buy=None):
