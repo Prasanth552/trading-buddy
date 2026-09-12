@@ -486,7 +486,11 @@ def run_day(ref_date: date, lots: int = 1, *, force: bool = False) -> dict:
                 if sig is None:
                     r = {"skipped": True, "skip_reason": "no_signal", "net_pnl": 0}
                 else:
-                    r = None
+                    with db.get_conn() as conn:
+                        if _has_active_trade(conn, strat_name, stock_name, sig["expiry"]):
+                            r = {"skipped": True, "skip_reason": "active_position", "net_pnl": 0}
+                    if not r or not r.get("skipped"):
+                        r = None
                     if r is None:
                         if sig["direction"] == "bullish":
                             r = run_bull_put_spread(daily, stock_name, ref_date, sig["expiry"],
