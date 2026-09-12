@@ -142,7 +142,7 @@ def get_candles(stock_name, strike, opt_type, trade_date, entry_dt):
     if opt_key:
         try:
             candles = ud.historical_data(opt_key, from_dt, to_dt, "1minute")
-            time.sleep(0.4)
+            time.sleep(0.6)
             if candles:
                 return candles, False
         except Exception:
@@ -336,11 +336,16 @@ def simulate_trade(tid, ts, sym, qty, entry, sl_price, target_price, old_exit, o
 
     old_final_pnl = _pnl(old_sim)
     if old_sim["active"]:
-        old_final_pnl = old_pnl or 0  # use actual DB P&L if sim didn't close
+        old_final_pnl = old_pnl or 0
 
     new_final_pnl = _pnl(new_sim, new_sim["partial_pnl"])
-    if new_sim["active"]:
-        new_final_pnl = 0  # still open, no sim result
+    if new_sim["active"] and old_status in ("CLOSED", "CLOSED_SL", "CLOSED_TGT"):
+        # B-S estimation couldn't replicate actual exits — use DB P&L as fallback
+        new_final_pnl = old_pnl or 0
+        new_sim["exit_reason"] = f"{old_status}_est"
+        bs_fallback = True
+    else:
+        bs_fallback = False
 
     return {
         "tid": tid, "sym": sym, "date": trade_date, "entry": entry,
@@ -356,6 +361,7 @@ def simulate_trade(tid, ts, sym, qty, entry, sl_price, target_price, old_exit, o
         "use_bs": use_bs,
         "old_active": old_sim["active"],
         "new_active": new_sim["active"],
+        "bs_fallback": bs_fallback,
     }
 
 
@@ -392,9 +398,10 @@ for r in rows:
         delta = result["new_pnl"] - result["old_pnl"]
         icon = "+" if delta > 0 else ""
         bs_tag = " [B-S]" if result["use_bs"] else ""
+        fb_tag = " [FALLBACK]" if result.get("bs_fallback") else ""
         print(f"OLD: ₹{result['old_pnl']:+,.0f} ({result['old_reason']}) → "
               f"NEW: ₹{result['new_pnl']:+,.0f} ({result['new_reason']}) "
-              f"Δ: {icon}₹{delta:,.0f}{bs_tag}")
+              f"Δ: {icon}₹{delta:,.0f}{bs_tag}{fb_tag}")
     else:
         print("SKIP (no candle data)")
 
@@ -407,25 +414,46 @@ print(f"  {'─'*115}")
 old_total = 0
 new_total = 0
 partial_count = 0
+fallback_count = 0
+new_wins = 0
+new_losses = 0
+old_wins = 0
+old_losses = 0
+sl_saved = 0
 for r in results:
     delta = r["new_pnl"] - r["old_pnl"]
     icon = "🟢" if delta > 0 else "🔴" if delta < 0 else "⚪"
     partial_tag = f"₹{r['partial_pnl']:+,.0f}" if r["partial_done"] else "—"
+    fb_tag = " *" if r.get("bs_fallback") else ""
     print(f"  {r['tid']:>5} {r['date'].strftime('%m/%d'):>10} {r['sym']:25} {r['qty']:>5} {r['entry']:>7.2f} "
           f"{r['old_pnl']:>+10,.0f} {r['old_reason']:>16} "
           f"{r['new_pnl']:>+10,.0f} {r['new_reason']:>20} "
-          f"{delta:>+10,.0f} {icon} {partial_tag:>8}")
+          f"{delta:>+10,.0f} {icon} {partial_tag:>8}{fb_tag}")
     old_total += r["old_pnl"]
     new_total += r["new_pnl"]
     if r["partial_done"]:
         partial_count += 1
+    if r.get("bs_fallback"):
+        fallback_count += 1
+    if r["new_pnl"] > 0: new_wins += 1
+    elif r["new_pnl"] < 0: new_losses += 1
+    if r["old_pnl"] > 0: old_wins += 1
+    elif r["old_pnl"] < 0: old_losses += 1
+    if "max_loss_5k" in (r["new_reason"] or ""):
+        old_loss = r["old_pnl"] if r["old_pnl"] < 0 else 0
+        sl_saved += (r["new_pnl"] - old_loss)
 
 # ── Grand summary ──
+print(f"\n  (* = B-S fallback: sim couldn't replicate, used actual DB P&L)")
 print(f"\n{'='*120}")
 print(f"  SUMMARY")
 print(f"  {'─'*50}")
 print(f"  {'Trades analyzed:':35} {len(results)}")
+print(f"  {'B-S fallback (same P&L):':35} {fallback_count} trades")
 print(f"  {'Partial profit booked:':35} {partial_count} trades")
+print(f"  {'':35}")
+print(f"  {'OLD win/loss:':35} {old_wins}W / {old_losses}L")
+print(f"  {'NEW win/loss:':35} {new_wins}W / {new_losses}L")
 print(f"  {'':35}")
 print(f"  {'OLD strategy P&L:':35} ₹{old_total:>+10,.0f}")
 print(f"  {'NEW strategy P&L:':35} ₹{new_total:>+10,.0f}")
@@ -434,6 +462,8 @@ delta_total = new_total - old_total
 pct = (delta_total / abs(old_total) * 100) if old_total else 0
 icon = "🟢" if delta_total > 0 else "🔴"
 print(f"  {icon} {'Improvement:':33} ₹{delta_total:>+10,.0f} ({pct:+.0f}%)")
+if sl_saved:
+    print(f"  {'₹5K SL cap saved:':35} ₹{sl_saved:>+10,.0f}")
 print(f"{'='*120}")
 
 # ── Per-day breakdown ──
