@@ -176,6 +176,11 @@ def resolve_exit(p: dict[str, Any], current: float) -> tuple[str | None, float |
     if target_rs and p["qty"] > 0 and (current - p["price"]) * p["qty"] >= target_rs:
         peak = max(p.get("peak_price") or p["price"], current)
         return "profit", round(float(current), 2), peak
+    # Rupee stop-loss — hard cap on max loss per trade (₹5k default).
+    max_loss = getattr(config, "MAX_LOSS_RUPEES", 0.0)
+    if max_loss and p["qty"] > 0 and (current - p["price"]) * p["qty"] <= -max_loss:
+        peak = max(p.get("peak_price") or p["price"], current)
+        return "stoploss", round(float(current), 2), peak
     # "Became zero": premium decayed to a fraction of entry — nothing left to
     # recover; close and free the slot (hedge-recovery flow rule 3).
     zc = getattr(config, "ZERO_CLOSE_PCT", 0.0)

@@ -176,6 +176,10 @@ ORB_MAX_TRADES_PER_DAY: int = 1  # one ORB trade per symbol per day
 # even — validate via backtest and watch the forward data.
 PROFIT_TARGET_RUPEES: float = 0.0
 
+# Rupee stop-loss — hard cap on maximum loss per trade. Exits when unrealised
+# loss reaches this amount regardless of the ATR-based stop. Set 0 to disable.
+MAX_LOSS_RUPEES: float = 5000.0
+
 # Manual-exit experiment (week of Jul 6): automatic stop-losses DISABLED — the
 # user cuts losers manually via the dashboard Close button. The ₹ take-profit
 # and the 15:15 EOD square-off remain active. Set True to restore auto stops.
