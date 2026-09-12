@@ -242,8 +242,7 @@ for r in rows:
         daily_margin_used[entry_date_str] = day_margin_so_far + margin_est
 
         net_pnl_sim = (sim_pnl or 0) * LOTS
-        gross_sim = net_pnl_sim + (sim_calc_charges(sim_credit, abs(sim_credit - (r.get("exit_spread_val") or 0)), lot_size, LOTS) if sim_credit else 0)
-        ch = gross_sim - net_pnl_sim if gross_sim != net_pnl_sim else 0
+        ch = sim_calc_charges(sim_credit or 0, lot_size) * LOTS if sim_credit else 0
         result = {
             "stock": stock, "direction": direction, "opt_type": opt_type,
             "sell_strike": sell_strike, "buy_strike": buy_strike,
