@@ -228,7 +228,44 @@ for r in rows:
     buy_inst = resolve_option(stock, real_expiry, buy_strike, opt_type)
 
     if not sell_inst or not buy_inst:
-        print(f"SKIP (instrument not found)")
+        # Expired instrument — fall back to sim P&L from DB
+        stk_info = STOCKS.get(stock)
+        lot_size = stk_info["lot_size"] if stk_info else 1
+        qty = lot_size * LOTS
+        strike_width = abs(sell_strike - buy_strike)
+        margin_est = (strike_width * qty) - (sim_credit * qty) if sim_credit else strike_width * qty
+
+        day_margin_so_far = daily_margin_used.get(entry_date_str, 0)
+        if day_margin_so_far + margin_est > CAPITAL:
+            print(f"SKIP (capital limit)")
+            continue
+        daily_margin_used[entry_date_str] = day_margin_so_far + margin_est
+
+        net_pnl_sim = (sim_pnl or 0) * LOTS
+        gross_sim = net_pnl_sim + (sim_calc_charges(sim_credit, abs(sim_credit - (r.get("exit_spread_val") or 0)), lot_size, LOTS) if sim_credit else 0)
+        ch = gross_sim - net_pnl_sim if gross_sim != net_pnl_sim else 0
+        result = {
+            "stock": stock, "direction": direction, "opt_type": opt_type,
+            "sell_strike": sell_strike, "buy_strike": buy_strike,
+            "entry_date": entry_date_str,
+            "exit_date": exit_date.isoformat() if exit_date else "OPEN",
+            "exit_reason": (exit_reason or "OPEN") + " [sim]",
+            "lot_size": lot_size, "qty": qty,
+            "sell_entry": sim_credit, "buy_entry": 0,
+            "real_credit": sim_credit,
+            "sim_credit": sim_credit,
+            "sell_exit": None, "buy_exit": None,
+            "exit_spread": r.get("exit_spread_val"),
+            "gross_pnl": net_pnl_sim,
+            "charges": abs(ch),
+            "net_pnl": net_pnl_sim,
+            "sim_pnl": sim_pnl,
+            "margin": margin_est,
+            "source": "sim",
+        }
+        results.append(result)
+        icon = "+" if net_pnl_sim > 0 else ""
+        print(f"[SIM] P&L: {icon}₹{net_pnl_sim:,.0f} (B-S, instrument expired) | {exit_reason}")
         continue
 
     sell_key = sell_inst["instrument_key"]
@@ -331,6 +368,7 @@ for r in rows:
         "net_pnl": net_pnl,
         "sim_pnl": sim_pnl,
         "margin": margin_est,
+        "source": "real",
     }
     results.append(result)
 
@@ -340,11 +378,12 @@ for r in rows:
           f"Charges: ₹{charges:,.0f} | {exit_reason}")
 
 # ── Detailed Table ──
-print(f"\n{'='*140}")
-print(f"  {'Stock':12} {'Dir':6} {'Spread':14} {'Entry':>12} {'Exit':>12} "
+print(f"\n{'='*145}")
+print(f"  {'':1} {'Stock':12} {'Dir':6} {'Spread':14} {'Entry':>12} {'Exit':>12} "
       f"{'Credit':>8} {'ExitSpd':>8} {'Gross':>10} {'Charges':>8} {'Net P&L':>10} "
-      f"{'SimP&L':>10} {'Margin':>10} {'Exit Reason':>14}")
-print(f"  {'─'*135}")
+      f"{'Margin':>10} {'Exit Reason':>18}")
+print(f"  {'─'*140}")
+print(f"  R = Real candles, S = Sim (B-S, instrument expired)\n")
 
 total_gross = 0
 total_charges = 0
@@ -355,14 +394,15 @@ wins = losses = 0
 
 for r in results:
     icon = "✅" if r["net_pnl"] > 0 else "❌" if r["net_pnl"] < 0 else "⏳"
+    src = "S" if r.get("source") == "sim" else "R"
     spread = f"{r['sell_strike']:.0f}/{r['buy_strike']:.0f} {r['opt_type']}"
-    entry_str = f"{r['sell_entry']:.2f}-{r['buy_entry']:.2f}"
+    entry_str = f"{r['sell_entry']:.2f}-{r['buy_entry']:.2f}" if r['sell_entry'] is not None else "—"
     exit_str = f"{r['sell_exit']:.2f}-{r['buy_exit']:.2f}" if r['sell_exit'] is not None else "—"
 
-    print(f"  {r['stock']:12} {r['direction']:6} {spread:14} {entry_str:>12} {exit_str:>12} "
-          f"{r['real_credit']:>8.2f} {r['exit_spread'] or 0:>8.2f} "
+    print(f"  {src} {r['stock']:12} {r['direction']:6} {spread:14} {entry_str:>12} {exit_str:>12} "
+          f"{r['real_credit'] or 0:>8.2f} {r['exit_spread'] or 0:>8.2f} "
           f"{r['gross_pnl']:>+10,.0f} {r['charges']:>8,.0f} {r['net_pnl']:>+10,.0f} "
-          f"{r['sim_pnl']:>+10,.0f} {r['margin']:>10,.0f} {r['exit_reason']:>14} {icon}")
+          f"{r['margin']:>10,.0f} {r['exit_reason']:>18} {icon}")
 
     total_gross += r["gross_pnl"]
     total_charges += r["charges"]
@@ -392,6 +432,16 @@ print(f"  {'ROI on margin:':30} {total_net/total_margin*100 if total_margin else
 print(f"  {'':30}")
 print(f"  {'Avg net P&L per trade:':30} ₹{total_net/len(results) if results else 0:>12,.0f}")
 print(f"  {'Avg charges per trade:':30} ₹{total_charges/len(results) if results else 0:>12,.0f}")
+
+real_trades = [r for r in results if r.get("source") == "real"]
+sim_trades = [r for r in results if r.get("source") == "sim"]
+if real_trades and sim_trades:
+    print(f"  {'':30}")
+    print(f"  {'── Source breakdown ──':30}")
+    r_net = sum(r["net_pnl"] for r in real_trades)
+    s_net = sum(r["net_pnl"] for r in sim_trades)
+    print(f"  {'Real candle trades:':30} {len(real_trades):>4}   ₹{r_net:>+10,.0f}")
+    print(f"  {'Sim (B-S) trades:':30} {len(sim_trades):>4}   ₹{s_net:>+10,.0f}")
 
 # ── Per-day breakdown ──
 days = {}
