@@ -2336,12 +2336,20 @@ async def start_listener() -> None:
                             f"Loss hit ₹{abs(net_pnl):,.0f} (cap: ₹{loss_cap:,})\n"
                             f"Auto-closed to protect capital."
                         )
-                    elif _peak_net[tid] >= _floor_for_channel(trade["channel"] or "ch1") and net_pnl <= _floor_for_channel(trade["channel"] or "ch1"):
-                        floor_val = _floor_for_channel(trade["channel"] or "ch1")
-                        log.info("FLOOR EXIT for %s: peak=₹%.0f dipped to ₹%.0f (floor=₹%d)",
-                                 trade["symbol"], _peak_net[tid], net_pnl, floor_val)
-                        _close_trade_by_id(tid, ltp, "profit_floor")
-                        _peak_net.pop(tid, None)
+                    else:
+                        step = _floor_for_channel(trade["channel"] or "ch1")
+                        peak = _peak_net[tid]
+                        if peak >= step:
+                            stepped_floor = int(peak // step) * step
+                            if net_pnl <= stepped_floor:
+                                log.info("FLOOR EXIT for %s: peak=₹%.0f floor=₹%d current=₹%.0f",
+                                         trade["symbol"], peak, stepped_floor, net_pnl)
+                                _close_trade_by_id(tid, ltp, "profit_floor")
+                                _peak_net.pop(tid, None)
+                                _notify(
+                                    f"🔒 *Profit floor hit* — {trade['symbol']}\n"
+                                    f"Peak: ₹{peak:+,.0f} | Floor: ₹{stepped_floor:,} | Exit: ₹{net_pnl:+,.0f}"
+                                )
             except Exception as exc:  # noqa: BLE001
                 _monitor_fail_count += 1
                 if _monitor_fail_count % 60 == 0:
