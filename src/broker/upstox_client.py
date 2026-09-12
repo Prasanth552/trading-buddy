@@ -67,7 +67,12 @@ def pick_upstox_option(
     for inst in instruments:
         if inst.get("segment") != segment:
             continue
-        if inst.get("name") != name:
+        inst_name = inst.get("name") or ""
+        # Index options: name == "NIFTY", "BANKNIFTY" etc.
+        # Stock options: name is full company name ("HDFC BANK LTD"),
+        # but trading_symbol starts with the short symbol ("HDFCBANK").
+        tsym = (inst.get("trading_symbol") or "").upper()
+        if inst_name != name and not tsym.startswith(name.upper() + " "):
             continue
         if inst.get("instrument_type") != option_type:
             continue

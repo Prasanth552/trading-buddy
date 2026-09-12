@@ -83,6 +83,18 @@ for inst in master:
             print(f"    {dict((k, v) for k, v in inst.items() if k in ('name','instrument_type','trading_symbol','strike_price','expiry','segment','asset_symbol'))}")
             nse_fo_count += 1
 print(f"    ... total NSE_FO instruments: {sum(1 for i in master if i.get('segment') == 'NSE_FO')}")
+
+# Debug: show all Sep/Oct 2026 expiry dates for HDFCBANK
+from src.broker.upstox_client import _expiry_to_date
+_hdfcbank_expiries = set()
+for inst in master:
+    tsym = (inst.get("trading_symbol") or "").upper()
+    if tsym.startswith("HDFCBANK") and inst.get("segment") == "NSE_FO":
+        ed = _expiry_to_date(inst.get("expiry"))
+        if ed:
+            _hdfcbank_expiries.add(ed)
+print(f"\n  HDFCBANK expiry dates in master: {sorted(_hdfcbank_expiries)}")
+print(f"  Our _monthly_expiry_for(2026-09-11) = {_monthly_expiry_for(date(2026, 9, 11))}")
 print()
 
 
