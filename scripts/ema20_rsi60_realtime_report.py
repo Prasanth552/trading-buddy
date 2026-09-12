@@ -33,68 +33,7 @@ udata = UpstoxData(access_token=token)
 uclient = UpstoxClient()
 master = uclient.load_instruments()
 
-# Debug: find ANY instruments for these stocks regardless of field values
-_debug_stocks = {"RELIANCE", "INFY", "SBIN", "TCS", "HDFCBANK", "TATAMOTORS", "BAJFINANCE"}
-_found_any = {}
-for inst in master:
-    seg = inst.get("segment", "")
-    nm = inst.get("name", "")
-    if nm in _debug_stocks and "FO" in seg:
-        itype = inst.get("instrument_type", "?")
-        k = f"{nm}|{seg}|{itype}"
-        if k not in _found_any:
-            _found_any[k] = inst
-# Also search by trading_symbol containing stock name
-_found_tsym = {}
-for inst in master:
-    tsym = (inst.get("trading_symbol") or "").upper()
-    seg = inst.get("segment", "")
-    if "FO" in seg:
-        for stk in _debug_stocks:
-            if stk in tsym and stk not in _found_tsym:
-                _found_tsym[stk] = inst
-                break
-
-print("  MASTER DEBUG — by name field:")
-if _found_any:
-    for k, inst in sorted(_found_any.items()):
-        print(f"    {k:40} strike={inst.get('strike_price')} "
-              f"tsym={inst.get('trading_symbol','')[:35]} "
-              f"expiry={str(inst.get('expiry',''))[:10]}")
-else:
-    print("    NONE found by name field!")
-
-print("\n  MASTER DEBUG — by trading_symbol containing stock name:")
-if _found_tsym:
-    for stk, inst in sorted(_found_tsym.items()):
-        print(f"    {stk:15} seg={inst.get('segment')} name={inst.get('name')} "
-              f"itype={inst.get('instrument_type')} "
-              f"tsym={inst.get('trading_symbol','')[:35]} "
-              f"strike={inst.get('strike_price')} expiry={str(inst.get('expiry',''))[:10]}")
-else:
-    print("    NONE found by trading_symbol!")
-
-# Dump raw sample of first few NSE_FO instruments
-print("\n  MASTER DEBUG — first 3 NSE_FO instruments (raw keys):")
-nse_fo_count = 0
-for inst in master:
-    if inst.get("segment") == "NSE_FO":
-        if nse_fo_count < 3:
-            print(f"    {dict((k, v) for k, v in inst.items() if k in ('name','instrument_type','trading_symbol','strike_price','expiry','segment','asset_symbol'))}")
-            nse_fo_count += 1
-print(f"    ... total NSE_FO instruments: {sum(1 for i in master if i.get('segment') == 'NSE_FO')}")
-
-# Debug: show all Sep/Oct 2026 expiry dates for HDFCBANK
-from src.broker.upstox_client import _expiry_to_date
-_hdfcbank_expiries = set()
-for inst in master:
-    tsym = (inst.get("trading_symbol") or "").upper()
-    if tsym.startswith("HDFCBANK") and inst.get("segment") == "NSE_FO":
-        ed = _expiry_to_date(inst.get("expiry"))
-        if ed:
-            _hdfcbank_expiries.add(ed)
-print(f"\n  HDFCBANK expiry dates in master: {sorted(_hdfcbank_expiries)}")
-print(f"  Our _monthly_expiry_for(2026-09-11) = {_monthly_expiry_for(date(2026, 9, 11))}")
+print(f"  Loaded {len(master)} instruments from Upstox master")
 print()
 
 
@@ -127,58 +66,46 @@ def real_charges(sell_prem, buy_prem, lot_size, lots, exit_sell=None, exit_buy=N
     return round(charges, 2)
 
 
+def _find_nearest_expiry(stock, opt_type, target_expiry):
+    """Find the nearest actual expiry in the master for a stock option."""
+    from src.broker.upstox_client import _expiry_to_date
+    name_upper = stock.upper()
+    expiries = set()
+    for inst in master:
+        if inst.get("segment") != "NSE_FO":
+            continue
+        tsym = (inst.get("trading_symbol") or "").upper()
+        if not tsym.startswith(name_upper + " "):
+            continue
+        if inst.get("instrument_type") != opt_type:
+            continue
+        ed = _expiry_to_date(inst.get("expiry"))
+        if ed:
+            expiries.add(ed)
+    if not expiries:
+        return target_expiry
+    # Find closest expiry to our target (within 7 days)
+    best = min(expiries, key=lambda e: abs((e - target_expiry).days))
+    if abs((best - target_expiry).days) <= 7:
+        return best
+    return target_expiry
+
+
 def resolve_option(stock, expiry, strike, opt_type):
-    """Find instrument in master."""
+    """Find instrument in master, with expiry fuzzy-matching for stocks."""
     spec = config.UPSTOX_OPTION_SEGMENTS.get(f"NSE:{stock}")
     if not spec:
         return None
+    # Try exact match first
     result = pick_upstox_option(master, spec["name"], expiry, strike,
                                 opt_type, spec["segment"])
-    if not result:
-        # Debug: find what expiries/strikes exist for this stock+type
-        matches = []
-        for inst in master:
-            if inst.get("segment") != spec["segment"]:
-                continue
-            if inst.get("name") != spec["name"]:
-                continue
-            if inst.get("instrument_type") != opt_type:
-                continue
-            s = float(inst.get("strike_price", -1))
-            if abs(s - strike) < 0.01:
-                matches.append(inst)
-        if matches:
-            exps = set(str(m.get("expiry", "?"))[:10] for m in matches[:5])
-            print(f"\n    DEBUG: {stock} {opt_type} {strike} found at expiries: {exps} (wanted {expiry})")
-        else:
-            # Check what strikes exist near this one for same expiry
-            near = []
-            for inst in master:
-                if inst.get("segment") != spec["segment"]:
-                    continue
-                if inst.get("name") != spec["name"]:
-                    continue
-                if inst.get("instrument_type") != opt_type:
-                    continue
-                exp_str = str(inst.get("expiry", ""))[:10]
-                if exp_str == expiry.isoformat():
-                    s = float(inst.get("strike_price", -1))
-                    if abs(s - strike) <= 100:
-                        near.append(s)
-            if near:
-                print(f"\n    DEBUG: {stock} {opt_type} expiry={expiry} nearby strikes: {sorted(near)[:10]} (wanted {strike})")
-            else:
-                # Check if any options exist for this stock at all
-                any_opts = [inst for inst in master
-                           if inst.get("name") == spec["name"]
-                           and inst.get("segment") == spec["segment"]
-                           and inst.get("instrument_type") == opt_type]
-                if any_opts:
-                    sample_exp = set(str(m.get("expiry", "?"))[:10] for m in any_opts[:20])
-                    sample_strikes = sorted(set(float(m.get("strike_price", 0)) for m in any_opts[:20]))
-                    print(f"\n    DEBUG: {stock} {opt_type} has {len(any_opts)} instruments. Sample expiries: {list(sample_exp)[:5]}, strikes: {sample_strikes[:5]}")
-                else:
-                    print(f"\n    DEBUG: {stock} {opt_type} — NO instruments found in master at all for segment={spec['segment']} name={spec['name']}")
+    if result:
+        return result
+    # Try with nearest actual expiry from master
+    real_expiry = _find_nearest_expiry(stock, opt_type, expiry)
+    if real_expiry != expiry:
+        result = pick_upstox_option(master, spec["name"], real_expiry, strike,
+                                    opt_type, spec["segment"])
     return result
 
 
@@ -286,12 +213,16 @@ for r in rows:
     lot_size = stk["lot_size"]
     opt_type = "PE" if direction == "bullish" else "CE"
 
+    # Find real expiry from master (NSE moved stock F&O from Thu to Tue)
+    real_expiry = _find_nearest_expiry(stock, opt_type, expiry)
+    exp_note = f" → {real_expiry}" if real_expiry != expiry else ""
+
     print(f"  {stock:12} {direction:8} {opt_type} {sell_strike:.0f}/{buy_strike:.0f} "
-          f"(entry={entry_date_str}, expiry={expiry})...", end=" ", flush=True)
+          f"(entry={entry_date_str}, expiry={expiry}{exp_note})...", end=" ", flush=True)
 
     # Resolve real instruments
-    sell_inst = resolve_option(stock, expiry, sell_strike, opt_type)
-    buy_inst = resolve_option(stock, expiry, buy_strike, opt_type)
+    sell_inst = resolve_option(stock, real_expiry, sell_strike, opt_type)
+    buy_inst = resolve_option(stock, real_expiry, buy_strike, opt_type)
 
     if not sell_inst or not buy_inst:
         print(f"SKIP (instrument not found)")
