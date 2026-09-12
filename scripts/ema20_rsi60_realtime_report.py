@@ -24,7 +24,7 @@ from src.strategy.stock_runner import (
 )
 
 IST = ZoneInfo("Asia/Kolkata")
-LOTS = 2
+LOTS = 1
 STRATEGY = "ema20_rsi60"
 PARAMS = STRATEGIES[STRATEGY]
 
@@ -181,13 +181,16 @@ trade_dates = sorted(set(dict(r)["date"] for r in rows))
 last_n_dates = trade_dates[-days_back:] if len(trade_dates) >= days_back else trade_dates
 rows = [r for r in rows if dict(r)["date"] in last_n_dates]
 
+CAPITAL = 100_000  # ₹1 lakh capital limit
+
 print(f"\n{'#'*120}")
-print(f"  ema20_rsi60 REAL-PREMIUM REPORT — 2 lots × last {len(last_n_dates)} trading days")
+print(f"  ema20_rsi60 REAL-PREMIUM REPORT — {LOTS} lot(s) × last {len(last_n_dates)} trading days (capital: ₹{CAPITAL:,.0f})")
 print(f"  Dates: {last_n_dates[0] if last_n_dates else '?'} to {last_n_dates[-1] if last_n_dates else '?'}")
 print(f"{'#'*120}")
 print(f"  Found {len(rows)} signals\n")
 
 results = []
+daily_margin_used = {}  # track margin used per day
 
 for r in rows:
     r = dict(r)
@@ -304,6 +307,13 @@ for r in rows:
     max_loss = (strike_width * qty) - (real_credit * qty)
     margin_est = max_loss  # approximate margin for credit spread
 
+    # Capital limit: skip if adding this trade exceeds CAPITAL for the day
+    day_margin_so_far = daily_margin_used.get(entry_date_str, 0)
+    if day_margin_so_far + margin_est > CAPITAL:
+        print(f"SKIP (capital limit: ₹{day_margin_so_far:,.0f} + ₹{margin_est:,.0f} > ₹{CAPITAL:,.0f})")
+        continue
+    daily_margin_used[entry_date_str] = day_margin_so_far + margin_est
+
     result = {
         "stock": stock, "direction": direction, "opt_type": opt_type,
         "sell_strike": sell_strike, "buy_strike": buy_strike,
@@ -401,6 +411,28 @@ for d in sorted(days):
     dd = days[d]
     icon = "🟢" if dd["net"] > 0 else "🔴"
     print(f"  {d:>12} {dd['count']:>8} {dd['net']:>+12,.0f} {dd['charges']:>10,.0f} {dd['margin']:>12,.0f} {icon}")
+
+# ── Weekly breakdown ──
+from collections import defaultdict
+weeks = defaultdict(lambda: {"net": 0, "count": 0, "charges": 0, "margin": 0, "wins": 0, "losses": 0})
+for r in results:
+    d = date.fromisoformat(r["entry_date"])
+    iso = d.isocalendar()
+    wk = f"{iso.year}-W{iso.week:02d}"
+    weeks[wk]["net"] += r["net_pnl"]
+    weeks[wk]["count"] += 1
+    weeks[wk]["charges"] += r["charges"]
+    weeks[wk]["margin"] += r["margin"]
+    if r["net_pnl"] > 0: weeks[wk]["wins"] += 1
+    elif r["net_pnl"] < 0: weeks[wk]["losses"] += 1
+
+print(f"\n  WEEKLY:")
+print(f"  {'Week':>10} {'Trades':>8} {'W/L':>8} {'Net P&L':>12} {'Charges':>10} {'Peak Margin':>12}")
+print(f"  {'─'*66}")
+for wk in sorted(weeks):
+    w = weeks[wk]
+    icon = "🟢" if w["net"] > 0 else "🔴"
+    print(f"  {wk:>10} {w['count']:>8} {w['wins']}W/{w['losses']}L {w['net']:>+12,.0f} {w['charges']:>10,.0f} {w['margin']:>12,.0f} {icon}")
 
 print(f"\n{'#'*140}")
 print(f"  REPORT COMPLETE")
