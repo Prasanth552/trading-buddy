@@ -2280,41 +2280,6 @@ async def start_listener() -> None:
                                          trade["symbol"], ltp)
                                 _close_trade_by_id(tid, ltp, "all_tgt_hit")
                                 _peak_net.pop(tid, None)
-                        elif ch in ("oeh", "oel"):
-                            lot_key = trade["symbol"].split()[0].upper()
-                            one_lot = config.LOT_SIZES.get(lot_key, qty // 2)
-                            exit_qty = one_lot
-                            remain_qty = qty - exit_qty
-                            if remain_qty < one_lot:
-                                _close_trade_by_id(tid, ltp, "target_hit")
-                                _peak_net.pop(tid, None)
-                            else:
-                                partial_pnl = (ltp - entry) * exit_qty
-                                partial_charges = calc_charges(entry, ltp, exit_qty)["total"]
-                                partial_net = partial_pnl - partial_charges
-                                full_tgt = round(entry * OEH_TARGET_MULT if ch == "oeh" else entry * OEL_TARGET_MULT, 2)
-                                if trade["broker_key"]:
-                                    try:
-                                        from src.broker.upstox_client import UpstoxClient
-                                        _uc = UpstoxClient()
-                                        _uc.place_order(trade["broker_key"], exit_qty, "SELL",
-                                                        order_type="MARKET", tag="partial-exit")
-                                    except Exception as _pe:
-                                        log.error("Partial exit order failed: %s", _pe)
-                                with db.get_conn() as conn:
-                                    conn.execute(
-                                        "UPDATE trades SET qty=?, stop_price=?, target_price=? WHERE id=?",
-                                        (remain_qty, entry, full_tgt, tid))
-                                log.info("[%s] PARTIAL EXIT %s: sold %d @ %.2f (net ₹%.0f), "
-                                         "remaining %d, SL→%.2f TGT→%.2f",
-                                         ch.upper(), trade["symbol"], exit_qty, ltp,
-                                         partial_net, remain_qty, entry, full_tgt)
-                                _notify(
-                                    f"🎯 *[{ch.upper()}] Partial profit booked* — {trade['symbol']}\n"
-                                    f"Sold {exit_qty} @ {ltp:.2f} | Net: ₹{partial_net:+,.0f}\n"
-                                    f"Remaining: {remain_qty} | SL → {entry:.2f} (cost) | TGT → {full_tgt:.2f} (2x)\n"
-                                    f"Risk-free runner — profit locked!")
-                                _peak_net.pop(tid, None)
                         else:
                             log.info("CHANNEL TARGET hit for %s: LTP=%.2f >= target=%.2f net=₹%.0f",
                                      trade["symbol"], ltp, trade["target_price"], net_pnl)
