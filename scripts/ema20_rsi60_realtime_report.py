@@ -68,8 +68,54 @@ def resolve_option(stock, expiry, strike, opt_type):
     spec = config.UPSTOX_OPTION_SEGMENTS.get(f"NSE:{stock}")
     if not spec:
         return None
-    return pick_upstox_option(master, spec["name"], expiry, strike,
-                              opt_type, spec["segment"])
+    result = pick_upstox_option(master, spec["name"], expiry, strike,
+                                opt_type, spec["segment"])
+    if not result:
+        # Debug: find what expiries/strikes exist for this stock+type
+        matches = []
+        for inst in master:
+            if inst.get("segment") != spec["segment"]:
+                continue
+            if inst.get("name") != spec["name"]:
+                continue
+            if inst.get("instrument_type") != opt_type:
+                continue
+            s = float(inst.get("strike_price", -1))
+            if abs(s - strike) < 0.01:
+                matches.append(inst)
+        if matches:
+            exps = set(str(m.get("expiry", "?"))[:10] for m in matches[:5])
+            print(f"\n    DEBUG: {stock} {opt_type} {strike} found at expiries: {exps} (wanted {expiry})")
+        else:
+            # Check what strikes exist near this one for same expiry
+            near = []
+            for inst in master:
+                if inst.get("segment") != spec["segment"]:
+                    continue
+                if inst.get("name") != spec["name"]:
+                    continue
+                if inst.get("instrument_type") != opt_type:
+                    continue
+                exp_str = str(inst.get("expiry", ""))[:10]
+                if exp_str == expiry.isoformat():
+                    s = float(inst.get("strike_price", -1))
+                    if abs(s - strike) <= 100:
+                        near.append(s)
+            if near:
+                print(f"\n    DEBUG: {stock} {opt_type} expiry={expiry} nearby strikes: {sorted(near)[:10]} (wanted {strike})")
+            else:
+                # Check if any options exist for this stock at all
+                any_opts = [inst for inst in master
+                           if inst.get("name") == spec["name"]
+                           and inst.get("segment") == spec["segment"]
+                           and inst.get("instrument_type") == opt_type]
+                if any_opts:
+                    sample_exp = set(str(m.get("expiry", "?"))[:10] for m in any_opts[:20])
+                    sample_strikes = sorted(set(float(m.get("strike_price", 0)) for m in any_opts[:20]))
+                    print(f"\n    DEBUG: {stock} {opt_type} has {len(any_opts)} instruments. Sample expiries: {list(sample_exp)[:5]}, strikes: {sample_strikes[:5]}")
+                else:
+                    print(f"\n    DEBUG: {stock} {opt_type} — NO instruments found in master at all for segment={spec['segment']} name={spec['name']}")
+    return result
 
 
 def get_entry_candles(instrument_key, trade_date):
