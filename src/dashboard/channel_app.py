@@ -1528,10 +1528,10 @@ async function loadStrat(){
 
 function renderStrat(data){
   const {sum,today}=data;
-  if(!sum||sum.error){$('stratCards').innerHTML='<div class=empty>No strategy data yet. Run backfill first.</div>';return}
+  if(!sum||sum.error){$('stratCards').innerHTML='<div class=empty>No strategy data yet. Run backfill first.</div>';$('stratToday').innerHTML='';$('stratLog').innerHTML='';$('livePositions').innerHTML='';return}
   const order=['kitchen_sink','vf_920_sl30','entry_945_sl30'];
   const strats=order.filter(s=>sum[s]);
-  if(!strats.length){$('stratCards').innerHTML='<div class=empty>No strategy data</div>';return}
+  if(!strats.length){$('stratCards').innerHTML='<div class=empty>No strategy data</div>';$('stratToday').innerHTML='';$('stratLog').innerHTML='';$('livePositions').innerHTML='';return}
 
   // Strategy pills
   $('stratPills').innerHTML=strats.map(s=>'<div class="fpill '+(_stratFocus===s?'a':'')+'" onclick="focusStrat(\''+s+'\')">'+s.replace(/_/g,' ')+'</div>').join('');
@@ -1747,10 +1747,10 @@ async function loadStocks(){
 
 function renderStocks(data){
   const {sum,today,stocks}=data;
-  if(!sum||sum.error||!Object.keys(sum).length){$('stockCards').innerHTML='<div class=empty>No stock strategy data yet. Run backfill first.</div>';return}
+  if(!sum||sum.error||!Object.keys(sum).length){$('stockCards').innerHTML='<div class=empty>No stock strategy data yet. Run backfill first.</div>';$('stockToday').innerHTML='';$('stockLog').innerHTML='';$('stockBreakdown').innerHTML='';return}
   const order=['ema20_rsi50','ema20_rsi60','ema20_rsi50_tight','ema20_rsi50_wide'];
   const strats=order.filter(s=>sum[s]);
-  if(!strats.length){$('stockCards').innerHTML='<div class=empty>No data</div>';return}
+  if(!strats.length){$('stockCards').innerHTML='<div class=empty>No data</div>';$('stockToday').innerHTML='';$('stockLog').innerHTML='';$('stockBreakdown').innerHTML='';return}
 
   $('stockPills').innerHTML=strats.map(s=>'<div class="fpill '+(_stocksFocus===s?'a':'')+'" onclick="focusStock(\''+s+'\')">'+s.replace(/_/g,' ')+'</div>').join('');
 
