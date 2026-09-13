@@ -1094,19 +1094,19 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
 </div>
 
 <!-- Strategy equity curves -->
-<div class=sec>
+<div class=sec id=stratChartSec>
   <div class=sec-h>Equity curves</div>
   <div class=cw style="height:160px"><canvas id=stratChart></canvas></div>
 </div>
 
 <!-- Today's trades detail (interactive) -->
-<div class=sec>
+<div class=sec id=stratTodaySec>
   <div class=sec-h>Today's trades</div>
   <div id=stratToday></div>
 </div>
 
 <!-- Trade history (expandable per-day) -->
-<div class=sec>
+<div class=sec id=stratLogSec>
   <div class=sec-h>Daily log <span style="font-size:10px;color:var(--mt);font-weight:400">(tap to expand)</span></div>
   <div id=stratLog style="max-height:500px;overflow-y:auto;padding:0 2px"></div>
 </div>
@@ -1128,25 +1128,25 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
 </div>
 
 <!-- Equity curves -->
-<div class=sec>
+<div class=sec id=stockChartSec>
   <div class=sec-h>Equity Curves</div>
   <div class=cw style="height:160px"><canvas id=stockChart></canvas></div>
 </div>
 
 <!-- Per-stock breakdown -->
-<div class=sec>
+<div class=sec id=stockBreakdownSec>
   <div class=sec-h>Stock Breakdown</div>
   <div id=stockBreakdown style="max-height:350px;overflow-y:auto"></div>
 </div>
 
 <!-- Today's trades (interactive) -->
-<div class=sec>
+<div class=sec id=stockTodaySec>
   <div class=sec-h>Today's trades</div>
   <div id=stockToday></div>
 </div>
 
 <!-- Trade history (expandable per-day) -->
-<div class=sec>
+<div class=sec id=stockLogSec>
   <div class=sec-h>Daily log <span style="font-size:10px;color:var(--mt);font-weight:400">(tap to expand)</span></div>
   <div id=stockLog style="max-height:500px;overflow-y:auto;padding:0 2px"></div>
 </div>
@@ -1527,12 +1527,14 @@ async function loadStrat(){
   finally{['stratToday','stratLog','livePositions'].forEach(id=>{const el=$(id);if(el&&el.querySelector('.skel'))el.innerHTML=''})}
 }
 
+function _stratSections(show){['stratChartSec','stratTodaySec','stratLogSec','liveSection'].forEach(id=>{const e=$(id);if(e)e.style.display=show?'':'none'})}
 function renderStrat(data){
   const {sum,today}=data;
-  if(!sum||sum.error){$('stratCards').innerHTML='<div class=empty>No strategy data yet. Run backfill first.</div>';$('stratToday').innerHTML='';$('stratLog').innerHTML='';$('livePositions').innerHTML='';return}
+  if(!sum||sum.error){$('stratCards').innerHTML='<div class=empty>No strategy data yet.</div>';_stratSections(false);return}
   const order=['kitchen_sink','vf_920_sl30','entry_945_sl30'];
   const strats=order.filter(s=>sum[s]);
-  if(!strats.length){$('stratCards').innerHTML='<div class=empty>No strategy data</div>';$('stratToday').innerHTML='';$('stratLog').innerHTML='';$('livePositions').innerHTML='';return}
+  if(!strats.length){$('stratCards').innerHTML='<div class=empty>No strategy data</div>';_stratSections(false);return}
+  _stratSections(true);
 
   // Strategy pills
   $('stratPills').innerHTML=strats.map(s=>'<div class="fpill '+(_stratFocus===s?'a':'')+'" onclick="focusStrat(\''+s+'\')">'+s.replace(/_/g,' ')+'</div>').join('');
@@ -1747,12 +1749,14 @@ async function loadStocks(){
   finally{['stockToday','stockLog','stockBreakdown'].forEach(id=>{const el=$(id);if(el&&el.querySelector('.skel'))el.innerHTML=''})}
 }
 
+function _stockSections(show){['stockChartSec','stockBreakdownSec','stockTodaySec','stockLogSec'].forEach(id=>{const e=$(id);if(e)e.style.display=show?'':'none'})}
 function renderStocks(data){
   const {sum,today,stocks}=data;
-  if(!sum||sum.error||!Object.keys(sum).length){$('stockCards').innerHTML='<div class=empty>No stock strategy data yet. Run backfill first.</div>';$('stockToday').innerHTML='';$('stockLog').innerHTML='';$('stockBreakdown').innerHTML='';return}
+  if(!sum||sum.error||!Object.keys(sum).length){$('stockCards').innerHTML='<div class=empty>No stock strategy data yet.</div>';_stockSections(false);return}
   const order=['ema20_rsi50','ema20_rsi60','ema20_rsi50_tight','ema20_rsi50_wide'];
   const strats=order.filter(s=>sum[s]);
-  if(!strats.length){$('stockCards').innerHTML='<div class=empty>No data</div>';$('stockToday').innerHTML='';$('stockLog').innerHTML='';$('stockBreakdown').innerHTML='';return}
+  if(!strats.length){$('stockCards').innerHTML='<div class=empty>No data</div>';_stockSections(false);return}
+  _stockSections(true);
 
   $('stockPills').innerHTML=strats.map(s=>'<div class="fpill '+(_stocksFocus===s?'a':'')+'" onclick="focusStock(\''+s+'\')">'+s.replace(/_/g,' ')+'</div>').join('');
 
