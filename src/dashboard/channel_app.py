@@ -1523,7 +1523,8 @@ async function loadStrat(){
     _stratCache={sum,today};_stratCacheTs=Date.now();
     renderStrat(_stratCache);
     renderLive(live);
-  }catch(e){$('stratCards').innerHTML='<div class=empty>'+e+'</div>';$('stratToday').innerHTML='';$('stratLog').innerHTML='';$('livePositions').innerHTML=''}
+  }catch(e){$('stratCards').innerHTML='<div class=empty>'+e+'</div>'}
+  finally{['stratToday','stratLog','livePositions'].forEach(id=>{const el=$(id);if(el&&el.querySelector('.skel'))el.innerHTML=''})}
 }
 
 function renderStrat(data){
@@ -1742,7 +1743,8 @@ async function loadStocks(){
     for(const s of Object.keys(today||{})){if(!merged[s])merged[s]=today[s]}
     _stocksCache={sum,today:merged,stocks};_stocksCacheTs=Date.now();
     renderStocks(_stocksCache);
-  }catch(e){$('stockCards').innerHTML='<div class=empty>'+e+'</div>';$('stockToday').innerHTML='';$('stockLog').innerHTML='';$('stockBreakdown').innerHTML=''}
+  }catch(e){$('stockCards').innerHTML='<div class=empty>'+e+'</div>'}
+  finally{['stockToday','stockLog','stockBreakdown'].forEach(id=>{const el=$(id);if(el&&el.querySelector('.skel'))el.innerHTML=''})}
 }
 
 function renderStocks(data){
