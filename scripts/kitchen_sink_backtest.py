@@ -26,9 +26,17 @@ LOTS = 1
 
 days_back = 22
 force = False
+from_date = None
+to_date = None
 for arg in sys.argv[1:]:
     if arg == "--force":
         force = True
+    elif arg.startswith("--lots="):
+        LOTS = int(arg.split("=")[1])
+    elif arg.startswith("--from="):
+        from_date = date.fromisoformat(arg.split("=")[1])
+    elif arg.startswith("--to="):
+        to_date = date.fromisoformat(arg.split("=")[1])
     else:
         try:
             days_back = int(arg)
@@ -36,15 +44,16 @@ for arg in sys.argv[1:]:
             pass
 
 # Generate trading days
-end_date = date.today()
-start_date = end_date - timedelta(days=days_back + 10)
+end_date = to_date or date.today()
+start_date = from_date or (end_date - timedelta(days=days_back + 10))
 trading_days = []
 d = start_date
 while d <= end_date:
     if d.weekday() < 5:
         trading_days.append(d)
     d += timedelta(days=1)
-trading_days = trading_days[-days_back:] if len(trading_days) >= days_back else trading_days
+if not from_date:
+    trading_days = trading_days[-days_back:] if len(trading_days) >= days_back else trading_days
 
 init_strategy_db()
 
