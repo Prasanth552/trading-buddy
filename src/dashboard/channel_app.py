@@ -1480,8 +1480,9 @@ function renderLive(data){
       const pc=pPnl>=0?'pos':'neg';
       const ceNow=p.ce_current||p.ce_exit||p.ce_entry;
       const peNow=p.pe_current||p.pe_exit||p.pe_entry;
+      const srcTag=p.premium_source==='real'?'<span style="font-size:7px;padding:0 3px;border-radius:2px;background:#22c55e22;color:#22c55e;font-weight:600">R</span>':'<span style="font-size:7px;padding:0 3px;border-radius:2px;background:#f59e0b22;color:#f59e0b;font-weight:600">S</span>';
       html+='<div class=live-pos>'+
-        '<span class=live-idx>'+p.idx+' <span style="font-size:8px;color:var(--mt)">DTE'+p.dte+'</span></span>'+
+        '<span class=live-idx>'+p.idx+' <span style="font-size:8px;color:var(--mt)">DTE'+p.dte+'</span> '+srcTag+'</span>'+
         '<span class=live-premiums>CE:'+p.ce_entry?.toFixed(1)+'→'+(ceNow||0).toFixed(1)+' PE:'+p.pe_entry?.toFixed(1)+'→'+(peNow||0).toFixed(1)+'</span>'+
         '<span class="live-pos-pnl '+pc+'">'+inr(pPnl)+'</span>'+
       '</div>';
@@ -1621,13 +1622,14 @@ function _exitTag(reason){
   return '<span class="trd-tag time">'+reason.slice(0,10).toUpperCase()+'</span>';
 }
 
+function _srcBadge(s){return s==='real'?'<span style="font-size:8px;padding:1px 4px;border-radius:3px;background:#22c55e22;color:#22c55e;font-weight:600;margin-left:4px">REAL</span>':'<span style="font-size:8px;padding:1px 4px;border-radius:3px;background:#f59e0b22;color:#f59e0b;font-weight:600;margin-left:4px">B-S</span>'}
 function _stratTradeCard(r){
   if(r.skipped)return '<div class=trd-card><div class=trd-top><span class=trd-sym>'+r.idx+'</span><span class="trd-tag skip">SKIPPED</span></div><div class=trd-k>'+(r.skip_reason||'no data')+'</div></div>';
   const pnlCls=(r.net_pnl||0)>=0?'pos':'neg';
   const entryP=(r.ce_entry||0)+(r.pe_entry||0);
   const exitP=(r.ce_exit||0)+(r.pe_exit||0);
   return '<div class=trd-card>'+
-    '<div class=trd-top><span class=trd-sym>'+r.idx+' <span style="font-weight:400;font-size:10px;color:var(--mt)">ATM '+Math.round(r.atm_strike||0)+'</span></span>'+_exitTag(r.exit_reason)+'</div>'+
+    '<div class=trd-top><span class=trd-sym>'+r.idx+' <span style="font-weight:400;font-size:10px;color:var(--mt)">ATM '+Math.round(r.atm_strike||0)+'</span>'+_srcBadge(r.premium_source)+'</span>'+_exitTag(r.exit_reason)+'</div>'+
     '<div class=trd-grid>'+
       '<div class=trd-row><span class=trd-k>Entry</span><span class=trd-v>'+(r.entry_time||'-')+'</span></div>'+
       '<div class=trd-row><span class=trd-k>Exit</span><span class=trd-v>'+(r.exit_time||'-')+'</span></div>'+
