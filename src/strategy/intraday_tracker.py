@@ -537,6 +537,8 @@ def run_trading_day(ref_date: date, lots: int = 1):
     """Full intraday schedule for one trading day."""
     init_live_db()
     invalidate_option_master()
+    from src.strategy.stock_runner import invalidate_stock_option_master
+    invalidate_stock_option_master()
     from src.strategy.live_runner import init_strategy_db
     init_strategy_db()
 

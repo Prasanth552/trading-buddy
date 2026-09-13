@@ -115,6 +115,7 @@ CREATE TABLE IF NOT EXISTS stock_strategy_results (
     skipped     INTEGER DEFAULT 0,
     skip_reason TEXT,
     expiry_date TEXT,
+    premium_source TEXT DEFAULT 'bs',
     UNIQUE(date, strategy, stock)
 )
 """
@@ -127,7 +128,95 @@ def init_stock_strategy_db():
         return
     with db.get_conn() as conn:
         conn.executescript(STOCK_STRATEGY_SCHEMA)
+        try:
+            conn.execute("ALTER TABLE stock_strategy_results ADD COLUMN premium_source TEXT DEFAULT 'bs'")
+        except Exception:
+            pass
     _schema_done = True
+
+
+# ---------------------------------------------------------------------------
+# Real option LTP (Upstox)
+# ---------------------------------------------------------------------------
+import logging as _logging
+_log = _logging.getLogger("strategy.stock_runner")
+
+_stock_option_cache: dict | None = None
+
+
+def _build_stock_option_master():
+    """Build (stock, expiry, strike, opt_type) -> instrument_key map."""
+    global _stock_option_cache
+    if _stock_option_cache is not None:
+        return _stock_option_cache
+
+    from src.broker.upstox_client import UpstoxClient, _expiry_to_date
+    uc = UpstoxClient()
+    master = uc.load_instruments()
+
+    opts: dict[tuple, str] = {}
+    for inst in master:
+        seg = inst.get("segment", "")
+        if seg != "NSE_FO":
+            continue
+        itype = inst.get("instrument_type", "")
+        if itype not in ("CE", "PE"):
+            continue
+        tsym = (inst.get("trading_symbol") or "").upper()
+        for stock_name in STOCKS:
+            if tsym.startswith(stock_name + " "):
+                strike = float(inst.get("strike_price", 0))
+                ed = _expiry_to_date(inst.get("expiry"))
+                if ed and strike > 0:
+                    opts[(stock_name, ed, strike, itype)] = inst.get("instrument_key")
+                break
+    _stock_option_cache = opts
+    _log.info("Stock option master built: %d entries", len(opts))
+    return opts
+
+
+def _stock_next_expiry(stock_name: str, ref_date: date) -> date | None:
+    """Find nearest expiry >= ref_date for a stock."""
+    master = _build_stock_option_master()
+    available = sorted(
+        {k[1] for k in master if k[0] == stock_name and k[1] >= ref_date}
+    )
+    return available[0] if available else None
+
+
+def fetch_stock_option_ltp(uclient, stock_name: str, expiry: date,
+                           sell_strike: float, buy_strike: float,
+                           opt_type: str) -> dict | None:
+    """Fetch real LTP for sell + buy option legs.
+
+    Returns {"sell": float, "buy": float, "sell_key": str, "buy_key": str}
+    or None if resolution/fetch fails.
+    """
+    master = _build_stock_option_master()
+    sell_key = master.get((stock_name, expiry, sell_strike, opt_type))
+    buy_key = master.get((stock_name, expiry, buy_strike, opt_type))
+    if not sell_key or not buy_key:
+        _log.debug("Option keys not found: %s %s/%s %s exp=%s",
+                   stock_name, sell_strike, buy_strike, opt_type, expiry)
+        return None
+
+    try:
+        ltp_data = uclient.ltp_by_key([sell_key, buy_key])
+        sell_ltp = ltp_data.get(sell_key)
+        buy_ltp = ltp_data.get(buy_key)
+        if sell_ltp is None or buy_ltp is None:
+            return None
+        return {"sell": sell_ltp, "buy": buy_ltp,
+                "sell_key": sell_key, "buy_key": buy_key}
+    except Exception as e:
+        _log.warning("Stock option LTP fetch failed: %s", e)
+        return None
+
+
+def invalidate_stock_option_master():
+    """Clear cached stock option master (call on new trading day)."""
+    global _stock_option_cache
+    _stock_option_cache = None
 
 
 # ---------------------------------------------------------------------------
@@ -259,7 +348,7 @@ def calc_charges(premium, lot_size, num_legs=4):
 # ---------------------------------------------------------------------------
 def run_bull_put_spread(daily_candles, stock_name, entry_date, expiry_date, *,
                         lots=1, profit_target_pct=0.50, stop_loss_mult=2.0,
-                        close_dte=5):
+                        close_dte=5, uclient=None):
     stk = STOCKS[stock_name]
     iv, step = stk["iv_annual"], stk["strike_step"]
     lot_size = stk["lot_size"] * lots
@@ -279,8 +368,20 @@ def run_bull_put_spread(daily_candles, stock_name, entry_date, expiry_date, *,
     if buy_strike <= 0:
         return {"skipped": True, "skip_reason": "invalid_strikes", "net_pnl": 0}
 
-    sell_prem = est_put_prem(spot, sell_strike, dte, iv)
-    buy_prem = est_put_prem(spot, buy_strike, dte, iv)
+    # Try real option LTP, fall back to B-S
+    prem_source = "bs"
+    real = None
+    if uclient:
+        real = fetch_stock_option_ltp(uclient, stock_name, expiry_date,
+                                      sell_strike, buy_strike, "PE")
+    if real:
+        sell_prem, buy_prem = real["sell"], real["buy"]
+        prem_source = "real"
+        _log.info("  REAL LTP %s bull put: sell=%.2f buy=%.2f", stock_name, sell_prem, buy_prem)
+    else:
+        sell_prem = est_put_prem(spot, sell_strike, dte, iv)
+        buy_prem = est_put_prem(spot, buy_strike, dte, iv)
+
     net_credit = sell_prem - buy_prem
     if net_credit <= 0.5:
         return {"skipped": True, "skip_reason": "no_credit", "net_pnl": 0}
@@ -300,7 +401,16 @@ def run_bull_put_spread(daily_candles, stock_name, entry_date, expiry_date, *,
         dd = date.fromisoformat(dc["date"][:10])
         ds = dc["close"]
         rem = (expiry_date - dd).days
-        csv = est_put_prem(ds, sell_strike, rem, iv) - est_put_prem(ds, buy_strike, rem, iv)
+
+        # Try real LTP for exit monitoring too
+        real_exit = None
+        if uclient:
+            real_exit = fetch_stock_option_ltp(uclient, stock_name, expiry_date,
+                                              sell_strike, buy_strike, "PE")
+        if real_exit:
+            csv = real_exit["sell"] - real_exit["buy"]
+        else:
+            csv = est_put_prem(ds, sell_strike, rem, iv) - est_put_prem(ds, buy_strike, rem, iv)
         upnl = net_credit - csv
 
         if upnl >= profit_target:
@@ -326,7 +436,8 @@ def run_bull_put_spread(daily_candles, stock_name, entry_date, expiry_date, *,
         "entry_date": entry_date.isoformat(), "exit_date": exit_date.isoformat(),
         "exit_reason": exit_reason, "spot_entry": round(spot, 2),
         "sell_strike": sell_strike, "buy_strike": buy_strike,
-        "net_credit": round(net_credit, 2),
+        "net_credit": round(net_credit, 2), "sell_premium": round(sell_prem, 2),
+        "buy_premium": round(buy_prem, 2), "premium_source": prem_source,
         "exit_spread_val": round(exit_spread_val, 2) if exit_spread_val else 0,
         "gross_pnl": round(exit_pnl, 2), "charges": charges,
         "net_pnl": round(exit_pnl - charges, 2),
@@ -336,7 +447,7 @@ def run_bull_put_spread(daily_candles, stock_name, entry_date, expiry_date, *,
 
 def run_bear_call_spread(daily_candles, stock_name, entry_date, expiry_date, *,
                          lots=1, profit_target_pct=0.50, stop_loss_mult=2.0,
-                         close_dte=5):
+                         close_dte=5, uclient=None):
     stk = STOCKS[stock_name]
     iv, step = stk["iv_annual"], stk["strike_step"]
     lot_size = stk["lot_size"] * lots
@@ -354,8 +465,20 @@ def run_bear_call_spread(daily_candles, stock_name, entry_date, expiry_date, *,
     sell_strike = round_strike(spot * 1.02, step)
     buy_strike = sell_strike + 2 * step
 
-    sell_prem = est_call_prem(spot, sell_strike, dte, iv)
-    buy_prem = est_call_prem(spot, buy_strike, dte, iv)
+    # Try real option LTP, fall back to B-S
+    prem_source = "bs"
+    real = None
+    if uclient:
+        real = fetch_stock_option_ltp(uclient, stock_name, expiry_date,
+                                      sell_strike, buy_strike, "CE")
+    if real:
+        sell_prem, buy_prem = real["sell"], real["buy"]
+        prem_source = "real"
+        _log.info("  REAL LTP %s bear call: sell=%.2f buy=%.2f", stock_name, sell_prem, buy_prem)
+    else:
+        sell_prem = est_call_prem(spot, sell_strike, dte, iv)
+        buy_prem = est_call_prem(spot, buy_strike, dte, iv)
+
     net_credit = sell_prem - buy_prem
     if net_credit <= 0.5:
         return {"skipped": True, "skip_reason": "no_credit", "net_pnl": 0}
@@ -375,7 +498,16 @@ def run_bear_call_spread(daily_candles, stock_name, entry_date, expiry_date, *,
         dd = date.fromisoformat(dc["date"][:10])
         ds = dc["close"]
         rem = (expiry_date - dd).days
-        csv = est_call_prem(ds, sell_strike, rem, iv) - est_call_prem(ds, buy_strike, rem, iv)
+
+        # Try real LTP for exit monitoring too
+        real_exit = None
+        if uclient:
+            real_exit = fetch_stock_option_ltp(uclient, stock_name, expiry_date,
+                                              sell_strike, buy_strike, "CE")
+        if real_exit:
+            csv = real_exit["sell"] - real_exit["buy"]
+        else:
+            csv = est_call_prem(ds, sell_strike, rem, iv) - est_call_prem(ds, buy_strike, rem, iv)
         upnl = net_credit - csv
 
         if upnl >= profit_target:
@@ -401,7 +533,8 @@ def run_bear_call_spread(daily_candles, stock_name, entry_date, expiry_date, *,
         "entry_date": entry_date.isoformat(), "exit_date": exit_date.isoformat(),
         "exit_reason": exit_reason, "spot_entry": round(spot, 2),
         "sell_strike": sell_strike, "buy_strike": buy_strike,
-        "net_credit": round(net_credit, 2),
+        "net_credit": round(net_credit, 2), "sell_premium": round(sell_prem, 2),
+        "buy_premium": round(buy_prem, 2), "premium_source": prem_source,
         "exit_spread_val": round(exit_spread_val, 2) if exit_spread_val else 0,
         "gross_pnl": round(exit_pnl, 2), "charges": charges,
         "net_pnl": round(exit_pnl - charges, 2),
@@ -495,12 +628,14 @@ def run_day(ref_date: date, lots: int = 1, *, force: bool = False) -> dict:
                             r = run_bull_put_spread(daily, stock_name, ref_date, sig["expiry"],
                                                     lots=lots, profit_target_pct=params["profit_target_pct"],
                                                     stop_loss_mult=params["stop_loss_mult"],
-                                                    close_dte=params["close_dte"])
+                                                    close_dte=params["close_dte"],
+                                                    uclient=uclient)
                         else:
                             r = run_bear_call_spread(daily, stock_name, ref_date, sig["expiry"],
                                                      lots=lots, profit_target_pct=params["profit_target_pct"],
                                                      stop_loss_mult=params["stop_loss_mult"],
-                                                     close_dte=params["close_dte"])
+                                                     close_dte=params["close_dte"],
+                                                     uclient=uclient)
                         r["rsi"] = sig["rsi"]
                         r["ema"] = sig["ema"]
                         r["expiry_date"] = sig["expiry"].isoformat()
@@ -514,8 +649,8 @@ def run_day(ref_date: date, lots: int = 1, *, force: bool = False) -> dict:
                         (date, strategy, stock, direction, lots, entry_date, exit_date,
                          exit_reason, spot_entry, sell_strike, buy_strike, net_credit,
                          exit_spread_val, gross_pnl, charges, net_pnl, dte_at_entry,
-                         rsi, ema, skipped, skip_reason, expiry_date)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                         rsi, ema, skipped, skip_reason, expiry_date, premium_source)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                         (ref_date.isoformat(), strat_name, stock_name,
                          r.get("direction"), lots,
                      r.get("entry_date"), r.get("exit_date"), r.get("exit_reason"),
@@ -524,7 +659,7 @@ def run_day(ref_date: date, lots: int = 1, *, force: bool = False) -> dict:
                      r.get("gross_pnl"), r.get("charges"), r.get("net_pnl", 0),
                      r.get("dte_at_entry"), r.get("rsi"), r.get("ema"),
                      0, None,
-                     r.get("expiry_date")))
+                     r.get("expiry_date"), r.get("premium_source", "bs")))
 
         results[strat_name] = {"day_pnl": round(strat_pnl, 2), "stocks": strat_trades}
     return results
