@@ -170,6 +170,19 @@ class UpstoxData:
                              "instrument_token": k}
         return out
 
+    def ltp_by_key(self, instrument_keys: list[str]) -> dict[str, float]:
+        """Fetch LTP for instrument keys directly. Returns {key: last_price}."""
+        if not instrument_keys:
+            return {}
+        data = self._get("/v2/market-quote/ltp",
+                         params={"instrument_key": ",".join(instrument_keys)}).get("data", {})
+        out: dict[str, float] = {}
+        for item in data.values():
+            k = item.get("instrument_token")
+            if k in instrument_keys:
+                out[k] = item.get("last_price", 0.0)
+        return out
+
     # --- historical candles (kite-shaped) -------------------------------------
     def historical_data(self, instrument_token: Any, from_dt: datetime,
                         to_dt: datetime, interval: str, **_: Any) -> list[dict[str, Any]]:

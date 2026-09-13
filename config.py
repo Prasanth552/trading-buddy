@@ -332,7 +332,7 @@ UPSTOX_INDEX_KEYS: dict[str, str] = {
 }
 # Our timeframe labels -> Upstox v3 historical (unit, interval).
 UPSTOX_INTERVALS: dict[str, tuple] = {
-    "15minute": ("minutes", 15), "5minute": ("minutes", 5), "day": ("days", 1),
+    "1minute": ("minutes", 1), "15minute": ("minutes", 15), "5minute": ("minutes", 5), "day": ("days", 1),
 }
 
 # Upstox API (orders only; data stays on Kite). Sandbox uses a separate 30-day

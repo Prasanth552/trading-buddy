@@ -84,6 +84,9 @@ CREATE TABLE IF NOT EXISTS strategy_live (
     pe_sl       REAL,
     trail_best  REAL DEFAULT 0,
     trail_active INTEGER DEFAULT 0,
+    ce_inst_key TEXT,
+    pe_inst_key TEXT,
+    premium_source TEXT DEFAULT 'bs',
     updated_at  TEXT,
     UNIQUE(date, strategy, idx)
 );
@@ -94,6 +97,11 @@ CREATE INDEX IF NOT EXISTS idx_sl_status ON strategy_live(status);
 def init_live_db():
     with db.get_conn() as conn:
         conn.executescript(LIVE_SCHEMA)
+        for col in ("ce_inst_key TEXT", "pe_inst_key TEXT", "premium_source TEXT DEFAULT 'bs'"):
+            try:
+                conn.execute(f"ALTER TABLE strategy_live ADD COLUMN {col}")
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -104,6 +112,7 @@ from src.strategy.live_runner import (
     est_prem, round_strike, calc_charges, fetch_candles,
     _days_to_expiry, _dte_fraction, _first_candle_range,
     _candle_hm, _candle_time_str,
+    fetch_option_ltp, invalidate_option_master,
 )
 from src.broker.upstox_data import UpstoxData
 
@@ -154,10 +163,22 @@ def enter_positions(strategy_name: str, ref_date: date, lots: int = 1):
         spot = entry_candle["close"]
         atm = round_strike(spot, step)
 
-        mins = (now_ist().hour - 9) * 60 + (now_ist().minute - 15)
-        T_entry = _dte_fraction(ref_date, idx_name, mins)
-        ce_entry = est_prem(spot, atm, "CE", T_entry, iv)
-        pe_entry = est_prem(spot, atm, "PE", T_entry, iv)
+        # Try real option LTP first, fall back to B-S
+        real_ltp = fetch_option_ltp(uclient, idx_name, ref_date, atm)
+        if real_ltp:
+            ce_entry = real_ltp["ce"]
+            pe_entry = real_ltp["pe"]
+            ce_inst_key = real_ltp["ce_key"]
+            pe_inst_key = real_ltp["pe_key"]
+            log.info("  REAL LTP %s: CE=%.1f PE=%.1f (keys: %s, %s)",
+                     idx_name, ce_entry, pe_entry, ce_inst_key, pe_inst_key)
+        else:
+            mins = (now_ist().hour - 9) * 60 + (now_ist().minute - 15)
+            T_entry = _dte_fraction(ref_date, idx_name, mins)
+            ce_entry = est_prem(spot, atm, "CE", T_entry, iv)
+            pe_entry = est_prem(spot, atm, "PE", T_entry, iv)
+            ce_inst_key = pe_inst_key = None
+            log.warning("  B-S FALLBACK %s: CE=%.1f PE=%.1f", idx_name, ce_entry, pe_entry)
         total_prem = ce_entry + pe_entry
 
         # SL levels
@@ -171,18 +192,20 @@ def enter_positions(strategy_name: str, ref_date: date, lots: int = 1):
             pe_sl = pe_entry * (1 + sl_pct)
 
         entry_time = now_ist().strftime("%H:%M")
+        prem_source = "real" if real_ltp else "bs"
         with db.get_conn() as conn:
             conn.execute("""INSERT OR REPLACE INTO strategy_live
                 (date, strategy, idx, status, lots, entry_time, spot_entry,
                  spot_current, atm_strike, ce_entry, pe_entry, ce_current, pe_current,
-                 unrealized_pnl, dte, sl_level, ce_sl, pe_sl, skipped, updated_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 unrealized_pnl, dte, sl_level, ce_sl, pe_sl, skipped,
+                 ce_inst_key, pe_inst_key, premium_source, updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (ref_date.isoformat(), strategy_name, idx_name, "OPEN", lots,
                  entry_time, round(spot, 2), round(spot, 2), atm,
                  round(ce_entry, 2), round(pe_entry, 2),
                  round(ce_entry, 2), round(pe_entry, 2),
                  0.0, dte, round(sl_level, 2), round(ce_sl, 2), round(pe_sl, 2),
-                 0, now_ist().isoformat()))
+                 0, ce_inst_key, pe_inst_key, prem_source, now_ist().isoformat()))
 
         log.info("  OPEN %s/%s: spot=%,.0f atm=%,.0f CE=%.1f PE=%.1f total=%.1f DTE=%d",
                  strategy_name, idx_name, spot, atm, ce_entry, pe_entry, total_prem, dte)
@@ -241,11 +264,28 @@ def monitor_tick(ref_date: date):
         last_candle = candles[-1]
         spot = last_candle["close"]
         atm = pos["atm_strike"]
-        mins = (now_ist().hour - 9) * 60 + (now_ist().minute - 15)
-        T = _dte_fraction(ref_date, idx_name, mins)
 
-        ce_now = est_prem(spot, atm, "CE", T, iv)
-        pe_now = est_prem(spot, atm, "PE", T, iv)
+        # Try real LTP if we have instrument keys from entry
+        ce_inst_key = pos.get("ce_inst_key")
+        pe_inst_key = pos.get("pe_inst_key")
+        used_real = False
+        if ce_inst_key and pe_inst_key:
+            try:
+                ltp_data = uclient.ltp_by_key([ce_inst_key, pe_inst_key])
+                ce_ltp = ltp_data.get(ce_inst_key)
+                pe_ltp = ltp_data.get(pe_inst_key)
+                if ce_ltp is not None and pe_ltp is not None:
+                    ce_now = ce_ltp
+                    pe_now = pe_ltp
+                    used_real = True
+            except Exception as e:
+                log.warning("LTP fetch failed for %s/%s: %s", strategy_name, idx_name, e)
+
+        if not used_real:
+            mins = (now_ist().hour - 9) * 60 + (now_ist().minute - 15)
+            T = _dte_fraction(ref_date, idx_name, mins)
+            ce_now = est_prem(spot, atm, "CE", T, iv)
+            pe_now = est_prem(spot, atm, "PE", T, iv)
 
         ce_entry = pos["ce_entry"]
         pe_entry = pos["pe_entry"]
@@ -255,9 +295,16 @@ def monitor_tick(ref_date: date):
         exit_reason = None
         ce_exit = pe_exit = None
 
-        # Worst case from candle high/low
-        ce_worst = est_prem(last_candle["high"], atm, "CE", T, iv)
-        pe_worst = est_prem(last_candle["low"], atm, "PE", T, iv)
+        # Worst case: use real LTP directly (no intra-candle resolution)
+        # or B-S from candle high/low as fallback
+        if used_real:
+            ce_worst = ce_now
+            pe_worst = pe_now
+        else:
+            mins = (now_ist().hour - 9) * 60 + (now_ist().minute - 15)
+            T = _dte_fraction(ref_date, idx_name, mins)
+            ce_worst = est_prem(last_candle["high"], atm, "CE", T, iv)
+            pe_worst = est_prem(last_candle["low"], atm, "PE", T, iv)
 
         if params.get("combined_sl"):
             if ce_worst + pe_worst >= pos["sl_level"]:
@@ -362,8 +409,9 @@ def _sync_to_results(ref_date, strategy_name, idx_name, pos,
         conn.execute("""INSERT OR REPLACE INTO strategy_results
             (date, strategy, idx, lots, entry_time, exit_time, exit_reason,
              spot_entry, atm_strike, ce_entry, pe_entry, ce_exit, pe_exit,
-             ce_pnl, pe_pnl, charges, net_pnl, skipped, skip_reason, dte)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+             ce_pnl, pe_pnl, charges, net_pnl, skipped, skip_reason, dte,
+             premium_source)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (ref_date.isoformat(), strategy_name, idx_name, pos["lots"],
              pos["entry_time"], exit_time, exit_reason,
              pos["spot_entry"], pos["atm_strike"],
@@ -371,7 +419,8 @@ def _sync_to_results(ref_date, strategy_name, idx_name, pos,
              round(ce_exit, 2), round(pe_exit, 2),
              round(ce_pnl, 2), round(pe_pnl, 2),
              round(charges, 2), round(net_pnl, 2),
-             0, None, pos["dte"]))
+             0, None, pos["dte"],
+             pos.get("premium_source", "bs")))
 
 
 # ---------------------------------------------------------------------------
@@ -487,6 +536,7 @@ def get_live_summary(ref_date: date = None) -> dict:
 def run_trading_day(ref_date: date, lots: int = 1):
     """Full intraday schedule for one trading day."""
     init_live_db()
+    invalidate_option_master()
     from src.strategy.live_runner import init_strategy_db
     init_strategy_db()
 

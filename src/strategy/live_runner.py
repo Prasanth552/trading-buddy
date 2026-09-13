@@ -49,6 +49,12 @@ INDEXES = {
 
 EXPIRY_WEEKDAY = {"NIFTY": 1, "BANKNIFTY": 2, "SENSEX": 4}
 
+IDX_OPTION_SEGMENTS = {
+    "NIFTY":     ("NSE_FO", "NIFTY"),
+    "BANKNIFTY": ("NSE_FO", "BANKNIFTY"),
+    "SENSEX":    ("BSE_FO", "SENSEX"),
+}
+
 STRATEGIES = {
     "kitchen_sink": dict(
         entry_hour=9, entry_min=30, sl_pct=0.35,
@@ -89,6 +95,7 @@ CREATE TABLE IF NOT EXISTS strategy_results (
     skipped     INTEGER DEFAULT 0,
     skip_reason TEXT,
     dte         INTEGER,
+    premium_source TEXT DEFAULT 'bs',
     UNIQUE(date, strategy, idx)
 );
 CREATE INDEX IF NOT EXISTS idx_sr_date ON strategy_results(date);
@@ -99,6 +106,10 @@ CREATE INDEX IF NOT EXISTS idx_sr_strat ON strategy_results(strategy);
 def init_strategy_db():
     with db.get_conn() as conn:
         conn.executescript(STRATEGY_SCHEMA)
+        try:
+            conn.execute("ALTER TABLE strategy_results ADD COLUMN premium_source TEXT DEFAULT 'bs'")
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +213,96 @@ def fetch_candles(uclient, idx_name, ref_date, interval="5minute"):
         with open(cache_file, "wb") as f:
             pickle.dump(candles, f)
     return candles
+
+
+# ---------------------------------------------------------------------------
+# Real option premium helpers (Upstox LTP / instrument resolution)
+# ---------------------------------------------------------------------------
+import logging as _logging
+_log = _logging.getLogger("strategy.live_runner")
+
+_option_master_cache: dict | None = None
+
+
+def _build_option_master(uclient) -> dict:
+    """Build (idx_name, expiry, strike, opt_type) -> instrument_key map from master."""
+    global _option_master_cache
+    if _option_master_cache is not None:
+        return _option_master_cache
+
+    from src.broker.upstox_client import UpstoxClient, _expiry_to_date
+    uc = UpstoxClient()
+    master = uc.load_instruments()
+
+    opts: dict[tuple, str] = {}
+    for inst in master:
+        seg = inst.get("segment", "")
+        name = inst.get("name", "")
+        itype = inst.get("instrument_type", "")
+        if itype not in ("CE", "PE"):
+            continue
+        for idx_name, (expected_seg, expected_name) in IDX_OPTION_SEGMENTS.items():
+            if seg == expected_seg and name == expected_name:
+                strike = float(inst.get("strike_price", 0))
+                ed = _expiry_to_date(inst.get("expiry"))
+                if ed and strike > 0:
+                    opts[(idx_name, ed, strike, itype)] = inst.get("instrument_key")
+                break
+    _option_master_cache = opts
+    _log.info("Option master built: %d entries", len(opts))
+    return opts
+
+
+def _next_expiry(ref_date: date, idx_name: str, master_opts: dict) -> date | None:
+    """Find the nearest expiry >= ref_date for this index."""
+    available = sorted(
+        {k[1] for k in master_opts if k[0] == idx_name and k[1] >= ref_date}
+    )
+    return available[0] if available else None
+
+
+def fetch_option_ltp(uclient, idx_name: str, ref_date: date,
+                     atm_strike: float) -> dict | None:
+    """Fetch real LTP for ATM CE and PE options via Upstox.
+
+    Returns {"ce": float, "pe": float, "ce_key": str, "pe_key": str}
+    or None if resolution/fetch fails.
+    """
+    master_opts = _build_option_master(uclient)
+    expiry = _next_expiry(ref_date, idx_name, master_opts)
+    if not expiry:
+        _log.warning("No expiry found for %s on %s", idx_name, ref_date)
+        return None
+
+    ce_key = master_opts.get((idx_name, expiry, atm_strike, "CE"))
+    pe_key = master_opts.get((idx_name, expiry, atm_strike, "PE"))
+    if not ce_key or not pe_key:
+        _log.warning("Option instruments not found: %s %s CE=%s PE=%s",
+                     idx_name, atm_strike, ce_key, pe_key)
+        return None
+
+    try:
+        ltp_data = uclient.ltp_by_key([ce_key, pe_key])
+        ce_ltp = ltp_data.get(ce_key)
+        pe_ltp = ltp_data.get(pe_key)
+        if ce_ltp is None or pe_ltp is None:
+            _log.warning("LTP missing for %s options: CE=%s PE=%s",
+                         idx_name, ce_ltp, pe_ltp)
+            return None
+        return {
+            "ce": ce_ltp, "pe": pe_ltp,
+            "ce_key": ce_key, "pe_key": pe_key,
+            "expiry": expiry,
+        }
+    except Exception as e:
+        _log.warning("LTP fetch failed for %s: %s", idx_name, e)
+        return None
+
+
+def invalidate_option_master():
+    """Clear cached option master (call on new trading day)."""
+    global _option_master_cache
+    _option_master_cache = None
 
 
 # ---------------------------------------------------------------------------
@@ -375,8 +476,9 @@ def run_day(ref_date: date, lots: int = 1, *, force: bool = False) -> dict:
                 conn.execute("""INSERT OR REPLACE INTO strategy_results
                     (date, strategy, idx, lots, entry_time, exit_time, exit_reason,
                      spot_entry, atm_strike, ce_entry, pe_entry, ce_exit, pe_exit,
-                     ce_pnl, pe_pnl, charges, net_pnl, skipped, skip_reason, dte)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                     ce_pnl, pe_pnl, charges, net_pnl, skipped, skip_reason, dte,
+                     premium_source)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (ref_date.isoformat(), sname, idx_name, lots,
                      r.get("entry_time"), r.get("exit_time"), r.get("exit_reason"),
                      r.get("spot_entry"), r.get("atm_strike"),
@@ -384,7 +486,8 @@ def run_day(ref_date: date, lots: int = 1, *, force: bool = False) -> dict:
                      r.get("ce_exit"), r.get("pe_exit"),
                      r.get("ce_pnl"), r.get("pe_pnl"),
                      r.get("charges"), r["net_pnl"],
-                     1 if r.get("skipped") else 0, r.get("skip_reason"), r.get("dte")))
+                     1 if r.get("skipped") else 0, r.get("skip_reason"), r.get("dte"),
+                     "bs"))
 
         results[sname] = {"day_pnl": round(day_pnl, 2), "indexes": idx_results}
     return results
@@ -435,7 +538,8 @@ def get_history(days: int = 30) -> list[dict]:
         rows = conn.execute("""
             SELECT date, strategy, idx, net_pnl, skipped, skip_reason,
                    entry_time, exit_time, exit_reason, dte,
-                   ce_entry, pe_entry, ce_exit, pe_exit, charges, lots
+                   ce_entry, pe_entry, ce_exit, pe_exit, charges, lots,
+                   premium_source
             FROM strategy_results
             WHERE date >= ?
             ORDER BY date, strategy, idx
