@@ -712,10 +712,7 @@ def get_history(days: int = 90) -> list[dict]:
     cutoff = (date.today() - timedelta(days=days)).isoformat()
     with db.get_conn() as conn:
         rows = conn.execute(
-            "SELECT date, strategy, stock, direction, entry_date, exit_date, "
-            "exit_reason, spot_entry, sell_strike, buy_strike, net_credit, "
-            "exit_spread_val, net_pnl, dte_at_entry, rsi, ema, skipped, skip_reason "
-            "FROM stock_strategy_results WHERE date>=? ORDER BY date, strategy, stock",
+            "SELECT * FROM stock_strategy_results WHERE date>=? ORDER BY date, strategy, stock",
             (cutoff,)).fetchall()
     return [dict(r) for r in rows]
 
