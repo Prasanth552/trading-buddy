@@ -657,10 +657,26 @@ def run_trading_day(ref_date: date, lots: int = 1):
     # Summary
     summary = get_live_summary(ref_date)
     grand_total = sum(d["combined_pnl"] for d in summary.values())
-    log.info("=== DAY COMPLETE %s === Combined P&L: %+,.0f", ref_date, grand_total)
+    log.info("=== DAY COMPLETE %s === Combined P&L: %+.0f", ref_date, grand_total)
     for s, d in summary.items():
-        log.info("  %s: %+,.0f (%d closed, %d open)", s, d["combined_pnl"],
+        log.info("  %s: %+.0f (%d closed, %d open)", s, d["combined_pnl"],
                  d["closed_count"], d["open_count"])
+
+
+def _ensure_upstox_token():
+    """Ensure a valid Upstox data token exists for today."""
+    from src.broker.upstox_data import load_cached_token
+    if load_cached_token():
+        log.info("Upstox token cached for today — reusing")
+        return True
+    try:
+        from src.broker.upstox_data import automated_login
+        automated_login()
+        log.info("Upstox auto-login OK")
+        return True
+    except Exception as e:
+        log.error("Upstox auto-login failed: %s", e)
+        return False
 
 
 def main():
@@ -679,6 +695,8 @@ def main():
             log.info("Weekend. Sleeping until %s...", wake.strftime("%Y-%m-%d %H:%M IST"))
             sleep_until(wake)
             continue
+
+        _ensure_upstox_token()
 
         current = now_ist()
         market_end = datetime(today.year, today.month, today.day, 16, 0, tzinfo=IST)
