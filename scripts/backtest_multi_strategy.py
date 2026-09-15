@@ -87,6 +87,7 @@ STRATEGY_PARAMS = {
         "sl_pct": 0.25,
         "tgt_pct": 0.30,
         "time_exit": "15:15",
+        "min_dte": 1,
         "max_signals": 1,
     },
     "expiry_theta": {
@@ -512,6 +513,12 @@ def detect_short_straddle(candles_5min: list[dict], index_name: str,
                           ref_date: date) -> list[Signal]:
     p = STRATEGY_PARAMS["short_straddle"]
     step = INDEXES[index_name]["step"]
+
+    # Skip 0DTE — gamma is too high, straddles get crushed
+    dte = (expiry - ref_date).days
+    min_dte = p.get("min_dte", 1)
+    if dte < min_dte:
+        return []
 
     entry_bar = next((c for c in candles_5min if c["time"] == p["entry_time"]), None)
     if not entry_bar:
