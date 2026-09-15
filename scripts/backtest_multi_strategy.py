@@ -255,13 +255,18 @@ def fetch_option_1min(udata: UpstoxData, inst_key: str, ref_date: date) -> list[
 
 def detect_momentum_scalp(candles_5min: list[dict], index_name: str,
                           opt_candles: dict, master: dict, expiry: date,
-                          ref_date: date) -> list[Signal]:
+                          ref_date: date, verbose: bool = False) -> list[Signal]:
     p = STRATEGY_PARAMS["momentum_scalp"]
     step = INDEXES[index_name]["step"]
     signals: list[Signal] = []
     last_sig_time = None
 
     vol_sum, vol_count = 0.0, 0
+    dbg_body_fail = 0
+    dbg_vol_fail = 0
+    dbg_dir_fail = 0
+    dbg_opt_fail = 0
+    dbg_passed_filters = 0
 
     for i, c in enumerate(candles_5min):
         vol_sum += c["volume"]
@@ -283,12 +288,12 @@ def detect_momentum_scalp(candles_5min: list[dict], index_name: str,
         body_pct = body / c["open"] * 100
 
         if body_pct < p["body_pct"]:
+            dbg_body_fail += 1
             continue
         if c["volume"] < avg_vol * p["vol_mult"]:
+            dbg_vol_fail += 1
             continue
 
-        # Confirm: candle body is in the direction of the wick
-        # (close near high for bullish, close near low for bearish)
         rng = c["high"] - c["low"]
         if rng == 0:
             continue
@@ -305,16 +310,23 @@ def detect_momentum_scalp(candles_5min: list[dict], index_name: str,
                 direction = "bearish"
 
         if not direction:
+            dbg_dir_fail += 1
             continue
 
+        dbg_passed_filters += 1
+
+        strike = round_strike(c["close"], step)
+        opt_type = "CE" if direction == "bullish" else "PE"
         strike = round_strike(c["close"], step)
         opt_type = "CE" if direction == "bullish" else "PE"
         opt_key = master.get((index_name, expiry, strike, opt_type))
         if not opt_key or opt_key not in opt_candles:
+            dbg_opt_fail += 1
             continue
 
         oc = _opt_at_time(opt_candles[opt_key], c["time"])
         if not oc or oc["close"] <= 5:
+            dbg_opt_fail += 1
             continue
 
         entry = oc["close"]
@@ -329,6 +341,11 @@ def detect_momentum_scalp(candles_5min: list[dict], index_name: str,
             note=f"body={body_pct:.2f}% vol={c['volume']/avg_vol:.1f}x" if avg_vol > 0 else "",
         ))
         last_sig_time = c["time"]
+
+    if verbose:
+        print(f"      [momentum_scalp] body_fail={dbg_body_fail} vol_fail={dbg_vol_fail} "
+              f"dir_fail={dbg_dir_fail} opt_fail={dbg_opt_fail} passed={dbg_passed_filters} "
+              f"signals={len(signals)}")
 
     return signals
 
@@ -783,7 +800,7 @@ def run_day(udata: UpstoxData, index_name: str, ref_date: date,
 
     all_signals: list[Signal] = []
     if "momentum_scalp" in strategies:
-        all_signals += detect_momentum_scalp(candles_5min, index_name, opt_candles, master, expiry, ref_date)
+        all_signals += detect_momentum_scalp(candles_5min, index_name, opt_candles, master, expiry, ref_date, verbose)
     if "orb_retest" in strategies:
         all_signals += detect_orb_retest(candles_5min, index_name, opt_candles, master, expiry, ref_date)
     if "short_strangle" in strategies:
@@ -936,7 +953,7 @@ def main():
 
     # ── Per-strategy summary ────────────────────────────────────────
     print(f"\n{'='*75}")
-    print(f"  STRATEGY BREAKDOWN — {index_name}")
+    print(f"  STRATEGY BREAKDOWN — {' + '.join(index_list)}")
     print(f"{'='*75}")
 
     strat_order = ["momentum_scalp", "orb_retest", "short_strangle", "day_end_sell"]
