@@ -285,25 +285,25 @@ def calc_rsi(closes, period=14):
 
 
 # ---------------------------------------------------------------------------
-# Monthly expiry (last Thursday)
+# Monthly expiry (last Tuesday — NSE stock F&O moved from Thu to Tue)
 # ---------------------------------------------------------------------------
-def _last_thursday(year, month):
+def _last_tuesday(year, month):
     if month == 12:
         next_month = date(year + 1, 1, 1)
     else:
         next_month = date(year, month + 1, 1)
     day = next_month - timedelta(days=1)
-    while day.weekday() != 3:
+    while day.weekday() != 1:
         day -= timedelta(days=1)
     return day
 
 def _monthly_expiry_for(ref_date):
-    exp = _last_thursday(ref_date.year, ref_date.month)
+    exp = _last_tuesday(ref_date.year, ref_date.month)
     if ref_date > exp:
         if ref_date.month == 12:
-            exp = _last_thursday(ref_date.year + 1, 1)
+            exp = _last_tuesday(ref_date.year + 1, 1)
         else:
-            exp = _last_thursday(ref_date.year, ref_date.month + 1)
+            exp = _last_tuesday(ref_date.year, ref_date.month + 1)
     return exp
 
 def _days_to_expiry(ref_date):
