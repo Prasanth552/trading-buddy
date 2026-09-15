@@ -508,30 +508,22 @@ def detect_day_end_sell(candles_5min: list[dict], index_name: str,
 # ── Signal formatting (human channel style) ────────────────────────
 
 def format_signal(s: Signal) -> str:
-    lot = INDEXES[s.index]["lot_size"]
-
     if s.action == "BUY":
         return (
             f"BUY {s.index} {s.strike:.0f} {s.option_type} @ ₹{s.entry_premium:.1f}\n"
-            f"SL ₹{s.sl_premium:.1f} | TGT ₹{s.tgt_premium:.1f}\n"
-            f"\n"
-            f"Lot: {lot} | Hold: {STRATEGY_PARAMS[s.strategy].get('max_hold_mins', 15)}m max"
+            f"SL ₹{s.sl_premium:.1f} | TGT ₹{s.tgt_premium:.1f}"
         )
     elif s.paired_instrument_key:
         combined = s.entry_premium + s.paired_premium
         return (
             f"SELL {s.index} {s.strike:.0f} {s.option_type} @ ₹{s.entry_premium:.1f}\n"
             f"SELL {s.index} {s.paired_strike:.0f} {s.paired_type} @ ₹{s.paired_premium:.1f}\n"
-            f"Combined ₹{combined:.0f} | SL ₹{s.sl_premium:.0f} | TGT ₹{s.tgt_premium:.0f}\n"
-            f"\n"
-            f"Lot: {lot} | Exit by {STRATEGY_PARAMS[s.strategy].get('time_exit', '15:15')}"
+            f"Combined ₹{combined:.0f} | SL ₹{s.sl_premium:.0f} | TGT ₹{s.tgt_premium:.0f}"
         )
     else:
         return (
             f"SELL {s.index} {s.strike:.0f} {s.option_type} @ ₹{s.entry_premium:.1f}\n"
-            f"SL ₹{s.sl_premium:.1f} | TGT hold to expiry\n"
-            f"\n"
-            f"Lot: {lot} | Exit by {STRATEGY_PARAMS[s.strategy].get('time_exit', '15:10')}"
+            f"SL ₹{s.sl_premium:.1f} | TGT hold to expiry"
         )
 
 
