@@ -265,7 +265,7 @@ def detect_momentum_scalp(candles_5min: list[dict], index_name: str,
     for i, c in enumerate(candles_5min):
         vol_sum += c["volume"]
         vol_count += 1
-        avg_vol = vol_sum / vol_count
+        avg_vol = vol_sum / vol_count if vol_count > 0 else 0
 
         if c["time"] < p["active_from"] or c["time"] > p["active_to"]:
             continue
@@ -273,10 +273,12 @@ def detect_momentum_scalp(candles_5min: list[dict], index_name: str,
             break
         if last_sig_time and time_diff_mins(last_sig_time, c["time"]) < p["cooldown_mins"]:
             continue
-        if i < 2:
+        if i < 2 or avg_vol <= 0:
             continue
 
         body = abs(c["close"] - c["open"])
+        if c["open"] == 0:
+            continue
         body_pct = body / c["open"] * 100
 
         if body_pct < p["body_pct"]:
@@ -322,7 +324,7 @@ def detect_momentum_scalp(candles_5min: list[dict], index_name: str,
             tgt_premium=entry * (1 + p["tgt_pct"]),
             spot_at_entry=c["close"], instrument_key=opt_key,
             ref_date=ref_date,
-            note=f"body={body_pct:.2f}% vol={c['volume']/avg_vol:.1f}x",
+            note=f"body={body_pct:.2f}% vol={c['volume']/avg_vol:.1f}x" if avg_vol > 0 else "",
         ))
         last_sig_time = c["time"]
 
