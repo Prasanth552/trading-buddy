@@ -48,16 +48,16 @@ INDEXES = {
 
 STRATEGY_PARAMS = {
     "vwap_bounce": {
-        "sl_pct": 0.30,
-        "tgt_pct": 0.50,
-        "max_hold_mins": 45,
-        "active_from": "10:00",
-        "active_to": "14:00",
-        "vwap_touch_pct": 0.15,
-        "bounce_min_pct": 0.08,
-        "vol_mult": 1.2,
-        "max_signals": 2,
-        "cooldown_mins": 30,
+        "sl_pct": 0.25,
+        "tgt_pct": 0.40,
+        "max_hold_mins": 30,
+        "active_from": "09:45",
+        "active_to": "14:30",
+        "vwap_touch_pct": 0.20,
+        "bounce_min_pct": 0.05,
+        "vol_mult": 1.0,
+        "max_signals": 3,
+        "cooldown_mins": 20,
     },
     "orb_breakout": {
         "sl_pct": 0.30,
@@ -99,7 +99,7 @@ STRATEGY_PARAMS = {
     },
 }
 
-IMPACT_COST = 3.0
+IMPACT_COST = 1.0
 
 
 # ── Data classes ────────────────────────────────────────────────────
@@ -652,20 +652,21 @@ def track_buy_trade(sig: Signal, opt_candles: dict) -> TradeResult | None:
                 hold_mins=hold, won=True)
 
         if hold >= max_hold or c["time"] >= "15:15":
+            pnl = c["close"] - entry - 2 * IMPACT_COST
             return TradeResult(
                 signal=sig, exit_time=c["time"], exit_premium=c["close"],
                 exit_reason="time_exit",
-                pnl_per_lot=c["close"] - entry - 2 * IMPACT_COST,
-                hold_mins=hold, won=c["close"] > entry)
+                pnl_per_lot=pnl, hold_mins=hold, won=pnl > 0)
 
     if data:
         last = data[-1]
+        pnl = last["close"] - entry - 2 * IMPACT_COST
         return TradeResult(
             signal=sig, exit_time=last["time"], exit_premium=last["close"],
             exit_reason="day_end",
-            pnl_per_lot=last["close"] - entry - 2 * IMPACT_COST,
+            pnl_per_lot=pnl,
             hold_mins=time_diff_mins(sig.time, last["time"]),
-            won=last["close"] > entry)
+            won=pnl > 0)
     return None
 
 
@@ -751,7 +752,8 @@ def track_sell_trade(sig: Signal, opt_candles: dict) -> TradeResult | None:
 # ── Day runner ──────────────────────────────────────────────────────
 
 def run_day(udata: UpstoxData, index_name: str, ref_date: date,
-            master: dict, strategies: set[str]) -> tuple[list[TradeResult], str]:
+            master: dict, strategies: set[str],
+            verbose: bool = False) -> tuple[list[TradeResult], str]:
     idx = INDEXES[index_name]
     step = idx["step"]
 
@@ -759,13 +761,29 @@ def run_day(udata: UpstoxData, index_name: str, ref_date: date,
     if not spot or len(spot) < 30:
         return [], f"spot candles={len(spot) if spot else 0}"
 
+    # Find best expiry: prefer same-day (0DTE) if in master, else next available
     expiry = next_expiry(ref_date, idx["expiry_weekday"])
+    is_expiry_day = (ref_date == expiry)
+
+    # Also check if ref_date itself is available as expiry in master
+    # (handles case where instruments file was downloaded before options expired)
+    if not is_expiry_day and ref_date.weekday() == idx["expiry_weekday"]:
+        test_key = (index_name, ref_date, round_strike(spot[0]["close"], step), "CE")
+        if test_key in master:
+            expiry = ref_date
+            is_expiry_day = True
+
     opening = spot[0]["close"]
     atm = round_strike(opening, step)
+    dte = (expiry - ref_date).days
+
+    if verbose:
+        print(f"    open={opening:.0f} atm={atm} expiry={expiry} DTE={dte}"
+              f" is_expiry={is_expiry_day} candles={len(spot)}")
 
     # Determine all strikes we need
     needed: set[tuple[float, str]] = set()
-    for offset in range(-4, 5):
+    for offset in range(-5, 6):
         s = atm + offset * step
         if s > 0:
             needed.add((s, "CE"))
@@ -777,17 +795,22 @@ def run_day(udata: UpstoxData, index_name: str, ref_date: date,
 
     # Fetch option 1-min candles
     opt_candles: dict[str, list[dict]] = {}
-    for strike, otype in needed:
+    missing_keys = 0
+    for strike, otype in sorted(needed):
         key = master.get((index_name, expiry, strike, otype))
         if not key:
+            missing_keys += 1
             continue
         data = fetch_option_1min(udata, key, ref_date)
         if data:
             opt_candles[key] = data
-        _time.sleep(0.15)  # rate limit
+        _time.sleep(0.12)  # rate limit
 
     if not opt_candles:
-        return [], f"no option data (expiry={expiry})"
+        return [], f"no option data (expiry={expiry}, missing_keys={missing_keys})"
+
+    if verbose:
+        print(f"    options fetched: {len(opt_candles)} instruments, {missing_keys} missing")
 
     candles_5min = resample_5min(spot)
 
@@ -834,6 +857,7 @@ def main():
     parser.add_argument("--index", default="NIFTY")
     parser.add_argument("--strategies", default="all",
                         help="Comma-separated: vwap_bounce,orb_breakout,ema_pullback,short_straddle,expiry_theta")
+    parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
 
     from_date = date.fromisoformat(args.from_date)
@@ -870,7 +894,8 @@ def main():
 
     for day in trading_days:
         print(f"  {day} ...", end=" ", flush=True)
-        results, status = run_day(udata, index_name, day, master, strategies)
+        results, status = run_day(udata, index_name, day, master, strategies,
+                                   verbose=args.verbose)
 
         if status != "ok":
             print(f"SKIP ({status})")
