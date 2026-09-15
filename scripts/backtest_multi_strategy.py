@@ -1,15 +1,14 @@
-"""Multi-strategy signal backtester using real 1-min option candles.
+"""Multi-strategy signal backtester v2 — redesigned for higher win rate.
 
-Tests 5 strategies and tracks each signal to exit with real premiums:
-  1. VWAP Bounce    — buy ATM option on VWAP touch + bounce (5-min)
-  2. ORB Breakout   — buy ATM option on 30-min range breakout
-  3. EMA Pullback   — buy ATM option on pullback to 20 EMA in trend
-  4. Short Straddle — sell ATM CE+PE at 10:00, SL 25%, TGT 30% decay
-  5. Expiry Theta   — sell OTM CE+PE on expiry day at 10:30
+Strategies (redesigned based on v1 failure analysis):
+  1. Momentum Scalp  — buy ATM on strong 5-min candle + volume spike, quick exit
+  2. ORB Retest      — buy on breakout + retest confirmation (not raw breakout)
+  3. Short Strangle   — sell OTM CE+PE at 10:00, wider 40% SL, skip 0DTE/volatile
+  4. Day-End Sell     — sell OTM WITH the day's trend at 14:00, theta crush to close
 
 Usage:
     PYTHONPATH=. .venv/bin/python3 scripts/backtest_multi_strategy.py \
-        --from 2026-09-01 --to 2026-09-15 --index NIFTY
+        --from 2026-09-09 --to 2026-09-15 --index NIFTY -v
 """
 from __future__ import annotations
 
@@ -17,7 +16,7 @@ import argparse
 import sys
 import time as _time
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -34,68 +33,58 @@ INDEXES = {
         "key": "NSE_INDEX|Nifty 50",
         "step": 50,
         "lot_size": 75,
-        "expiry_weekday": 1,   # Tuesday
+        "expiry_weekday": 1,
     },
     "BANKNIFTY": {
         "key": "NSE_INDEX|Nifty Bank",
         "step": 100,
         "lot_size": 30,
-        "expiry_weekday": 2,   # Wednesday
+        "expiry_weekday": 2,
     },
 }
 
 # ── Strategy parameters ─────────────────────────────────────────────
 
 STRATEGY_PARAMS = {
-    "vwap_bounce": {
-        "sl_pct": 0.25,
-        "tgt_pct": 0.40,
-        "max_hold_mins": 30,
-        "active_from": "09:45",
-        "active_to": "14:30",
-        "vwap_touch_pct": 0.20,
-        "bounce_min_pct": 0.05,
-        "vol_mult": 1.0,
+    "momentum_scalp": {
+        "body_pct": 0.15,
+        "vol_mult": 1.5,
+        "sl_pct": 0.12,
+        "tgt_pct": 0.18,
+        "max_hold_mins": 15,
+        "active_from": "09:30",
+        "active_to": "14:00",
         "max_signals": 3,
-        "cooldown_mins": 20,
+        "cooldown_mins": 15,
     },
-    "orb_breakout": {
-        "sl_pct": 0.30,
-        "tgt_pct": 0.60,
+    "orb_retest": {
         "range_end": "09:44",
-        "active_from": "09:45",
-        "active_to": "11:30",
-        "max_hold_mins": 90,
-        "min_range_pct": 0.20,
-        "max_range_pct": 1.00,
+        "active_from": "09:50",
+        "active_to": "12:00",
+        "sl_pct": 0.25,
+        "tgt_pct": 0.45,
+        "max_hold_mins": 60,
+        "min_range_pct": 0.15,
+        "max_range_pct": 0.80,
+        "retest_pct": 0.10,
         "max_signals": 1,
     },
-    "ema_pullback": {
-        "sl_pct": 0.25,
-        "tgt_pct": 0.50,
-        "max_hold_mins": 45,
-        "active_from": "10:15",
-        "active_to": "14:30",
-        "ema_period": 20,
-        "trend_bars": 3,
-        "touch_pct": 0.12,
-        "max_signals": 2,
-        "cooldown_mins": 30,
-    },
-    "short_straddle": {
+    "short_strangle": {
         "entry_time": "10:00",
-        "sl_pct": 0.25,
-        "tgt_pct": 0.30,
+        "otm_steps": 1,
+        "sl_pct": 0.40,
+        "tgt_pct": 0.35,
         "time_exit": "15:15",
         "min_dte": 1,
+        "max_gap_pct": 0.80,
         "max_signals": 1,
     },
-    "expiry_theta": {
-        "entry_time": "10:30",
-        "otm_steps": 3,
-        "sl_pct": 1.00,
-        "tgt_pct": 0.50,
-        "time_exit": "15:15",
+    "day_end_sell": {
+        "entry_time": "14:00",
+        "otm_steps": 2,
+        "sl_mult": 2.0,
+        "time_exit": "15:10",
+        "min_trend_pct": 0.20,
         "max_signals": 1,
     },
 }
@@ -123,6 +112,7 @@ class Signal:
     paired_premium: float = 0
     paired_instrument_key: str = ""
     ref_date: date = None
+    note: str = ""
 
 
 @dataclass
@@ -156,7 +146,6 @@ def resample_5min(candles_1min: list[dict]) -> list[dict]:
         h, m = int(t[:2]), int(t[3:5])
         bar_m = (m // 5) * 5
         groups[f"{h:02d}:{bar_m:02d}"].append(c)
-
     bars = []
     for key in sorted(groups):
         grp = groups[key]
@@ -182,46 +171,23 @@ def compute_vwap(candles: list[dict]) -> list[float]:
     return out
 
 
-def compute_ema(values: list[float], period: int) -> list[float | None]:
-    if len(values) < period:
-        return [None] * len(values)
-    k = 2 / (period + 1)
-    result: list[float | None] = [None] * (period - 1)
-    result.append(sum(values[:period]) / period)
-    for i in range(period, len(values)):
-        result.append(values[i] * k + result[-1] * (1 - k))
-    return result
-
-
-def compute_rsi(values: list[float], period: int = 14) -> list[float | None]:
-    if len(values) < period + 1:
-        return [None] * len(values)
-    result: list[float | None] = [None] * period
-    gains, losses = 0.0, 0.0
-    for i in range(1, period + 1):
-        d = values[i] - values[i - 1]
-        if d > 0:
-            gains += d
-        else:
-            losses -= d
-    ag = gains / period
-    al = losses / period
-    result.append(100 - 100 / (1 + ag / al) if al > 0 else 100)
-    for i in range(period + 1, len(values)):
-        d = values[i] - values[i - 1]
-        g = d if d > 0 else 0
-        l = -d if d < 0 else 0
-        ag = (ag * (period - 1) + g) / period
-        al = (al * (period - 1) + l) / period
-        result.append(100 - 100 / (1 + ag / al) if al > 0 else 100)
-    return result
-
-
 def next_expiry(ref_date: date, weekday: int) -> date:
     d = ref_date
     while d.weekday() != weekday:
         d += timedelta(days=1)
     return d
+
+
+def _opt_at_time(opt_data: list[dict], time_str: str) -> dict | None:
+    exact = next((c for c in opt_data if c["time"] == time_str), None)
+    if exact:
+        return exact
+    for c in opt_data:
+        if c["time"] >= time_str:
+            if time_diff_mins(time_str, c["time"]) <= 5:
+                return c
+            break
+    return None
 
 
 # ── Data fetching ───────────────────────────────────────────────────
@@ -284,19 +250,16 @@ def fetch_option_1min(udata: UpstoxData, inst_key: str, ref_date: date) -> list[
     return rows
 
 
-# ── Strategy 1: VWAP Bounce ────────────────────────────────────────
+# ── Strategy 1: Momentum Scalp ─────────────────────────────────────
 
-def detect_vwap_bounce(candles_5min: list[dict], index_name: str,
-                       opt_candles: dict, master: dict, expiry: date,
-                       ref_date: date) -> list[Signal]:
-    p = STRATEGY_PARAMS["vwap_bounce"]
+def detect_momentum_scalp(candles_5min: list[dict], index_name: str,
+                          opt_candles: dict, master: dict, expiry: date,
+                          ref_date: date) -> list[Signal]:
+    p = STRATEGY_PARAMS["momentum_scalp"]
     step = INDEXES[index_name]["step"]
     signals: list[Signal] = []
-    last_signal_time = None
+    last_sig_time = None
 
-    vwaps = compute_vwap(candles_5min)
-    closes = [c["close"] for c in candles_5min]
-    rsis = compute_rsi(closes, 14)
     vol_sum, vol_count = 0.0, 0
 
     for i, c in enumerate(candles_5min):
@@ -306,40 +269,35 @@ def detect_vwap_bounce(candles_5min: list[dict], index_name: str,
 
         if c["time"] < p["active_from"] or c["time"] > p["active_to"]:
             continue
-        if i < 3 or len(signals) >= p["max_signals"]:
+        if len(signals) >= p["max_signals"]:
+            break
+        if last_sig_time and time_diff_mins(last_sig_time, c["time"]) < p["cooldown_mins"]:
             continue
-        if last_signal_time and time_diff_mins(last_signal_time, c["time"]) < p["cooldown_mins"]:
-            continue
-
-        vwap = vwaps[i]
-        prev = candles_5min[i - 1]
-        prev_vwap = vwaps[i - 1]
-
-        touch_band = vwap * p["vwap_touch_pct"] / 100
-        prev_near = abs(prev["close"] - prev_vwap) <= touch_band
-
-        if not prev_near:
-            # also check if the bar's low/high pierced VWAP
-            bar_touched = (c["low"] <= vwap + touch_band and
-                           c["high"] >= vwap - touch_band)
-            if not bar_touched:
-                continue
-
-        move = (c["close"] - vwap) / vwap * 100
-        if abs(move) < p["bounce_min_pct"]:
+        if i < 2:
             continue
 
+        body = abs(c["close"] - c["open"])
+        body_pct = body / c["open"] * 100
+
+        if body_pct < p["body_pct"]:
+            continue
         if c["volume"] < avg_vol * p["vol_mult"]:
             continue
 
-        rsi = rsis[i] if i < len(rsis) else None
+        # Confirm: candle body is in the direction of the wick
+        # (close near high for bullish, close near low for bearish)
+        rng = c["high"] - c["low"]
+        if rng == 0:
+            continue
 
         direction = None
-        if move > 0 and c["close"] > c["open"]:
-            if rsi is None or (35 < rsi < 75):
+        if c["close"] > c["open"]:
+            close_position = (c["close"] - c["low"]) / rng
+            if close_position > 0.6:
                 direction = "bullish"
-        elif move < 0 and c["close"] < c["open"]:
-            if rsi is None or (25 < rsi < 65):
+        else:
+            close_position = (c["high"] - c["close"]) / rng
+            if close_position > 0.6:
                 direction = "bearish"
 
         if not direction:
@@ -357,25 +315,26 @@ def detect_vwap_bounce(candles_5min: list[dict], index_name: str,
 
         entry = oc["close"]
         signals.append(Signal(
-            time=c["time"], strategy="vwap_bounce", action="BUY",
+            time=c["time"], strategy="momentum_scalp", action="BUY",
             index=index_name, strike=strike, option_type=opt_type,
             entry_premium=entry,
             sl_premium=entry * (1 - p["sl_pct"]),
             tgt_premium=entry * (1 + p["tgt_pct"]),
             spot_at_entry=c["close"], instrument_key=opt_key,
             ref_date=ref_date,
+            note=f"body={body_pct:.2f}% vol={c['volume']/avg_vol:.1f}x",
         ))
-        last_signal_time = c["time"]
+        last_sig_time = c["time"]
 
     return signals
 
 
-# ── Strategy 2: ORB Breakout ───────────────────────────────────────
+# ── Strategy 2: ORB with Retest ────────────────────────────────────
 
-def detect_orb(candles_5min: list[dict], index_name: str,
-               opt_candles: dict, master: dict, expiry: date,
-               ref_date: date) -> list[Signal]:
-    p = STRATEGY_PARAMS["orb_breakout"]
+def detect_orb_retest(candles_5min: list[dict], index_name: str,
+                      opt_candles: dict, master: dict, expiry: date,
+                      ref_date: date) -> list[Signal]:
+    p = STRATEGY_PARAMS["orb_retest"]
     step = INDEXES[index_name]["step"]
 
     range_bars = [c for c in candles_5min if c["time"] <= p["range_end"]]
@@ -389,135 +348,99 @@ def detect_orb(candles_5min: list[dict], index_name: str,
     if rng_pct < p["min_range_pct"] or rng_pct > p["max_range_pct"]:
         return []
 
+    breakout_dir = None
+    breakout_level = None
+    retest_done = False
     signals: list[Signal] = []
+
     for c in candles_5min:
         if c["time"] < p["active_from"] or c["time"] > p["active_to"]:
             continue
         if signals:
             break
 
-        direction = None
-        if c["close"] > rng_high and c["close"] > c["open"]:
-            direction = "bullish"
-        elif c["close"] < rng_low and c["close"] < c["open"]:
-            direction = "bearish"
-
-        if not direction:
+        # Phase 1: detect initial breakout
+        if breakout_dir is None:
+            if c["close"] > rng_high and c["close"] > c["open"]:
+                breakout_dir = "bullish"
+                breakout_level = rng_high
+            elif c["close"] < rng_low and c["close"] < c["open"]:
+                breakout_dir = "bearish"
+                breakout_level = rng_low
             continue
 
-        strike = round_strike(c["close"], step)
-        opt_type = "CE" if direction == "bullish" else "PE"
-        opt_key = master.get((index_name, expiry, strike, opt_type))
-        if not opt_key or opt_key not in opt_candles:
-            continue
+        tolerance = breakout_level * p["retest_pct"] / 100
 
-        oc = _opt_at_time(opt_candles[opt_key], c["time"])
-        if not oc or oc["close"] <= 5:
-            continue
+        # Phase 2: wait for retest + bounce
+        if breakout_dir == "bullish":
+            # Retest: low pulls back near breakout level (range high)
+            pulled_back = c["low"] <= breakout_level + tolerance
+            bounced = c["close"] > breakout_level and c["close"] > c["open"]
+            still_above = c["close"] > rng_high
 
-        entry = oc["close"]
-        signals.append(Signal(
-            time=c["time"], strategy="orb_breakout", action="BUY",
-            index=index_name, strike=strike, option_type=opt_type,
-            entry_premium=entry,
-            sl_premium=entry * (1 - p["sl_pct"]),
-            tgt_premium=entry * (1 + p["tgt_pct"]),
-            spot_at_entry=c["close"], instrument_key=opt_key,
-            ref_date=ref_date,
-        ))
+            if pulled_back and bounced and still_above:
+                strike = round_strike(c["close"], step)
+                opt_key = master.get((index_name, expiry, strike, "CE"))
+                if not opt_key or opt_key not in opt_candles:
+                    continue
+                oc = _opt_at_time(opt_candles[opt_key], c["time"])
+                if not oc or oc["close"] <= 5:
+                    continue
+                entry = oc["close"]
+                signals.append(Signal(
+                    time=c["time"], strategy="orb_retest", action="BUY",
+                    index=index_name, strike=strike, option_type="CE",
+                    entry_premium=entry,
+                    sl_premium=entry * (1 - p["sl_pct"]),
+                    tgt_premium=entry * (1 + p["tgt_pct"]),
+                    spot_at_entry=c["close"], instrument_key=opt_key,
+                    ref_date=ref_date,
+                    note=f"range={rng_low:.0f}-{rng_high:.0f} retest@{c['time']}",
+                ))
+            # If price goes back inside range, breakout failed
+            elif c["close"] < rng_low:
+                breakout_dir = None
+
+        elif breakout_dir == "bearish":
+            pulled_back = c["high"] >= breakout_level - tolerance
+            bounced = c["close"] < breakout_level and c["close"] < c["open"]
+            still_below = c["close"] < rng_low
+
+            if pulled_back and bounced and still_below:
+                strike = round_strike(c["close"], step)
+                opt_key = master.get((index_name, expiry, strike, "PE"))
+                if not opt_key or opt_key not in opt_candles:
+                    continue
+                oc = _opt_at_time(opt_candles[opt_key], c["time"])
+                if not oc or oc["close"] <= 5:
+                    continue
+                entry = oc["close"]
+                signals.append(Signal(
+                    time=c["time"], strategy="orb_retest", action="BUY",
+                    index=index_name, strike=strike, option_type="PE",
+                    entry_premium=entry,
+                    sl_premium=entry * (1 - p["sl_pct"]),
+                    tgt_premium=entry * (1 + p["tgt_pct"]),
+                    spot_at_entry=c["close"], instrument_key=opt_key,
+                    ref_date=ref_date,
+                    note=f"range={rng_low:.0f}-{rng_high:.0f} retest@{c['time']}",
+                ))
+            elif c["close"] > rng_high:
+                breakout_dir = None
 
     return signals
 
 
-# ── Strategy 3: EMA Pullback ──────────────────────────────────────
+# ── Strategy 3: Short Strangle ─────────────────────────────────────
 
-def detect_ema_pullback(candles_5min: list[dict], index_name: str,
-                        opt_candles: dict, master: dict, expiry: date,
-                        ref_date: date) -> list[Signal]:
-    p = STRATEGY_PARAMS["ema_pullback"]
-    step = INDEXES[index_name]["step"]
-
-    if len(candles_5min) < p["ema_period"] + p["trend_bars"] + 2:
-        return []
-
-    closes = [c["close"] for c in candles_5min]
-    emas = compute_ema(closes, p["ema_period"])
-    rsis = compute_rsi(closes, 14)
-
-    signals: list[Signal] = []
-    last_signal_time = None
-
-    for i in range(p["ema_period"] + p["trend_bars"], len(candles_5min)):
-        c = candles_5min[i]
-        if c["time"] < p["active_from"] or c["time"] > p["active_to"]:
-            continue
-        if len(signals) >= p["max_signals"]:
-            break
-        if last_signal_time and time_diff_mins(last_signal_time, c["time"]) < p["cooldown_mins"]:
-            continue
-
-        ema = emas[i]
-        if ema is None:
-            continue
-
-        above = sum(1 for j in range(i - p["trend_bars"], i)
-                    if emas[j] is not None and candles_5min[j]["close"] > emas[j])
-        below = sum(1 for j in range(i - p["trend_bars"], i)
-                    if emas[j] is not None and candles_5min[j]["close"] < emas[j])
-
-        touch_band = ema * p["touch_pct"] / 100
-        rsi = rsis[i] if i < len(rsis) else None
-
-        direction = None
-        if above >= p["trend_bars"]:
-            if c["low"] <= ema + touch_band and c["close"] > ema:
-                if rsi is None or rsi > 45:
-                    direction = "bullish"
-        elif below >= p["trend_bars"]:
-            if c["high"] >= ema - touch_band and c["close"] < ema:
-                if rsi is None or rsi < 55:
-                    direction = "bearish"
-
-        if not direction:
-            continue
-
-        strike = round_strike(c["close"], step)
-        opt_type = "CE" if direction == "bullish" else "PE"
-        opt_key = master.get((index_name, expiry, strike, opt_type))
-        if not opt_key or opt_key not in opt_candles:
-            continue
-
-        oc = _opt_at_time(opt_candles[opt_key], c["time"])
-        if not oc or oc["close"] <= 5:
-            continue
-
-        entry = oc["close"]
-        signals.append(Signal(
-            time=c["time"], strategy="ema_pullback", action="BUY",
-            index=index_name, strike=strike, option_type=opt_type,
-            entry_premium=entry,
-            sl_premium=entry * (1 - p["sl_pct"]),
-            tgt_premium=entry * (1 + p["tgt_pct"]),
-            spot_at_entry=c["close"], instrument_key=opt_key,
-            ref_date=ref_date,
-        ))
-        last_signal_time = c["time"]
-
-    return signals
-
-
-# ── Strategy 4: Short Straddle ─────────────────────────────────────
-
-def detect_short_straddle(candles_5min: list[dict], index_name: str,
+def detect_short_strangle(candles_5min: list[dict], index_name: str,
                           opt_candles: dict, master: dict, expiry: date,
-                          ref_date: date) -> list[Signal]:
-    p = STRATEGY_PARAMS["short_straddle"]
+                          ref_date: date, prev_close: float | None = None) -> list[Signal]:
+    p = STRATEGY_PARAMS["short_strangle"]
     step = INDEXES[index_name]["step"]
 
-    # Skip 0DTE — gamma is too high, straddles get crushed
     dte = (expiry - ref_date).days
-    min_dte = p.get("min_dte", 1)
-    if dte < min_dte:
+    if dte < p["min_dte"]:
         return []
 
     entry_bar = next((c for c in candles_5min if c["time"] == p["entry_time"]), None)
@@ -525,55 +448,13 @@ def detect_short_straddle(candles_5min: list[dict], index_name: str,
         return []
 
     spot = entry_bar["close"]
-    strike = round_strike(spot, step)
 
-    ce_key = master.get((index_name, expiry, strike, "CE"))
-    pe_key = master.get((index_name, expiry, strike, "PE"))
-    if not ce_key or not pe_key:
-        return []
-    if ce_key not in opt_candles or pe_key not in opt_candles:
-        return []
+    # Skip volatile gap days
+    if prev_close and prev_close > 0:
+        gap_pct = abs(spot - prev_close) / prev_close * 100
+        if gap_pct > p["max_gap_pct"]:
+            return []
 
-    ce_oc = _opt_at_time(opt_candles[ce_key], p["entry_time"])
-    pe_oc = _opt_at_time(opt_candles[pe_key], p["entry_time"])
-    if not ce_oc or not pe_oc:
-        return []
-
-    ce_prem = ce_oc["close"]
-    pe_prem = pe_oc["close"]
-    combined = ce_prem + pe_prem
-    if combined < 20:
-        return []
-
-    return [Signal(
-        time=p["entry_time"], strategy="short_straddle", action="SELL",
-        index=index_name, strike=strike, option_type="CE",
-        entry_premium=ce_prem,
-        sl_premium=combined * (1 + p["sl_pct"]),
-        tgt_premium=combined * (1 - p["tgt_pct"]),
-        spot_at_entry=spot, instrument_key=ce_key,
-        paired_strike=strike, paired_type="PE",
-        paired_premium=pe_prem, paired_instrument_key=pe_key,
-        ref_date=ref_date,
-    )]
-
-
-# ── Strategy 5: Expiry Theta ──────────────────────────────────────
-
-def detect_expiry_theta(candles_5min: list[dict], index_name: str,
-                        opt_candles: dict, master: dict, expiry: date,
-                        ref_date: date) -> list[Signal]:
-    if ref_date != expiry:
-        return []
-
-    p = STRATEGY_PARAMS["expiry_theta"]
-    step = INDEXES[index_name]["step"]
-
-    entry_bar = next((c for c in candles_5min if c["time"] == p["entry_time"]), None)
-    if not entry_bar:
-        return []
-
-    spot = entry_bar["close"]
     atm = round_strike(spot, step)
     ce_strike = atm + p["otm_steps"] * step
     pe_strike = atm - p["otm_steps"] * step
@@ -593,11 +474,11 @@ def detect_expiry_theta(candles_5min: list[dict], index_name: str,
     ce_prem = ce_oc["close"]
     pe_prem = pe_oc["close"]
     combined = ce_prem + pe_prem
-    if combined < 5:
+    if combined < 15:
         return []
 
     return [Signal(
-        time=p["entry_time"], strategy="expiry_theta", action="SELL",
+        time=p["entry_time"], strategy="short_strangle", action="SELL",
         index=index_name, strike=ce_strike, option_type="CE",
         entry_premium=ce_prem,
         sl_premium=combined * (1 + p["sl_pct"]),
@@ -606,22 +487,65 @@ def detect_expiry_theta(candles_5min: list[dict], index_name: str,
         paired_strike=pe_strike, paired_type="PE",
         paired_premium=pe_prem, paired_instrument_key=pe_key,
         ref_date=ref_date,
+        note=f"CE={ce_strike} PE={pe_strike} DTE={dte} comb={combined:.0f}",
     )]
 
 
-# ── Option candle lookup helper ────────────────────────────────────
+# ── Strategy 4: Day-End Sell ───────────────────────────────────────
 
-def _opt_at_time(opt_data: list[dict], time_str: str) -> dict | None:
-    exact = next((c for c in opt_data if c["time"] == time_str), None)
-    if exact:
-        return exact
-    # find closest candle within 5 min window
-    for c in opt_data:
-        if c["time"] >= time_str:
-            if time_diff_mins(time_str, c["time"]) <= 5:
-                return c
-            break
-    return None
+def detect_day_end_sell(candles_5min: list[dict], index_name: str,
+                        opt_candles: dict, master: dict, expiry: date,
+                        ref_date: date) -> list[Signal]:
+    p = STRATEGY_PARAMS["day_end_sell"]
+    step = INDEXES[index_name]["step"]
+
+    entry_bar = next((c for c in candles_5min if c["time"] == p["entry_time"]), None)
+    if not entry_bar:
+        return []
+
+    day_open = candles_5min[0]["open"]
+    current = entry_bar["close"]
+    trend_pct = (current - day_open) / day_open * 100
+
+    if abs(trend_pct) < p["min_trend_pct"]:
+        return []
+
+    spot = entry_bar["close"]
+    atm = round_strike(spot, step)
+
+    # Sell WITH the trend (trend continuation protects us)
+    if trend_pct > 0:
+        # Bullish day → sell OTM PE (unlikely to go down further)
+        sell_strike = atm - p["otm_steps"] * step
+        sell_type = "PE"
+    else:
+        # Bearish day → sell OTM CE (unlikely to reverse up)
+        sell_strike = atm + p["otm_steps"] * step
+        sell_type = "CE"
+
+    sell_key = master.get((index_name, expiry, sell_strike, sell_type))
+    if not sell_key or sell_key not in opt_candles:
+        return []
+
+    oc = _opt_at_time(opt_candles[sell_key], p["entry_time"])
+    if not oc or oc["close"] <= 2:
+        return []
+
+    entry = oc["close"]
+    sl = entry * p["sl_mult"]
+
+    tag = "sell PE (bullish day)" if trend_pct > 0 else "sell CE (bearish day)"
+
+    return [Signal(
+        time=p["entry_time"], strategy="day_end_sell", action="SELL",
+        index=index_name, strike=sell_strike, option_type=sell_type,
+        entry_premium=entry,
+        sl_premium=sl,
+        tgt_premium=0,
+        spot_at_entry=spot, instrument_key=sell_key,
+        ref_date=ref_date,
+        note=f"{tag} trend={trend_pct:+.2f}%",
+    )]
 
 
 # ── Trade trackers ──────────────────────────────────────────────────
@@ -645,39 +569,36 @@ def track_buy_trade(sig: Signal, opt_candles: dict) -> TradeResult | None:
         hold = time_diff_mins(sig.time, c["time"])
 
         if c["low"] <= sig.sl_premium:
+            pnl = sig.sl_premium - entry - 2 * IMPACT_COST
             return TradeResult(
                 signal=sig, exit_time=c["time"], exit_premium=sig.sl_premium,
-                exit_reason="sl",
-                pnl_per_lot=sig.sl_premium - entry - 2 * IMPACT_COST,
-                hold_mins=hold, won=False)
+                exit_reason="sl", pnl_per_lot=pnl, hold_mins=hold, won=False)
 
         if c["high"] >= sig.tgt_premium:
+            pnl = sig.tgt_premium - entry - 2 * IMPACT_COST
             return TradeResult(
                 signal=sig, exit_time=c["time"], exit_premium=sig.tgt_premium,
-                exit_reason="tgt",
-                pnl_per_lot=sig.tgt_premium - entry - 2 * IMPACT_COST,
-                hold_mins=hold, won=True)
+                exit_reason="tgt", pnl_per_lot=pnl, hold_mins=hold, won=True)
 
         if hold >= max_hold or c["time"] >= "15:15":
             pnl = c["close"] - entry - 2 * IMPACT_COST
             return TradeResult(
                 signal=sig, exit_time=c["time"], exit_premium=c["close"],
-                exit_reason="time_exit",
-                pnl_per_lot=pnl, hold_mins=hold, won=pnl > 0)
+                exit_reason="time_exit", pnl_per_lot=pnl,
+                hold_mins=hold, won=pnl > 0)
 
     if data:
         last = data[-1]
         pnl = last["close"] - entry - 2 * IMPACT_COST
         return TradeResult(
             signal=sig, exit_time=last["time"], exit_premium=last["close"],
-            exit_reason="day_end",
-            pnl_per_lot=pnl,
-            hold_mins=time_diff_mins(sig.time, last["time"]),
-            won=pnl > 0)
+            exit_reason="day_end", pnl_per_lot=pnl,
+            hold_mins=time_diff_mins(sig.time, last["time"]), won=pnl > 0)
     return None
 
 
-def track_sell_trade(sig: Signal, opt_candles: dict) -> TradeResult | None:
+def track_paired_sell_trade(sig: Signal, opt_candles: dict) -> TradeResult | None:
+    """Track strangle (paired sell) — SL/TGT on combined premium."""
     ce_data = opt_candles.get(sig.instrument_key, [])
     pe_data = opt_candles.get(sig.paired_instrument_key, [])
     if not ce_data or not pe_data:
@@ -687,7 +608,6 @@ def track_sell_trade(sig: Signal, opt_candles: dict) -> TradeResult | None:
     pe_by_t = {c["time"]: c for c in pe_data}
     combined_entry = sig.entry_premium + sig.paired_premium
     time_exit = STRATEGY_PARAMS[sig.strategy]["time_exit"]
-    sl_pct = STRATEGY_PARAMS[sig.strategy]["sl_pct"]
 
     all_times = sorted(set(list(ce_by_t) + list(pe_by_t)))
     started = False
@@ -707,17 +627,6 @@ def track_sell_trade(sig: Signal, opt_candles: dict) -> TradeResult | None:
 
         cur = ce_c["close"] + pe_c["close"]
         hold = time_diff_mins(sig.time, t)
-
-        # Per-leg SL for theta (either leg doubles)
-        if sig.strategy == "expiry_theta":
-            ce_doubled = ce_c["high"] >= sig.entry_premium * 2
-            pe_doubled = pe_c["high"] >= sig.paired_premium * 2
-            if ce_doubled or pe_doubled:
-                pnl = combined_entry - cur - 4 * IMPACT_COST
-                return TradeResult(
-                    signal=sig, exit_time=t, exit_premium=ce_c["close"],
-                    paired_exit_premium=pe_c["close"], exit_reason="sl",
-                    pnl_per_lot=pnl, hold_mins=hold, won=False)
 
         if cur >= sig.sl_premium:
             pnl = combined_entry - cur - 4 * IMPACT_COST
@@ -740,7 +649,6 @@ def track_sell_trade(sig: Signal, opt_candles: dict) -> TradeResult | None:
                 paired_exit_premium=pe_c["close"], exit_reason="time_exit",
                 pnl_per_lot=pnl, hold_mins=hold, won=pnl > 0)
 
-    # Day end
     last_ce = ce_data[-1] if ce_data else None
     last_pe = pe_data[-1] if pe_data else None
     if last_ce and last_pe:
@@ -756,37 +664,84 @@ def track_sell_trade(sig: Signal, opt_candles: dict) -> TradeResult | None:
     return None
 
 
+def track_single_sell_trade(sig: Signal, opt_candles: dict) -> TradeResult | None:
+    """Track single-leg sell (day_end_sell) — SL when premium doubles."""
+    data = opt_candles.get(sig.instrument_key, [])
+    if not data:
+        return None
+
+    entry = sig.entry_premium
+    time_exit = STRATEGY_PARAMS[sig.strategy]["time_exit"]
+
+    start_idx = None
+    for i, c in enumerate(data):
+        if c["time"] >= sig.time:
+            start_idx = i
+            break
+    if start_idx is None:
+        return None
+
+    for i in range(start_idx + 1, len(data)):
+        c = data[i]
+        hold = time_diff_mins(sig.time, c["time"])
+
+        # SL: premium rises to sl level
+        if c["high"] >= sig.sl_premium:
+            pnl = entry - sig.sl_premium - 2 * IMPACT_COST
+            return TradeResult(
+                signal=sig, exit_time=c["time"], exit_premium=sig.sl_premium,
+                exit_reason="sl", pnl_per_lot=pnl, hold_mins=hold, won=False)
+
+        # Time exit
+        if c["time"] >= time_exit:
+            pnl = entry - c["close"] - 2 * IMPACT_COST
+            return TradeResult(
+                signal=sig, exit_time=c["time"], exit_premium=c["close"],
+                exit_reason="time_exit", pnl_per_lot=pnl,
+                hold_mins=hold, won=pnl > 0)
+
+    if data:
+        last = data[-1]
+        pnl = entry - last["close"] - 2 * IMPACT_COST
+        return TradeResult(
+            signal=sig, exit_time=last["time"], exit_premium=last["close"],
+            exit_reason="day_end", pnl_per_lot=pnl,
+            hold_mins=time_diff_mins(sig.time, last["time"]),
+            won=pnl > 0)
+    return None
+
+
 # ── Day runner ──────────────────────────────────────────────────────
 
 def run_day(udata: UpstoxData, index_name: str, ref_date: date,
             master: dict, strategies: set[str],
-            verbose: bool = False) -> tuple[list[TradeResult], str]:
+            verbose: bool = False,
+            prev_close: float | None = None) -> tuple[list[TradeResult], str, float]:
+    """Returns (results, status, closing_price)."""
     idx = INDEXES[index_name]
     step = idx["step"]
 
     spot = fetch_spot_1min(udata, index_name, ref_date)
     if not spot or len(spot) < 30:
-        return [], f"spot candles={len(spot) if spot else 0}"
+        return [], f"spot candles={len(spot) if spot else 0}", 0
 
-    # Find best expiry: prefer same-day (0DTE) if in master, else next available
     expiry = next_expiry(ref_date, idx["expiry_weekday"])
-    is_expiry_day = (ref_date == expiry)
 
-    # Also check if ref_date itself is available as expiry in master
-    # (handles case where instruments file was downloaded before options expired)
-    if not is_expiry_day and ref_date.weekday() == idx["expiry_weekday"]:
+    # Check if ref_date itself has options in master (0DTE)
+    if ref_date.weekday() == idx["expiry_weekday"]:
         test_key = (index_name, ref_date, round_strike(spot[0]["close"], step), "CE")
         if test_key in master:
             expiry = ref_date
-            is_expiry_day = True
 
     opening = spot[0]["close"]
+    closing = spot[-1]["close"]
     atm = round_strike(opening, step)
     dte = (expiry - ref_date).days
 
     if verbose:
-        print(f"    open={opening:.0f} atm={atm} expiry={expiry} DTE={dte}"
-              f" is_expiry={is_expiry_day} candles={len(spot)}")
+        day_chg = (closing - opening) / opening * 100
+        print(f"    open={opening:.0f} close={closing:.0f} ({day_chg:+.2f}%) "
+              f"atm={atm} expiry={expiry} DTE={dte} candles={len(spot)}")
 
     # Determine all strikes we need
     needed: set[tuple[float, str]] = set()
@@ -795,54 +750,55 @@ def run_day(udata: UpstoxData, index_name: str, ref_date: date,
         if s > 0:
             needed.add((s, "CE"))
             needed.add((s, "PE"))
-    # OTM for theta
-    otm_steps = STRATEGY_PARAMS["expiry_theta"]["otm_steps"]
-    needed.add((atm + otm_steps * step, "CE"))
-    needed.add((atm - otm_steps * step, "PE"))
+    # Wider OTM for day_end_sell
+    otm_steps = STRATEGY_PARAMS["day_end_sell"]["otm_steps"]
+    for extra in range(otm_steps, otm_steps + 2):
+        needed.add((atm + extra * step, "CE"))
+        needed.add((atm - extra * step, "PE"))
 
     # Fetch option 1-min candles
     opt_candles: dict[str, list[dict]] = {}
-    missing_keys = 0
+    missing = 0
     for strike, otype in sorted(needed):
         key = master.get((index_name, expiry, strike, otype))
         if not key:
-            missing_keys += 1
+            missing += 1
             continue
         data = fetch_option_1min(udata, key, ref_date)
         if data:
             opt_candles[key] = data
-        _time.sleep(0.12)  # rate limit
+        _time.sleep(0.12)
 
     if not opt_candles:
-        return [], f"no option data (expiry={expiry}, missing_keys={missing_keys})"
+        return [], f"no option data (expiry={expiry}, missing={missing})", 0
 
     if verbose:
-        print(f"    options fetched: {len(opt_candles)} instruments, {missing_keys} missing")
+        print(f"    options: {len(opt_candles)} fetched, {missing} missing from master")
 
     candles_5min = resample_5min(spot)
 
     all_signals: list[Signal] = []
-    if "vwap_bounce" in strategies:
-        all_signals += detect_vwap_bounce(candles_5min, index_name, opt_candles, master, expiry, ref_date)
-    if "orb_breakout" in strategies:
-        all_signals += detect_orb(candles_5min, index_name, opt_candles, master, expiry, ref_date)
-    if "ema_pullback" in strategies:
-        all_signals += detect_ema_pullback(candles_5min, index_name, opt_candles, master, expiry, ref_date)
-    if "short_straddle" in strategies:
-        all_signals += detect_short_straddle(candles_5min, index_name, opt_candles, master, expiry, ref_date)
-    if "expiry_theta" in strategies:
-        all_signals += detect_expiry_theta(candles_5min, index_name, opt_candles, master, expiry, ref_date)
+    if "momentum_scalp" in strategies:
+        all_signals += detect_momentum_scalp(candles_5min, index_name, opt_candles, master, expiry, ref_date)
+    if "orb_retest" in strategies:
+        all_signals += detect_orb_retest(candles_5min, index_name, opt_candles, master, expiry, ref_date)
+    if "short_strangle" in strategies:
+        all_signals += detect_short_strangle(candles_5min, index_name, opt_candles, master, expiry, ref_date, prev_close)
+    if "day_end_sell" in strategies:
+        all_signals += detect_day_end_sell(candles_5min, index_name, opt_candles, master, expiry, ref_date)
 
     results = []
     for sig in all_signals:
         if sig.action == "BUY":
             r = track_buy_trade(sig, opt_candles)
+        elif sig.paired_instrument_key:
+            r = track_paired_sell_trade(sig, opt_candles)
         else:
-            r = track_sell_trade(sig, opt_candles)
+            r = track_single_sell_trade(sig, opt_candles)
         if r:
             results.append(r)
 
-    return results, "ok"
+    return results, "ok", closing
 
 
 # ── Main ────────────────────────────────────────────────────────────
@@ -858,12 +814,12 @@ def get_trading_days(from_date: date, to_date: date) -> list[date]:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Multi-strategy signal backtester")
+    parser = argparse.ArgumentParser(description="Multi-strategy signal backtester v2")
     parser.add_argument("--from", dest="from_date", required=True)
     parser.add_argument("--to", dest="to_date", required=True)
     parser.add_argument("--index", default="NIFTY")
     parser.add_argument("--strategies", default="all",
-                        help="Comma-separated: vwap_bounce,orb_breakout,ema_pullback,short_straddle,expiry_theta")
+                        help="Comma-separated: momentum_scalp,orb_retest,short_strangle,day_end_sell")
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args()
 
@@ -880,7 +836,7 @@ def main():
     lot = idx["lot_size"]
 
     print(f"\n{'='*75}")
-    print(f"  MULTI-STRATEGY SIGNAL BACKTEST")
+    print(f"  MULTI-STRATEGY SIGNAL BACKTEST v2")
     print(f"  {index_name} (lot={lot}) | {from_date} → {to_date}")
     print(f"  Strategies: {', '.join(sorted(strategies))}")
     print(f"{'='*75}")
@@ -898,18 +854,25 @@ def main():
     by_strategy: dict[str, list[TradeResult]] = defaultdict(list)
     by_date: dict[date, list[TradeResult]] = defaultdict(list)
     skipped: list[tuple[date, str]] = []
+    prev_close = None
 
     for day in trading_days:
-        print(f"  {day} ...", end=" ", flush=True)
-        results, status = run_day(udata, index_name, day, master, strategies,
-                                   verbose=args.verbose)
+        print(f"  {day} ...", end=" " if not args.verbose else "\n", flush=True)
+        results, status, closing = run_day(
+            udata, index_name, day, master, strategies,
+            verbose=args.verbose, prev_close=prev_close)
+        prev_close = closing if closing > 0 else prev_close
 
         if status != "ok":
-            print(f"SKIP ({status})")
+            print(f"SKIP ({status})" if not args.verbose else f"    SKIP ({status})")
             skipped.append((day, status))
             continue
 
-        print(f"{len(results)} trades")
+        if not args.verbose:
+            print(f"{len(results)} trades")
+        else:
+            print(f"    → {len(results)} trades")
+
         for r in results:
             all_results.append(r)
             by_strategy[r.signal.strategy].append(r)
@@ -922,22 +885,36 @@ def main():
                 print(f"    {w} {s.strategy:<16s} BUY {s.strike:>7.0f} {s.option_type} "
                       f"@{s.entry_premium:>7.1f} → {r.exit_premium:>7.1f} "
                       f"({r.exit_reason:<10s}) ₹{pnl:>+8,.0f}  "
+                      f"[{s.time}→{r.exit_time} {r.hold_mins}m]"
+                      f"  {s.note}" if s.note else
+                      f"    {w} {s.strategy:<16s} BUY {s.strike:>7.0f} {s.option_type} "
+                      f"@{s.entry_premium:>7.1f} → {r.exit_premium:>7.1f} "
+                      f"({r.exit_reason:<10s}) ₹{pnl:>+8,.0f}  "
                       f"[{s.time}→{r.exit_time} {r.hold_mins}m]")
-            else:
+            elif s.paired_instrument_key:
                 comb_e = s.entry_premium + s.paired_premium
                 comb_x = r.exit_premium + r.paired_exit_premium
-                print(f"    {w} {s.strategy:<16s} SELL straddle "
+                print(f"    {w} {s.strategy:<16s} SELL strangle "
                       f"@{comb_e:>7.1f} → {comb_x:>7.1f} "
+                      f"({r.exit_reason:<10s}) ₹{pnl:>+8,.0f}  "
+                      f"[{s.time}→{r.exit_time} {r.hold_mins}m]")
+            else:
+                print(f"    {w} {s.strategy:<16s} SELL {s.strike:>7.0f} {s.option_type} "
+                      f"@{s.entry_premium:>7.1f} → {r.exit_premium:>7.1f} "
+                      f"({r.exit_reason:<10s}) ₹{pnl:>+8,.0f}  "
+                      f"[{s.time}→{r.exit_time} {r.hold_mins}m]"
+                      f"  {s.note}" if s.note else
+                      f"    {w} {s.strategy:<16s} SELL {s.strike:>7.0f} {s.option_type} "
+                      f"@{s.entry_premium:>7.1f} → {r.exit_premium:>7.1f} "
                       f"({r.exit_reason:<10s}) ₹{pnl:>+8,.0f}  "
                       f"[{s.time}→{r.exit_time} {r.hold_mins}m]")
 
     # ── Per-strategy summary ────────────────────────────────────────
     print(f"\n{'='*75}")
-    print(f"  STRATEGY BREAKDOWN")
+    print(f"  STRATEGY BREAKDOWN — {index_name}")
     print(f"{'='*75}")
 
-    strat_order = ["vwap_bounce", "orb_breakout", "ema_pullback",
-                   "short_straddle", "expiry_theta"]
+    strat_order = ["momentum_scalp", "orb_retest", "short_strangle", "day_end_sell"]
     for sn in strat_order:
         trades = by_strategy.get(sn, [])
         if not trades and sn not in strategies:
@@ -962,11 +939,13 @@ def main():
         losing_pnl = [t.pnl_per_lot * lot for t in trades if not t.won]
         avg_win = sum(winning_pnl) / len(winning_pnl) if winning_pnl else 0
         avg_loss = sum(losing_pnl) / len(losing_pnl) if losing_pnl else 0
+        expectancy = (wr / 100 * avg_win) + ((100 - wr) / 100 * avg_loss)
 
         print(f"\n  ┌─ {sn.upper()} {'─' * (55 - len(sn))}")
         print(f"  │ Trades: {total}  |  Wins: {wins}  |  Win Rate: {wr:.1f}%")
         print(f"  │ Total P&L: ₹{total_pnl:>+10,.0f}  |  Avg: ₹{avg_pnl:>+8,.0f}/trade")
         print(f"  │ Avg Win: ₹{avg_win:>+8,.0f}  |  Avg Loss: ₹{avg_loss:>+8,.0f}")
+        print(f"  │ Expectancy: ₹{expectancy:>+8,.0f}/trade")
         print(f"  │ Avg hold: {avg_hold:.0f} min  |  Exits: {dict(exits)}")
         print(f"  └{'─' * 60}")
 
@@ -982,50 +961,70 @@ def main():
     avg_pnl = total_pnl / total
     traded_days = len(trading_days) - len(skipped)
 
+    winning_pnl = [t.pnl_per_lot * lot for t in all_results if t.won]
+    losing_pnl = [t.pnl_per_lot * lot for t in all_results if not t.won]
+    avg_win = sum(winning_pnl) / len(winning_pnl) if winning_pnl else 0
+    avg_loss = sum(losing_pnl) / len(losing_pnl) if losing_pnl else 0
+
     print(f"\n  {'═' * 60}")
     print(f"  COMBINED: {total} trades | {wins} wins | {wr:.1f}% WIN RATE")
     print(f"  Total P&L: ₹{total_pnl:>+10,.0f}  |  Avg: ₹{avg_pnl:>+8,.0f}/trade")
+    print(f"  Avg Win: ₹{avg_win:>+8,.0f}  |  Avg Loss: ₹{avg_loss:>+8,.0f}")
     print(f"  Avg signals/day: {total / traded_days:.1f}  |  Days: {traded_days}/{len(trading_days)}")
     print(f"  {'═' * 60}")
 
     # ── Daily P&L ───────────────────────────────────────────────────
     print(f"\n  DAILY P&L:")
-    print(f"  {'Date':<12s} {'Trades':>6s} {'Wins':>5s} {'WR':>6s} {'P&L':>10s}")
-    print(f"  {'─'*12} {'─'*6} {'─'*5} {'─'*6} {'─'*10}")
+    print(f"  {'Date':<12s} {'Trades':>6s} {'Wins':>5s} {'WR':>6s} {'P&L':>10s}  {'Cum P&L':>10s}")
+    print(f"  {'─'*12} {'─'*6} {'─'*5} {'─'*6} {'─'*10}  {'─'*10}")
     cum = 0
+    winning_days = 0
     for day in sorted(by_date):
         trades = by_date[day]
         d_wins = sum(1 for t in trades if t.won)
         d_pnl = sum(t.pnl_per_lot * lot for t in trades)
         d_wr = d_wins / len(trades) * 100 if trades else 0
         cum += d_pnl
-        bar = "█" * min(int(abs(d_pnl) / 500), 20)
-        sign = "+" if d_pnl >= 0 else "-"
+        if d_pnl > 0:
+            winning_days += 1
+        bar_len = min(int(abs(d_pnl) / 300), 20)
+        bar = ("█" if d_pnl >= 0 else "░") * bar_len
         print(f"  {day!s:<12s} {len(trades):>6d} {d_wins:>5d} {d_wr:>5.0f}% "
-              f"₹{d_pnl:>+9,.0f}  {bar}")
-    print(f"  {'─'*12} {'─'*6} {'─'*5} {'─'*6} {'─'*10}")
+              f"₹{d_pnl:>+9,.0f}  ₹{cum:>+9,.0f}  {bar}")
+    print(f"  {'─'*12} {'─'*6} {'─'*5} {'─'*6} {'─'*10}  {'─'*10}")
     print(f"  {'TOTAL':<12s} {total:>6d} {wins:>5d} {wr:>5.1f}% ₹{cum:>+9,.0f}")
+    print(f"  Winning days: {winning_days}/{len(by_date)}")
 
     if skipped:
-        print(f"\n  Skipped days: {', '.join(str(d) for d, _ in skipped)}")
+        print(f"\n  Skipped: {', '.join(str(d) for d, _ in skipped)}")
 
-    # ── Channel signal format preview ───────────────────────────────
-    print(f"\n\n  SAMPLE SIGNAL FORMAT (for Telegram channel):")
+    # ── Sample signals ──────────────────────────────────────────────
+    print(f"\n\n  SAMPLE SIGNALS (Telegram channel format):")
     print(f"  {'─'*50}")
-    for r in all_results[:3]:
+    shown = 0
+    for r in all_results:
+        if shown >= 4:
+            break
         s = r.signal
+        pnl = r.pnl_per_lot * lot
+        label = s.strategy.upper().replace("_", " ")
         if s.action == "BUY":
-            print(f"  🟢 {s.strategy.upper().replace('_',' ')}")
+            print(f"  🟢 {label}")
             print(f"  BUY {s.index} {s.strike:.0f} {s.option_type} @ ₹{s.entry_premium:.1f}")
             print(f"  SL: ₹{s.sl_premium:.1f} | TGT: ₹{s.tgt_premium:.1f}")
-        else:
-            print(f"  🔴 {s.strategy.upper().replace('_',' ')}")
+        elif s.paired_instrument_key:
+            print(f"  🔴 {label}")
             print(f"  SELL {s.index} {s.strike:.0f} {s.option_type} @ ₹{s.entry_premium:.1f}")
             print(f"  SELL {s.index} {s.paired_strike:.0f} {s.paired_type} @ ₹{s.paired_premium:.1f}")
             comb = s.entry_premium + s.paired_premium
-            print(f"  Combined: ₹{comb:.1f} | SL: ₹{s.sl_premium:.1f} | TGT: ₹{s.tgt_premium:.1f}")
-        print(f"  Result: {'✅ WIN' if r.won else '❌ LOSS'} ₹{r.pnl_per_lot * lot:+,.0f}")
+            print(f"  Combined: ₹{comb:.0f} | SL: ₹{s.sl_premium:.0f} | TGT: ₹{s.tgt_premium:.0f}")
+        else:
+            print(f"  🔴 {label}")
+            print(f"  SELL {s.index} {s.strike:.0f} {s.option_type} @ ₹{s.entry_premium:.1f}")
+            print(f"  SL: ₹{s.sl_premium:.1f} | TGT: hold to close")
+        print(f"  → {'✅ WIN' if r.won else '❌ LOSS'} ₹{pnl:+,.0f} ({r.hold_mins}m)")
         print()
+        shown += 1
 
     print()
 
