@@ -28,7 +28,7 @@ log = get_logger("signal_poster")
 IST = ZoneInfo("Asia/Kolkata")
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHANNEL = os.environ.get("TELEGRAM_SIGNAL_CHANNEL", "@nifty_signals_test")
+TELEGRAM_CHANNEL = os.environ.get("TELEGRAM_SIGNAL_CHANNEL", "-1004385130897")
 
 INDEXES = {
     "NIFTY": {
@@ -121,6 +121,16 @@ class ActiveTrade:
     entry_time: str
     max_hold_until: str
     posted_msg_id: int = 0
+
+
+@dataclass
+class ClosedTrade:
+    signal: Signal
+    exit_premium: float
+    exit_time: str
+    exit_reason: str
+    pnl: float
+    won: bool
 
 
 # ── Telegram ────────────────────────────────────────────────────────
@@ -495,61 +505,105 @@ def detect_day_end_sell(candles_5min: list[dict], index_name: str,
     )]
 
 
-# ── Signal formatting ──────────────────────────────────────────────
+# ── Signal formatting (human channel style) ────────────────────────
 
 def format_signal(s: Signal) -> str:
     lot = INDEXES[s.index]["lot_size"]
-    label = s.strategy.upper().replace("_", " ")
 
     if s.action == "BUY":
         return (
-            f"🟢 <b>{label}</b>\n"
             f"BUY {s.index} {s.strike:.0f} {s.option_type} @ ₹{s.entry_premium:.1f}\n"
-            f"SL: ₹{s.sl_premium:.1f} | TGT: ₹{s.tgt_premium:.1f}\n"
-            f"Lot: {lot} | Max Hold: {STRATEGY_PARAMS[s.strategy].get('max_hold_mins', 60)}m\n"
-            f"⏰ {s.time}"
+            f"SL ₹{s.sl_premium:.1f} | TGT ₹{s.tgt_premium:.1f}\n"
+            f"\n"
+            f"Lot: {lot} | Hold: {STRATEGY_PARAMS[s.strategy].get('max_hold_mins', 15)}m max"
         )
     elif s.paired_instrument_key:
         combined = s.entry_premium + s.paired_premium
         return (
-            f"🔴 <b>{label}</b>\n"
             f"SELL {s.index} {s.strike:.0f} {s.option_type} @ ₹{s.entry_premium:.1f}\n"
             f"SELL {s.index} {s.paired_strike:.0f} {s.paired_type} @ ₹{s.paired_premium:.1f}\n"
-            f"Combined: ₹{combined:.0f} | SL: ₹{s.sl_premium:.0f} | TGT: ₹{s.tgt_premium:.0f}\n"
-            f"Lot: {lot} | Exit: {STRATEGY_PARAMS[s.strategy].get('time_exit', '15:15')}\n"
-            f"⏰ {s.time}"
+            f"Combined ₹{combined:.0f} | SL ₹{s.sl_premium:.0f} | TGT ₹{s.tgt_premium:.0f}\n"
+            f"\n"
+            f"Lot: {lot} | Exit by {STRATEGY_PARAMS[s.strategy].get('time_exit', '15:15')}"
         )
     else:
         return (
-            f"🔴 <b>{label}</b>\n"
             f"SELL {s.index} {s.strike:.0f} {s.option_type} @ ₹{s.entry_premium:.1f}\n"
-            f"SL: ₹{s.sl_premium:.1f} | Hold to close\n"
-            f"Lot: {lot} | Exit: {STRATEGY_PARAMS[s.strategy].get('time_exit', '15:10')}\n"
-            f"⏰ {s.time}"
+            f"SL ₹{s.sl_premium:.1f} | TGT hold to expiry\n"
+            f"\n"
+            f"Lot: {lot} | Exit by {STRATEGY_PARAMS[s.strategy].get('time_exit', '15:10')}"
         )
 
 
 def format_exit(s: Signal, exit_premium: float, reason: str, pnl: float, won: bool) -> str:
-    icon = "✅" if won else "❌"
-    return (
-        f"{icon} <b>EXIT — {s.strategy.upper().replace('_', ' ')}</b>\n"
-        f"{s.index} {s.strike:.0f} {s.option_type}\n"
-        f"Entry: ₹{s.entry_premium:.1f} → Exit: ₹{exit_premium:.1f}\n"
-        f"P&L: ₹{pnl:+,.0f} | {reason}\n"
-        f"⏰ {now_time_str()}"
-    )
+    icon = "✅ TARGET HIT" if reason == "TGT hit" else ("❌ SL HIT" if reason == "SL hit" else "🔔 TIME EXIT")
+    result = "PROFIT" if won else "LOSS"
+
+    if s.paired_instrument_key:
+        return (
+            f"{icon}\n"
+            f"{s.index} {s.strike:.0f} {s.option_type} + {s.paired_strike:.0f} {s.paired_type}\n"
+            f"Entry ₹{s.entry_premium + s.paired_premium:.0f} → Exit ₹{exit_premium:.1f}\n"
+            f"{result}: ₹{pnl:+,.0f}"
+        )
+    else:
+        return (
+            f"{icon}\n"
+            f"{s.index} {s.strike:.0f} {s.option_type}\n"
+            f"Entry ₹{s.entry_premium:.1f} → Exit ₹{exit_premium:.1f}\n"
+            f"{result}: ₹{pnl:+,.0f}"
+        )
+
+
+def format_day_summary(closed_trades: list[ClosedTrade], today: date) -> str:
+    if not closed_trades:
+        return f"📋 <b>Day Summary — {today}</b>\nNo signals today."
+
+    total = len(closed_trades)
+    wins = sum(1 for t in closed_trades if t.won)
+    losses = total - wins
+    wr = wins / total * 100 if total else 0
+    total_pnl = sum(t.pnl for t in closed_trades)
+
+    lines = [
+        f"📋 <b>Day Summary — {today}</b>",
+        f"",
+        f"Signals: {total} | Wins: {wins} | Losses: {losses}",
+        f"Win Rate: {wr:.0f}%",
+        f"Total P&L: ₹{total_pnl:+,.0f}",
+        f"",
+        f"<b>All Trades:</b>",
+    ]
+
+    for i, t in enumerate(closed_trades, 1):
+        s = t.signal
+        icon = "✅" if t.won else "❌"
+        if s.paired_instrument_key:
+            desc = f"{s.action} {s.index} {s.strike:.0f}{s.option_type}+{s.paired_strike:.0f}{s.paired_type}"
+        else:
+            desc = f"{s.action} {s.index} {s.strike:.0f} {s.option_type}"
+        lines.append(
+            f"{icon} {desc} @ ₹{s.entry_premium:.0f} → ₹{t.exit_premium:.0f} "
+            f"| ₹{t.pnl:+,.0f} ({t.exit_reason})"
+        )
+
+    return "\n".join(lines)
 
 
 # ── Trade tracking ─────────────────────────────────────────────────
 
 def check_exits(active_trades: list[ActiveTrade], udata: UpstoxData,
-                dry_run: bool) -> list[ActiveTrade]:
+                dry_run: bool, closed_trades: list[ClosedTrade]) -> list[ActiveTrade]:
     still_active = []
     now_t = now_time_str()
 
     for trade in active_trades:
         s = trade.signal
         lot = INDEXES[s.index]["lot_size"]
+        exited = False
+        reason = ""
+        pnl = 0.0
+        current = 0.0
 
         if s.paired_instrument_key:
             ce_ltp = fetch_option_ltp(udata, s.instrument_key)
@@ -560,16 +614,17 @@ def check_exits(active_trades: list[ActiveTrade], udata: UpstoxData,
 
             time_exit = STRATEGY_PARAMS[s.strategy].get("time_exit", "15:15")
             if current >= s.sl_premium:
+                reason = "SL hit"
                 pnl = pnl_per_lot * lot
-                msg = format_exit(s, current, "SL hit", pnl, False)
-                send_update(msg, trade.posted_msg_id, dry_run)
-                continue
-            elif current <= s.tgt_premium or now_t >= time_exit:
-                reason = "TGT" if current <= s.tgt_premium else "time exit"
+                exited = True
+            elif current <= s.tgt_premium:
+                reason = "TGT hit"
                 pnl = pnl_per_lot * lot
-                msg = format_exit(s, current, reason, pnl, pnl > 0)
-                send_update(msg, trade.posted_msg_id, dry_run)
-                continue
+                exited = True
+            elif now_t >= time_exit:
+                reason = "time exit"
+                pnl = pnl_per_lot * lot
+                exited = True
         elif s.action == "BUY":
             current = fetch_option_ltp(udata, s.instrument_key)
             pnl_per_lot = (current - s.entry_premium) - 2 * IMPACT_COST
@@ -578,37 +633,43 @@ def check_exits(active_trades: list[ActiveTrade], udata: UpstoxData,
             now_mins = time_to_mins(now_t)
 
             if current <= s.sl_premium:
+                reason = "SL hit"
                 pnl = pnl_per_lot * lot
-                msg = format_exit(s, current, "SL hit", pnl, False)
-                send_update(msg, trade.posted_msg_id, dry_run)
-                continue
+                exited = True
             elif current >= s.tgt_premium:
+                reason = "TGT hit"
                 pnl = pnl_per_lot * lot
-                msg = format_exit(s, current, "TGT hit", pnl, True)
-                send_update(msg, trade.posted_msg_id, dry_run)
-                continue
+                exited = True
             elif now_mins - entry_mins >= max_hold:
+                reason = "time exit"
                 pnl = pnl_per_lot * lot
-                msg = format_exit(s, current, "time exit", pnl, pnl > 0)
-                send_update(msg, trade.posted_msg_id, dry_run)
-                continue
+                exited = True
         else:
             current = fetch_option_ltp(udata, s.instrument_key)
             pnl_per_lot = (s.entry_premium - current) - 2 * IMPACT_COST
             time_exit = STRATEGY_PARAMS[s.strategy].get("time_exit", "15:10")
 
             if current >= s.sl_premium:
+                reason = "SL hit"
                 pnl = pnl_per_lot * lot
-                msg = format_exit(s, current, "SL hit", pnl, False)
-                send_update(msg, trade.posted_msg_id, dry_run)
-                continue
+                exited = True
             elif now_t >= time_exit:
+                reason = "time exit"
                 pnl = pnl_per_lot * lot
-                msg = format_exit(s, current, "time exit", pnl, pnl > 0)
-                send_update(msg, trade.posted_msg_id, dry_run)
-                continue
+                exited = True
 
-        still_active.append(trade)
+        if exited:
+            won = pnl > 0
+            msg = format_exit(s, current, reason, pnl, won)
+            send_update(msg, trade.posted_msg_id, dry_run)
+            closed_trades.append(ClosedTrade(
+                signal=s, exit_premium=current, exit_time=now_t,
+                exit_reason=reason, pnl=pnl, won=won,
+            ))
+            print(f"  [{now_t}] EXIT {s.index} {s.strike:.0f} {s.option_type} "
+                  f"₹{pnl:+,.0f} ({reason})")
+        else:
+            still_active.append(trade)
 
     return still_active
 
@@ -655,6 +716,7 @@ def main():
     udata = None
     prev_closes: dict[str, float] = {}
     active_trades: list[ActiveTrade] = []
+    closed_trades: list[ClosedTrade] = []
     fired_counts: dict[str, dict[str, int]] = {ix: defaultdict(int) for ix in index_list}
     last_5min_bar: dict[str, str] = {}
     bot_started = False
@@ -667,11 +729,10 @@ def main():
 
         if t < "09:15" or t > "15:30":
             if t > "15:30":
-                summary = f"📋 <b>Day Summary — {today}</b>\n"
-                total_signals = sum(sum(v.values()) for v in fired_counts.values())
-                summary += f"Total signals: {total_signals}"
+                summary = format_day_summary(closed_trades, today)
                 send_telegram(summary, args.dry_run)
                 print("\nMarket closed. Exiting.")
+                print(summary.replace("<b>", "").replace("</b>", ""))
                 break
             time.sleep(30)
             continue
@@ -711,7 +772,7 @@ def main():
                 header += f"\n{ix} expiry: {expiries[ix]}"
             send_telegram(header, args.dry_run)
 
-        active_trades = check_exits(active_trades, udata, args.dry_run)
+        active_trades = check_exits(active_trades, udata, args.dry_run, closed_trades)
 
         for ix_name in index_list:
             idx = INDEXES[ix_name]
