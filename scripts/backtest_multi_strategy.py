@@ -262,6 +262,7 @@ def detect_momentum_scalp(candles_5min: list[dict], index_name: str,
     last_sig_time = None
 
     vol_sum, vol_count = 0.0, 0
+    has_volume = any(c["volume"] > 0 for c in candles_5min[:20])
     dbg_body_fail = 0
     dbg_vol_fail = 0
     dbg_dir_fail = 0
@@ -279,7 +280,7 @@ def detect_momentum_scalp(candles_5min: list[dict], index_name: str,
             break
         if last_sig_time and time_diff_mins(last_sig_time, c["time"]) < p["cooldown_mins"]:
             continue
-        if i < 2 or avg_vol <= 0:
+        if i < 2:
             continue
 
         body = abs(c["close"] - c["open"])
@@ -290,9 +291,12 @@ def detect_momentum_scalp(candles_5min: list[dict], index_name: str,
         if body_pct < p["body_pct"]:
             dbg_body_fail += 1
             continue
-        if c["volume"] < avg_vol * p["vol_mult"]:
-            dbg_vol_fail += 1
-            continue
+        if has_volume:
+            if avg_vol <= 0:
+                continue
+            if c["volume"] < avg_vol * p["vol_mult"]:
+                dbg_vol_fail += 1
+                continue
 
         rng = c["high"] - c["low"]
         if rng == 0:
@@ -343,7 +347,8 @@ def detect_momentum_scalp(candles_5min: list[dict], index_name: str,
         last_sig_time = c["time"]
 
     if verbose:
-        print(f"      [momentum_scalp] body_fail={dbg_body_fail} vol_fail={dbg_vol_fail} "
+        vol_tag = "vol_data=yes" if has_volume else "vol_data=NO(index)"
+        print(f"      [momentum_scalp] {vol_tag} body_fail={dbg_body_fail} vol_fail={dbg_vol_fail} "
               f"dir_fail={dbg_dir_fail} opt_fail={dbg_opt_fail} passed={dbg_passed_filters} "
               f"signals={len(signals)}")
 
