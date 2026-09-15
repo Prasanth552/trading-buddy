@@ -47,26 +47,27 @@ INDEXES = {
 
 STRATEGY_PARAMS = {
     "momentum_scalp": {
-        "body_pct": 0.15,
-        "vol_mult": 1.5,
+        "body_pct": 0.10,
+        "vol_mult": 1.3,
         "sl_pct": 0.12,
         "tgt_pct": 0.18,
         "max_hold_mins": 15,
-        "active_from": "09:30",
+        "active_from": "09:25",
         "active_to": "14:00",
         "max_signals": 3,
-        "cooldown_mins": 15,
+        "cooldown_mins": 10,
+        "close_position_min": 0.55,
     },
     "orb_retest": {
         "range_end": "09:44",
         "active_from": "09:50",
         "active_to": "12:00",
-        "sl_pct": 0.25,
-        "tgt_pct": 0.45,
-        "max_hold_mins": 60,
-        "min_range_pct": 0.15,
-        "max_range_pct": 0.80,
-        "retest_pct": 0.10,
+        "sl_pct": 0.20,
+        "tgt_pct": 0.40,
+        "max_hold_mins": 45,
+        "min_range_pct": 0.12,
+        "max_range_pct": 0.85,
+        "retest_pct": 0.12,
         "max_signals": 1,
     },
     "short_strangle": {
@@ -292,14 +293,15 @@ def detect_momentum_scalp(candles_5min: list[dict], index_name: str,
         if rng == 0:
             continue
 
+        cp_min = p.get("close_position_min", 0.55)
         direction = None
         if c["close"] > c["open"]:
             close_position = (c["close"] - c["low"]) / rng
-            if close_position > 0.6:
+            if close_position > cp_min:
                 direction = "bullish"
         else:
             close_position = (c["high"] - c["close"]) / rng
-            if close_position > 0.6:
+            if close_position > cp_min:
                 direction = "bearish"
 
         if not direction:
@@ -827,19 +829,27 @@ def main():
 
     from_date = date.fromisoformat(args.from_date)
     to_date = date.fromisoformat(args.to_date)
-    index_name = args.index.upper()
+    index_arg = args.index.upper()
 
     if args.strategies == "all":
         strategies = set(STRATEGY_PARAMS.keys())
     else:
         strategies = set(s.strip() for s in args.strategies.split(","))
 
-    idx = INDEXES[index_name]
-    lot = idx["lot_size"]
+    # Support --index all to run NIFTY + BANKNIFTY together
+    if index_arg == "ALL":
+        index_list = ["NIFTY", "BANKNIFTY"]
+    else:
+        index_list = [index_arg]
+
+    for ix in index_list:
+        if ix not in INDEXES:
+            print(f"Unknown index: {ix}")
+            sys.exit(1)
 
     print(f"\n{'='*75}")
     print(f"  MULTI-STRATEGY SIGNAL BACKTEST v2")
-    print(f"  {index_name} (lot={lot}) | {from_date} → {to_date}")
+    print(f"  {' + '.join(index_list)} | {from_date} → {to_date}")
     print(f"  Strategies: {', '.join(sorted(strategies))}")
     print(f"{'='*75}")
 
@@ -856,60 +866,73 @@ def main():
     by_strategy: dict[str, list[TradeResult]] = defaultdict(list)
     by_date: dict[date, list[TradeResult]] = defaultdict(list)
     skipped: list[tuple[date, str]] = []
-    prev_close = None
+    prev_closes: dict[str, float] = {}
 
     for day in trading_days:
-        print(f"  {day} ...", end=" " if not args.verbose else "\n", flush=True)
-        results, status, closing = run_day(
-            udata, index_name, day, master, strategies,
-            verbose=args.verbose, prev_close=prev_close)
-        prev_close = closing if closing > 0 else prev_close
+        day_results: list[TradeResult] = []
+        day_skipped = True
 
-        if status != "ok":
-            print(f"SKIP ({status})" if not args.verbose else f"    SKIP ({status})")
-            skipped.append((day, status))
+        for index_name in index_list:
+            idx = INDEXES[index_name]
+            tag = index_name[:5]
+            prev_close = prev_closes.get(index_name)
+
+            if len(index_list) > 1:
+                print(f"  {day} {tag} ...", end=" " if not args.verbose else "\n", flush=True)
+            else:
+                print(f"  {day} ...", end=" " if not args.verbose else "\n", flush=True)
+
+            results, status, closing = run_day(
+                udata, index_name, day, master, strategies,
+                verbose=args.verbose, prev_close=prev_close)
+            if closing > 0:
+                prev_closes[index_name] = closing
+
+            if status != "ok":
+                print(f"SKIP ({status})" if not args.verbose else f"    SKIP ({status})")
+                continue
+
+            day_skipped = False
+
+            if not args.verbose:
+                print(f"{len(results)} trades")
+            else:
+                print(f"    → {len(results)} trades")
+
+            day_results += results
+
+        if day_skipped:
+            skipped.append((day, "all indexes skipped"))
             continue
 
-        if not args.verbose:
-            print(f"{len(results)} trades")
-        else:
-            print(f"    → {len(results)} trades")
-
-        for r in results:
+        for r in day_results:
             all_results.append(r)
             by_strategy[r.signal.strategy].append(r)
             by_date[day].append(r)
 
             s = r.signal
+            lot = INDEXES[s.index]["lot_size"]
             pnl = r.pnl_per_lot * lot
             w = "✓" if r.won else "✗"
+            ix_tag = f"{s.index[:5]:>5s}" if len(index_list) > 1 else ""
+            note_str = f"  {s.note}" if s.note else ""
             if s.action == "BUY":
-                print(f"    {w} {s.strategy:<16s} BUY {s.strike:>7.0f} {s.option_type} "
+                print(f"    {w} {s.strategy:<16s}{ix_tag} BUY {s.strike:>7.0f} {s.option_type} "
                       f"@{s.entry_premium:>7.1f} → {r.exit_premium:>7.1f} "
                       f"({r.exit_reason:<10s}) ₹{pnl:>+8,.0f}  "
-                      f"[{s.time}→{r.exit_time} {r.hold_mins}m]"
-                      f"  {s.note}" if s.note else
-                      f"    {w} {s.strategy:<16s} BUY {s.strike:>7.0f} {s.option_type} "
-                      f"@{s.entry_premium:>7.1f} → {r.exit_premium:>7.1f} "
-                      f"({r.exit_reason:<10s}) ₹{pnl:>+8,.0f}  "
-                      f"[{s.time}→{r.exit_time} {r.hold_mins}m]")
+                      f"[{s.time}→{r.exit_time} {r.hold_mins}m]{note_str}")
             elif s.paired_instrument_key:
                 comb_e = s.entry_premium + s.paired_premium
                 comb_x = r.exit_premium + r.paired_exit_premium
-                print(f"    {w} {s.strategy:<16s} SELL strangle "
+                print(f"    {w} {s.strategy:<16s}{ix_tag} SELL strangle "
                       f"@{comb_e:>7.1f} → {comb_x:>7.1f} "
                       f"({r.exit_reason:<10s}) ₹{pnl:>+8,.0f}  "
                       f"[{s.time}→{r.exit_time} {r.hold_mins}m]")
             else:
-                print(f"    {w} {s.strategy:<16s} SELL {s.strike:>7.0f} {s.option_type} "
+                print(f"    {w} {s.strategy:<16s}{ix_tag} SELL {s.strike:>7.0f} {s.option_type} "
                       f"@{s.entry_premium:>7.1f} → {r.exit_premium:>7.1f} "
                       f"({r.exit_reason:<10s}) ₹{pnl:>+8,.0f}  "
-                      f"[{s.time}→{r.exit_time} {r.hold_mins}m]"
-                      f"  {s.note}" if s.note else
-                      f"    {w} {s.strategy:<16s} SELL {s.strike:>7.0f} {s.option_type} "
-                      f"@{s.entry_premium:>7.1f} → {r.exit_premium:>7.1f} "
-                      f"({r.exit_reason:<10s}) ₹{pnl:>+8,.0f}  "
-                      f"[{s.time}→{r.exit_time} {r.hold_mins}m]")
+                      f"[{s.time}→{r.exit_time} {r.hold_mins}m]{note_str}")
 
     # ── Per-strategy summary ────────────────────────────────────────
     print(f"\n{'='*75}")
@@ -929,7 +952,7 @@ def main():
         wins = sum(1 for t in trades if t.won)
         total = len(trades)
         wr = wins / total * 100
-        total_pnl = sum(t.pnl_per_lot * lot for t in trades)
+        total_pnl = sum(t.pnl_per_lot * INDEXES[t.signal.index]["lot_size"] for t in trades)
         avg_pnl = total_pnl / total
         avg_hold = sum(t.hold_mins for t in trades) / total
 
@@ -937,8 +960,8 @@ def main():
         for t in trades:
             exits[t.exit_reason] += 1
 
-        winning_pnl = [t.pnl_per_lot * lot for t in trades if t.won]
-        losing_pnl = [t.pnl_per_lot * lot for t in trades if not t.won]
+        winning_pnl = [t.pnl_per_lot * INDEXES[t.signal.index]["lot_size"] for t in trades if t.won]
+        losing_pnl = [t.pnl_per_lot * INDEXES[t.signal.index]["lot_size"] for t in trades if not t.won]
         avg_win = sum(winning_pnl) / len(winning_pnl) if winning_pnl else 0
         avg_loss = sum(losing_pnl) / len(losing_pnl) if losing_pnl else 0
         expectancy = (wr / 100 * avg_win) + ((100 - wr) / 100 * avg_loss)
@@ -959,12 +982,12 @@ def main():
     wins = sum(1 for t in all_results if t.won)
     total = len(all_results)
     wr = wins / total * 100
-    total_pnl = sum(t.pnl_per_lot * lot for t in all_results)
+    total_pnl = sum(t.pnl_per_lot * INDEXES[t.signal.index]["lot_size"] for t in all_results)
     avg_pnl = total_pnl / total
     traded_days = len(trading_days) - len(skipped)
 
-    winning_pnl = [t.pnl_per_lot * lot for t in all_results if t.won]
-    losing_pnl = [t.pnl_per_lot * lot for t in all_results if not t.won]
+    winning_pnl = [t.pnl_per_lot * INDEXES[t.signal.index]["lot_size"] for t in all_results if t.won]
+    losing_pnl = [t.pnl_per_lot * INDEXES[t.signal.index]["lot_size"] for t in all_results if not t.won]
     avg_win = sum(winning_pnl) / len(winning_pnl) if winning_pnl else 0
     avg_loss = sum(losing_pnl) / len(losing_pnl) if losing_pnl else 0
 
@@ -984,7 +1007,7 @@ def main():
     for day in sorted(by_date):
         trades = by_date[day]
         d_wins = sum(1 for t in trades if t.won)
-        d_pnl = sum(t.pnl_per_lot * lot for t in trades)
+        d_pnl = sum(t.pnl_per_lot * INDEXES[t.signal.index]["lot_size"] for t in trades)
         d_wr = d_wins / len(trades) * 100 if trades else 0
         cum += d_pnl
         if d_pnl > 0:
@@ -1008,7 +1031,7 @@ def main():
         if shown >= 4:
             break
         s = r.signal
-        pnl = r.pnl_per_lot * lot
+        pnl = r.pnl_per_lot * INDEXES[s.index]["lot_size"]
         label = s.strategy.upper().replace("_", " ")
         if s.action == "BUY":
             print(f"  🟢 {label}")
