@@ -679,11 +679,17 @@ def main():
         if udata is None:
             try:
                 udata = UpstoxData()
-                print(f"  [{t}] Upstox token loaded.")
-            except Exception as e:
-                print(f"  [{t}] Waiting for Upstox token... ({e})")
-                time.sleep(60)
-                continue
+                print(f"  [{t}] Upstox token loaded (cached).")
+            except Exception:
+                try:
+                    from src.broker.upstox_data import automated_login
+                    print(f"  [{t}] Running automated Upstox login...")
+                    udata = automated_login()
+                    print(f"  [{t}] Upstox auto-login OK.")
+                except Exception as e:
+                    print(f"  [{t}] Upstox login failed: {e}")
+                    time.sleep(60)
+                    continue
 
             for ix_name in index_list:
                 idx = INDEXES[ix_name]
