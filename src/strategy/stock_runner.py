@@ -47,17 +47,14 @@ STOCKS = {
         "key": "NSE_EQ|INE062A01020",
         "lot_size": 750, "strike_step": 10, "iv_annual": 0.28,
     },
-    "TATAMOTORS": {
-        "key": "NSE_EQ|INE155A01022",
-        "lot_size": 1400, "strike_step": 10, "iv_annual": 0.35,
-    },
+    # TATAMOTORS removed — not available in F&O on Upstox
     "BAJFINANCE": {
         "key": "NSE_EQ|INE296A01032",
         "lot_size": 125, "strike_step": 50, "iv_annual": 0.30,
     },
     "LT": {
         "key": "NSE_EQ|INE018A01030",
-        "lot_size": 150, "strike_step": 25, "iv_annual": 0.25,
+        "lot_size": 150, "strike_step": 50, "iv_annual": 0.25,
     },
     "TATASTEEL": {
         "key": "NSE_EQ|INE081A01020",
