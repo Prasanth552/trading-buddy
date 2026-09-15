@@ -575,41 +575,21 @@ def run_trading_day(ref_date: date, lots: int = 1):
         log.info("Entering %s positions...", strategy_name)
         enter_positions(strategy_name, ref_date, lots)
 
-    # Phase 2: Monitor every 60 seconds until 15:15
+    # Phase 2: Monitor index straddles + stock spreads every 60s until 15:10
+    stock_entry_time = datetime(ref_date.year, ref_date.month, ref_date.day, 15, 10, tzinfo=IST)
     market_end = datetime(ref_date.year, ref_date.month, ref_date.day, 15, 15, tzinfo=IST)
     log.info("Monitoring positions (every 60s until 15:15)...")
 
+    stock_spread_entered = False
     while not _shutdown and now_ist() < market_end:
         try:
             n = monitor_tick(ref_date)
             if n == 0:
-                log.info("All positions closed. Monitoring complete.")
-                break
+                log.info("All index positions closed.")
         except Exception:
             log.exception("Monitor tick error")
-        time.sleep(60)
 
-    # Force-close any remaining OPEN positions
-    if not _shutdown:
-        with db.get_conn() as conn:
-            still_open = conn.execute(
-                "SELECT COUNT(*) FROM strategy_live WHERE date=? AND status='OPEN'",
-                (ref_date.isoformat(),)
-            ).fetchone()[0]
-        if still_open:
-            log.info("Force-closing %d remaining positions at 15:15...", still_open)
-            monitor_tick(ref_date)
-
-    # Phase 3: Stock strategies at 15:35
-    stock_time = datetime(ref_date.year, ref_date.month, ref_date.day, 15, 35, tzinfo=IST)
-    if now_ist() < stock_time:
-        log.info("Waiting until 15:35 for stock strategies...")
-        sleep_until(stock_time)
-    if not _shutdown:
-        run_stock_strategies(ref_date)
-
-    # Phase 4: Live stock spread execution (ema20_rsi60)
-    if not _shutdown:
+        # Monitor existing stock spreads during market hours
         try:
             from src.strategy.stock_executor import (
                 enter_spread, monitor_open_positions, get_open_positions,
@@ -625,34 +605,57 @@ def run_trading_day(ref_date: date, lots: int = 1):
                         f"📊 *[STOCK EXIT] {c['stock']}*\n"
                         f"Reason: {reason} | P&L: ₹{pnl:+,.0f}"
                     )
-
-            entered = enter_spread(ref_date, lots=1)
-            if entered:
-                log.info("Stock spreads: entered %d new positions", len(entered))
-                for e in entered:
-                    is_bull = "bull" in e["direction"]
-                    tag = "BULL PUT" if is_bull else "BEAR CALL"
-                    pair = (f"{int(e['sell_strike'])}/{int(e['buy_strike'])} PE"
-                            if is_bull else
-                            f"{int(e['sell_strike'])}/{int(e['buy_strike'])} CE")
-                    tgt_spread = round(e["net_credit"] * (1 - e["profit_target_pct"]), 2)
-                    sl_spread = round(e["net_credit"] * (1 + e["stop_loss_mult"]), 2)
-                    _notify(
-                        f"🔴 *[LIVE STOCK] {tag} — {e['stock']}*\n"
-                        f"Pair: {pair}\n"
-                        f"Sell: {e['sell_premium']:.2f} | Buy: {e['buy_premium']:.2f} | "
-                        f"Credit: {e['net_credit']:.2f}\n"
-                        f"TGT: spread → {tgt_spread:.2f} ({e['profit_target_pct']*100:.0f}% profit) | "
-                        f"SL: spread → {sl_spread:.2f} ({e['stop_loss_mult']:.1f}x loss)\n"
-                        f"Expiry: {e['expiry_date']} | DTE: {e['dte_at_entry']}\n"
-                        f"Strategy: {LIVE_STRATEGY.replace('_', ' ')}"
-                    )
-
-            open_pos = get_open_positions()
-            if open_pos:
-                log.info("Stock spreads: %d positions still open", len(open_pos))
         except Exception:
-            log.exception("Live stock executor error")
+            log.exception("Stock spread monitor error")
+
+        # Enter new stock spreads at ~15:10 (daily candle nearly complete)
+        if not stock_spread_entered and now_ist() >= stock_entry_time:
+            stock_spread_entered = True
+            try:
+                entered = enter_spread(ref_date, lots=1)
+                if entered:
+                    log.info("Stock spreads: entered %d new positions", len(entered))
+                    for e in entered:
+                        is_bull = "bull" in e["direction"]
+                        tag = "BULL PUT" if is_bull else "BEAR CALL"
+                        pair = (f"{int(e['sell_strike'])}/{int(e['buy_strike'])} PE"
+                                if is_bull else
+                                f"{int(e['sell_strike'])}/{int(e['buy_strike'])} CE")
+                        tgt_spread = round(e["net_credit"] * (1 - e["profit_target_pct"]), 2)
+                        sl_spread = round(e["net_credit"] * (1 + e["stop_loss_mult"]), 2)
+                        _notify(
+                            f"🔴 *[LIVE STOCK] {tag} — {e['stock']}*\n"
+                            f"Pair: {pair}\n"
+                            f"Sell: {e['sell_premium']:.2f} | Buy: {e['buy_premium']:.2f} | "
+                            f"Credit: {e['net_credit']:.2f}\n"
+                            f"TGT: spread → {tgt_spread:.2f} ({e['profit_target_pct']*100:.0f}% profit) | "
+                            f"SL: spread → {sl_spread:.2f} ({e['stop_loss_mult']:.1f}x loss)\n"
+                            f"Expiry: {e['expiry_date']} | DTE: {e['dte_at_entry']}\n"
+                            f"Strategy: {LIVE_STRATEGY.replace('_', ' ')}"
+                        )
+            except Exception:
+                log.exception("Stock spread entry error")
+
+        time.sleep(60)
+
+    # Force-close any remaining OPEN index positions
+    if not _shutdown:
+        with db.get_conn() as conn:
+            still_open = conn.execute(
+                "SELECT COUNT(*) FROM strategy_live WHERE date=? AND status='OPEN'",
+                (ref_date.isoformat(),)
+            ).fetchone()[0]
+        if still_open:
+            log.info("Force-closing %d remaining index positions at 15:15...", still_open)
+            monitor_tick(ref_date)
+
+    # Phase 3: Stock simulation at 15:35 (for record-keeping with completed candle)
+    stock_time = datetime(ref_date.year, ref_date.month, ref_date.day, 15, 35, tzinfo=IST)
+    if now_ist() < stock_time:
+        log.info("Waiting until 15:35 for stock simulation...")
+        sleep_until(stock_time)
+    if not _shutdown:
+        run_stock_strategies(ref_date)
 
     # Summary
     summary = get_live_summary(ref_date)

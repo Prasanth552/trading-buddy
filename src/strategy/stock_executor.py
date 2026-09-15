@@ -82,30 +82,41 @@ def init_spread_live_db():
     _schema_done = True
 
 
-def _resolve_option(uclient: UpstoxClient, stock: str, expiry: date,
-                    strike: float, opt_type: str) -> dict | None:
-    """Resolve an Upstox instrument for a stock option."""
-    index_key = f"NSE:{stock}"
-    spec = config.UPSTOX_OPTION_SEGMENTS.get(index_key)
-    if not spec:
-        log.warning("No Upstox segment mapping for %s", index_key)
+def _get_option_keys_and_ltp(udata: UpstoxData, stock: str, expiry: date,
+                             sell_strike: float, buy_strike: float,
+                             opt_type: str) -> dict | None:
+    """Resolve instrument keys + fetch real LTP for both spread legs.
+
+    Uses the stock option master (trading_symbol prefix match) which
+    actually works for stock options, unlike the index-focused resolver.
+    Returns {"sell": ltp, "buy": ltp, "sell_key": key, "buy_key": key}
+    or None if resolution/LTP fails.
+    """
+    from src.strategy.stock_runner import _build_stock_option_master
+
+    master = _build_stock_option_master()
+    sell_key = master.get((stock, expiry, sell_strike, opt_type))
+    buy_key = master.get((stock, expiry, buy_strike, opt_type))
+
+    if not sell_key or not buy_key:
+        log.warning("%s: instrument keys not found (sell=%s/%s buy=%s/%s exp=%s)",
+                    stock, sell_strike, opt_type, buy_strike, opt_type, expiry)
         return None
-    from src.broker.upstox_client import pick_upstox_option
-    instruments = uclient.load_instruments()
-    return pick_upstox_option(instruments, spec["name"], expiry, strike,
-                              opt_type, spec["segment"])
 
-
-def _get_option_ltp(udata: UpstoxData, instrument_key: str) -> float | None:
-    """Get LTP for an option by its instrument_key."""
     try:
-        result = udata.ltp([instrument_key])
-        info = result.get(instrument_key)
-        if info and info.get("last_price"):
-            return float(info["last_price"])
+        prices = udata.ltp_by_key([sell_key, buy_key])
     except Exception as exc:
-        log.warning("LTP fetch failed for %s: %s", instrument_key, exc)
-    return None
+        log.warning("%s: LTP fetch failed: %s", stock, exc)
+        return None
+
+    sell_ltp = prices.get(sell_key)
+    buy_ltp = prices.get(buy_key)
+    if not sell_ltp or not buy_ltp:
+        log.warning("%s: LTP missing (sell=%s buy=%s)", stock, sell_ltp, buy_ltp)
+        return None
+
+    return {"sell": sell_ltp, "buy": buy_ltp,
+            "sell_key": sell_key, "buy_key": buy_key}
 
 
 def enter_spread(ref_date: date, lots: int = 1) -> list[dict]:
@@ -156,22 +167,15 @@ def enter_spread(ref_date: date, lots: int = 1) -> list[dict]:
         if buy_strike <= 0:
             continue
 
-        sell_inst = _resolve_option(uclient, stock_name, expiry, sell_strike, opt_type)
-        buy_inst = _resolve_option(uclient, stock_name, expiry, buy_strike, opt_type)
-        if not sell_inst or not buy_inst:
-            log.warning("%s: could not resolve option instruments (sell=%s buy=%s)",
-                        stock_name, sell_strike, buy_strike)
+        result = _get_option_keys_and_ltp(udata, stock_name, expiry,
+                                           sell_strike, buy_strike, opt_type)
+        if not result:
             continue
 
-        sell_key = sell_inst["instrument_key"]
-        buy_key = buy_inst["instrument_key"]
-
-        sell_ltp = _get_option_ltp(udata, sell_key)
-        buy_ltp = _get_option_ltp(udata, buy_key)
-
-        if sell_ltp is None or buy_ltp is None:
-            log.warning("%s: LTP unavailable (sell=%s buy=%s)", stock_name, sell_ltp, buy_ltp)
-            continue
+        sell_key = result["sell_key"]
+        buy_key = result["buy_key"]
+        sell_ltp = result["sell"]
+        buy_ltp = result["buy"]
 
         net_credit = sell_ltp - buy_ltp
         if net_credit <= 0.5:
@@ -298,8 +302,13 @@ def monitor_open_positions(ref_date: date) -> list[dict]:
             closed.append(p)
             continue
 
-        sell_ltp = _get_option_ltp(udata, p["sell_instrument_key"])
-        buy_ltp = _get_option_ltp(udata, p["buy_instrument_key"])
+        try:
+            prices = udata.ltp_by_key([p["sell_instrument_key"], p["buy_instrument_key"]])
+        except Exception as exc:
+            log.warning("%s: LTP fetch failed: %s", stock, exc)
+            continue
+        sell_ltp = prices.get(p["sell_instrument_key"])
+        buy_ltp = prices.get(p["buy_instrument_key"])
 
         if sell_ltp is None or buy_ltp is None:
             log.warning("%s: cannot price spread (sell=%s buy=%s), skipping monitor",
