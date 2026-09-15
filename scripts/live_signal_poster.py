@@ -636,35 +636,10 @@ def main():
     master = _build_option_master(None)
     print(f"  Master: {len(master)} entries")
 
-    udata = UpstoxData()
     today = now_ist().date()
-
-    prev_closes: dict[str, float] = {}
-    for ix_name in index_list:
-        idx = INDEXES[ix_name]
-        try:
-            yesterday = today - timedelta(days=1)
-            d = udata._get(
-                f"/v3/historical-candle/{idx['key']}/minutes/1"
-                f"/{yesterday.isoformat()}/{yesterday.isoformat()}")
-            candles = d.get("data", {}).get("candles", [])
-            if candles:
-                prev_closes[ix_name] = candles[0][4]
-        except Exception:
-            pass
-
     expiries = {}
     for ix_name in index_list:
         expiries[ix_name] = next_expiry(today, INDEXES[ix_name]["expiry_weekday"])
-
-    active_trades: list[ActiveTrade] = []
-    fired_counts: dict[str, dict[str, int]] = {ix: defaultdict(int) for ix in index_list}
-    last_5min_bar: dict[str, str] = {}
-
-    header = f"📊 <b>Signal Bot Started</b>\n{' + '.join(index_list)} | {today}"
-    for ix in index_list:
-        header += f"\n{ix} expiry: {expiries[ix]}"
-    send_telegram(header, args.dry_run)
 
     print(f"\n{'='*50}")
     print(f"  LIVE SIGNAL POSTER — {' + '.join(index_list)}")
@@ -673,7 +648,16 @@ def main():
         print(f"  {ix} expiry: {expiries[ix]}")
     print(f"  Mode: {'DRY RUN' if args.dry_run else 'LIVE POSTING'}")
     print(f"  Channel: {TELEGRAM_CHANNEL}")
-    print(f"{'='*50}\n")
+    print(f"{'='*50}")
+    print(f"  Waiting for Upstox token + market open...\n")
+
+    # Defer UpstoxData init until token is available (refreshes daily)
+    udata = None
+    prev_closes: dict[str, float] = {}
+    active_trades: list[ActiveTrade] = []
+    fired_counts: dict[str, dict[str, int]] = {ix: defaultdict(int) for ix in index_list}
+    last_5min_bar: dict[str, str] = {}
+    bot_started = False
 
     scan_interval = 60
 
@@ -691,6 +675,35 @@ def main():
                 break
             time.sleep(30)
             continue
+
+        if udata is None:
+            try:
+                udata = UpstoxData()
+                print(f"  [{t}] Upstox token loaded.")
+            except Exception as e:
+                print(f"  [{t}] Waiting for Upstox token... ({e})")
+                time.sleep(60)
+                continue
+
+            for ix_name in index_list:
+                idx = INDEXES[ix_name]
+                try:
+                    yesterday = today - timedelta(days=1)
+                    d = udata._get(
+                        f"/v3/historical-candle/{idx['key']}/minutes/1"
+                        f"/{yesterday.isoformat()}/{yesterday.isoformat()}")
+                    candles = d.get("data", {}).get("candles", [])
+                    if candles:
+                        prev_closes[ix_name] = candles[0][4]
+                except Exception:
+                    pass
+
+        if not bot_started:
+            bot_started = True
+            header = f"📊 <b>Signal Bot Started</b>\n{' + '.join(index_list)} | {today}"
+            for ix in index_list:
+                header += f"\n{ix} expiry: {expiries[ix]}"
+            send_telegram(header, args.dry_run)
 
         active_trades = check_exits(active_trades, udata, args.dry_run)
 
