@@ -147,6 +147,7 @@ def _build_stock_option_master():
     if _stock_option_cache is not None:
         return _stock_option_cache
 
+    import re
     from src.broker.upstox_client import UpstoxClient, _expiry_to_date
     uc = UpstoxClient()
     master = uc.load_instruments()
@@ -160,13 +161,16 @@ def _build_stock_option_master():
         if itype not in ("CE", "PE"):
             continue
         tsym = (inst.get("trading_symbol") or "").upper()
-        for stock_name in STOCKS:
-            if tsym.startswith(stock_name + " "):
-                strike = float(inst.get("strike_price", 0))
-                ed = _expiry_to_date(inst.get("expiry"))
-                if ed and strike > 0:
-                    opts[(stock_name, ed, strike, itype)] = inst.get("instrument_key")
-                break
+        base = re.match(r'^([A-Z&]+)', tsym)
+        if not base:
+            continue
+        sym = base.group(1)
+        if sym not in STOCKS:
+            continue
+        strike = float(inst.get("strike_price", 0))
+        ed = _expiry_to_date(inst.get("expiry"))
+        if ed and strike > 0:
+            opts[(sym, ed, strike, itype)] = inst.get("instrument_key")
     _stock_option_cache = opts
     _log.info("Stock option master built: %d entries", len(opts))
     return opts
