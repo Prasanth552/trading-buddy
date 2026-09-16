@@ -133,18 +133,24 @@ OEL_BLOCKLIST: set[str] = set()
 # EOD Report — sent to Telegram at market close
 # ---------------------------------------------------------------------------
 EOD_REPORT_TIME = "15:35"  # IST — 5 min after market close
-OEH_UNIVERSE = [
-    "RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK", "BHARTIARTL",
-    "SBIN", "ITC", "BAJFINANCE", "LT", "KOTAKBANK", "AXISBANK",
-    "TITAN", "MARUTI", "SUNPHARMA", "HCLTECH", "WIPRO", "TATASTEEL",
-    "ADANIENT", "CIPLA", "DRREDDY", "M&M", "ASIANPAINT", "HINDUNILVR",
-    "NESTLEIND", "ONGC", "ULTRACEMCO", "JSWSTEEL", "TRENT",
-    "BAJAJFINSV", "VEDL", "HINDALCO", "BPCL", "HEROMOTOCO", "EICHERMOT",
-    "TATAPOWER", "BEL", "NTPC", "POWERGRID", "COALINDIA", "PIDILITIND",
-    "SHREECEM", "DABUR", "COLPAL", "AMBUJACEM", "BHEL",
-    "DIVISLAB", "BRITANNIA",
-]
-OEL_UNIVERSE = OEH_UNIVERSE
+OEH_UNIVERSE: list[str] = []  # populated at scan time from F&O master
+OEL_UNIVERSE: list[str] = []
+
+
+def _build_fno_universe(master: list[dict]) -> list[str]:
+    """Extract all unique stock symbols that have NSE_FO options listed."""
+    fno_syms: set[str] = set()
+    index_names = {"NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY", "NIFTY BANK", "NIFTY 50"}
+    for inst in master:
+        if inst.get("segment") != "NSE_FO":
+            continue
+        itype = (inst.get("instrument_type") or "").upper()
+        if itype not in ("CE", "PE"):
+            continue
+        name = (inst.get("name") or "").upper()
+        if name and name not in index_names:
+            fno_syms.add(name)
+    return sorted(fno_syms)
 
 # ---------------------------------------------------------------------------
 # Follow-up / exit message classification
@@ -1420,6 +1426,12 @@ async def _run_oeh_list():
             if tsym:
                 eq_keys[tsym] = inst.get("instrument_key")
 
+    global OEH_UNIVERSE, OEL_UNIVERSE
+    if not OEH_UNIVERSE:
+        OEH_UNIVERSE = _build_fno_universe(master)
+        OEL_UNIVERSE = OEH_UNIVERSE
+        log.info("[OEH-LIST] Built F&O universe: %d stocks", len(OEH_UNIVERSE))
+
     today = datetime.now(IST).date()
     from_dt = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=15)
     to_dt = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=16)
@@ -1435,11 +1447,11 @@ async def _run_oeh_list():
             continue
         try:
             candles = ud.historical_data(inst_key, from_dt, to_dt, "1minute")
-            _t.sleep(0.3)
+            _t.sleep(0.15)
         except Exception as exc:
             err = str(exc)
             if "429" in err or "rate" in err.lower():
-                _t.sleep(3)
+                _t.sleep(2)
                 try:
                     candles = ud.historical_data(inst_key, from_dt, to_dt, "1minute")
                 except Exception:
@@ -1529,6 +1541,12 @@ async def _run_oeh_scan():
             if tsym:
                 eq_keys[tsym] = inst.get("instrument_key")
 
+    global OEH_UNIVERSE, OEL_UNIVERSE
+    if not OEH_UNIVERSE:
+        OEH_UNIVERSE = _build_fno_universe(master)
+        OEL_UNIVERSE = OEH_UNIVERSE
+        log.info("[OEH] Built F&O universe: %d stocks", len(OEH_UNIVERSE))
+
     today = datetime.now(IST).date()
     from_dt = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=15)
     to_dt = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=25)
@@ -1565,11 +1583,11 @@ async def _run_oeh_scan():
 
         try:
             candles = ud.historical_data(inst_key, from_dt, to_dt, "5minute")
-            _t.sleep(0.3)
+            _t.sleep(0.15)
         except Exception as exc:
             err = str(exc)
             if "429" in err or "rate" in err.lower():
-                _t.sleep(3)
+                _t.sleep(2)
                 try:
                     candles = ud.historical_data(inst_key, from_dt, to_dt, "5minute")
                 except Exception:
@@ -1686,6 +1704,12 @@ async def _run_oel_list():
             if tsym:
                 eq_keys[tsym] = inst.get("instrument_key")
 
+    global OEH_UNIVERSE, OEL_UNIVERSE
+    if not OEL_UNIVERSE:
+        OEL_UNIVERSE = _build_fno_universe(master)
+        OEH_UNIVERSE = OEL_UNIVERSE
+        log.info("[OEL-LIST] Built F&O universe: %d stocks", len(OEL_UNIVERSE))
+
     today = datetime.now(IST).date()
     from_dt = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=15)
     to_dt = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=16)
@@ -1701,11 +1725,11 @@ async def _run_oel_list():
             continue
         try:
             candles = ud.historical_data(inst_key, from_dt, to_dt, "1minute")
-            _t.sleep(0.3)
+            _t.sleep(0.15)
         except Exception as exc:
             err = str(exc)
             if "429" in err or "rate" in err.lower():
-                _t.sleep(3)
+                _t.sleep(2)
                 try:
                     candles = ud.historical_data(inst_key, from_dt, to_dt, "1minute")
                 except Exception:
@@ -1795,6 +1819,12 @@ async def _run_oel_scan():
             if tsym:
                 eq_keys[tsym] = inst.get("instrument_key")
 
+    global OEH_UNIVERSE, OEL_UNIVERSE
+    if not OEL_UNIVERSE:
+        OEL_UNIVERSE = _build_fno_universe(master)
+        OEH_UNIVERSE = OEL_UNIVERSE
+        log.info("[OEL] Built F&O universe: %d stocks", len(OEL_UNIVERSE))
+
     today = datetime.now(IST).date()
     from_dt = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=15)
     to_dt = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=25)
@@ -1831,11 +1861,11 @@ async def _run_oel_scan():
 
         try:
             candles = ud.historical_data(inst_key, from_dt, to_dt, "5minute")
-            _t.sleep(0.3)
+            _t.sleep(0.15)
         except Exception as exc:
             err = str(exc)
             if "429" in err or "rate" in err.lower():
-                _t.sleep(3)
+                _t.sleep(2)
                 try:
                     candles = ud.historical_data(inst_key, from_dt, to_dt, "5minute")
                 except Exception:
