@@ -719,13 +719,35 @@ def main():
         now = now_ist()
         t = now.strftime("%H:%M")
 
+        if now.weekday() >= 5:
+            print(f"  [{t}] Weekend — sleeping until Monday 08:50...")
+            days_until_monday = 7 - now.weekday()
+            next_monday = now.replace(hour=8, minute=50, second=0, microsecond=0) + timedelta(days=days_until_monday)
+            time.sleep((next_monday - now).total_seconds())
+            today = now_ist().date()
+            for ix_name in index_list:
+                expiries[ix_name] = next_expiry(today, INDEXES[ix_name]["expiry_weekday"])
+            fired_counts = {ix: defaultdict(int) for ix in index_list}
+            active_trades, closed_trades = [], []
+            udata, bot_started = None, False
+            continue
+
         if t < "09:15" or t > "15:30":
             if t > "15:30":
                 summary = format_day_summary(closed_trades, today)
                 send_telegram(summary, args.dry_run)
-                print("\nMarket closed. Exiting.")
+                print("\nMarket closed. Sleeping until tomorrow 08:50...")
                 print(summary.replace("<b>", "").replace("</b>", ""))
-                break
+                tomorrow = now.replace(hour=8, minute=50, second=0, microsecond=0) + timedelta(days=1)
+                time.sleep((tomorrow - now).total_seconds())
+                today = now_ist().date()
+                for ix_name in index_list:
+                    expiries[ix_name] = next_expiry(today, INDEXES[ix_name]["expiry_weekday"])
+                fired_counts = {ix: defaultdict(int) for ix in index_list}
+                active_trades, closed_trades = [], []
+                udata, bot_started = None, False
+                master = _build_option_master(None)
+                continue
             time.sleep(30)
             continue
 
