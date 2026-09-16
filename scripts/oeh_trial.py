@@ -163,15 +163,21 @@ def main():
 
     print(f"  Option master: {len(opt_master)} entries")
 
-    # Find next expiry (Tuesday for stocks)
-    def next_expiry(ref, weekday=1):
-        days = (weekday - ref.weekday()) % 7
-        if days == 0:
-            return ref
-        return ref + timedelta(days=days if days > 0 else 7)
+    # Debug: show what symbols we have in opt_master for first 3 candidates
+    cand_syms = {c["symbol"] for c in candidates}
+    for dbg_sym in list(cand_syms)[:3]:
+        matching = {k for k in opt_master if k[0] == dbg_sym}
+        if matching:
+            expiries = sorted({k[1] for k in matching})
+            strikes_sample = sorted({k[2] for k in matching if k[1] == expiries[0]})[:5]
+            print(f"  DEBUG {dbg_sym}: {len(matching)} options, expiries={expiries[:3]}, "
+                  f"sample strikes={strikes_sample}")
+        else:
+            # Check partial matches
+            partials = {k[0] for k in opt_master if dbg_sym in k[0] or k[0] in dbg_sym}
+            print(f"  DEBUG {dbg_sym}: 0 options! Partial matches in master: {list(partials)[:5]}")
 
-    expiry = next_expiry(ref_date)
-    print(f"  Primary expiry: {expiry}\n")
+    print()
 
     wins = 0
     losses = 0
@@ -182,31 +188,30 @@ def main():
         sym = c["symbol"]
         spot = c["close"]
 
-        # Find available strikes for this symbol near ATM
-        sym_strikes = sorted({k[2] for k in opt_master if k[0] == sym and k[3] == "PE"})
-        if not sym_strikes:
+        # Find all PE options for this symbol
+        sym_pe_keys = {k: v for k, v in opt_master.items() if k[0] == sym and k[3] == "PE"}
+        if not sym_pe_keys:
             print(f"  ⚠️  {sym:<15s} — no PE options in master")
             continue
 
-        # Find ATM strike closest to spot
-        atm_strike = min(sym_strikes, key=lambda s: abs(s - spot))
+        # Find nearest expiry >= ref_date
+        avail_expiries = sorted({k[1] for k in sym_pe_keys if k[1] >= ref_date})
+        if not avail_expiries:
+            print(f"  ⚠️  {sym:<15s} — no future expiry found")
+            continue
+        used_expiry = avail_expiries[0]
 
-        # Try primary expiry, then scan nearby dates
-        opt_key = opt_master.get((sym, expiry, atm_strike, "PE"))
-        used_expiry = expiry
+        # Find ATM strike closest to spot for that expiry
+        expiry_strikes = sorted({k[2] for k in sym_pe_keys if k[1] == used_expiry})
+        if not expiry_strikes:
+            print(f"  ⚠️  {sym:<15s} — no strikes for expiry {used_expiry}")
+            continue
+
+        strike = min(expiry_strikes, key=lambda s: abs(s - spot))
+        opt_key = opt_master.get((sym, used_expiry, strike, "PE"))
+
         if not opt_key:
-            for d in range(0, 8):
-                alt_exp = ref_date + timedelta(days=d)
-                key = opt_master.get((sym, alt_exp, atm_strike, "PE"))
-                if key:
-                    opt_key = key
-                    used_expiry = alt_exp
-                    break
-
-        strike = atm_strike
-
-        if not opt_key:
-            print(f"  ⚠️  {sym:<15s} — no PE option found for strike {atm_strike:.0f}")
+            print(f"  ⚠️  {sym:<15s} — key lookup failed for {strike:.0f}PE exp={used_expiry}")
             continue
 
         # Fetch 1-min PE candles from 09:20 to 15:30
