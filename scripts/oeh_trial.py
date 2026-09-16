@@ -130,21 +130,21 @@ def main():
     for c in candidates:
         print(f"  {c['symbol']:<15s} {c['open']:>8.1f} {c['high']:>8.1f} {c['close']:>8.1f} {c['drop_pct']:>5.2f}%")
 
-    # PE option performance check with 1-min candles
+    # PE option performance — rupee-based stepping floors
     SL_PCT = 0.30
-    FLOOR_MULT = 1.5
-    TGT_MULT = 2.0
+    FLOOR_STEP = 1500  # ₹1500 steps: lock ₹1500, then ₹3000, ₹4500 ...
 
     print(f"\n{'='*60}")
     print(f"  PE OPTION PERFORMANCE (1-min candles)")
-    print(f"  SL: {SL_PCT*100:.0f}% | Floor TGT: {FLOOR_MULT}x | Full TGT: {TGT_MULT}x")
+    print(f"  SL: {SL_PCT*100:.0f}% of entry | Floor steps: ₹{FLOOR_STEP}")
     print(f"{'='*60}\n")
 
-    # Build option master from raw UpstoxData master
+    # Build option master + lot_size map from raw master
     from src.broker.upstox_data import _expiry_to_date
     import re as _re
 
-    opt_master = {}  # (base_sym, expiry_date, strike, "PE"/"CE") -> instrument_key
+    opt_master = {}   # (base_sym, expiry, strike, "PE"/"CE") -> instrument_key
+    lot_sizes = {}    # base_sym -> lot_size
     for inst in master:
         if inst.get("segment") != "NSE_FO":
             continue
@@ -160,33 +160,21 @@ def main():
         ed = _expiry_to_date(inst.get("expiry"))
         if ed and strike_val > 0:
             opt_master[(sym_name, ed, strike_val, itype)] = inst.get("instrument_key")
+            ls = int(inst.get("lot_size") or 0)
+            if ls > 0:
+                lot_sizes[sym_name] = ls
 
-    print(f"  Option master: {len(opt_master)} entries")
-
-    # Debug: show what symbols we have in opt_master for first 3 candidates
-    cand_syms = {c["symbol"] for c in candidates}
-    for dbg_sym in list(cand_syms)[:3]:
-        matching = {k for k in opt_master if k[0] == dbg_sym}
-        if matching:
-            expiries = sorted({k[1] for k in matching})
-            strikes_sample = sorted({k[2] for k in matching if k[1] == expiries[0]})[:5]
-            print(f"  DEBUG {dbg_sym}: {len(matching)} options, expiries={expiries[:3]}, "
-                  f"sample strikes={strikes_sample}")
-        else:
-            # Check partial matches
-            partials = {k[0] for k in opt_master if dbg_sym in k[0] or k[0] in dbg_sym}
-            print(f"  DEBUG {dbg_sym}: 0 options! Partial matches in master: {list(partials)[:5]}")
-
-    print()
+    print(f"  Option master: {len(opt_master)} entries\n")
 
     wins = 0
     losses = 0
-    total_pnl = 0
+    total_pnl = 0.0
     results = []
 
     for c in candidates:
         sym = c["symbol"]
         spot = c["close"]
+        lot = lot_sizes.get(sym, 1)
 
         # Find all PE options for this symbol
         sym_pe_keys = {k: v for k, v in opt_master.items() if k[0] == sym and k[3] == "PE"}
@@ -201,30 +189,22 @@ def main():
             continue
         used_expiry = avail_expiries[0]
 
-        # Find ATM strike closest to spot for that expiry
+        # ATM strike closest to spot
         expiry_strikes = sorted({k[2] for k in sym_pe_keys if k[1] == used_expiry})
-        if not expiry_strikes:
-            print(f"  ⚠️  {sym:<15s} — no strikes for expiry {used_expiry}")
-            continue
-
         strike = min(expiry_strikes, key=lambda s: abs(s - spot))
         opt_key = opt_master.get((sym, used_expiry, strike, "PE"))
-
         if not opt_key:
-            print(f"  ⚠️  {sym:<15s} — key lookup failed for {strike:.0f}PE exp={used_expiry}")
             continue
 
-        # Fetch 1-min PE candles from 09:20 to 15:30
+        # Fetch 1-min PE candles
         opt_from = datetime.combine(ref_date, datetime.min.time()).replace(hour=9, minute=15)
         opt_to = datetime.combine(ref_date, datetime.min.time()).replace(hour=15, minute=30)
-
         try:
             candles = ud.historical_data(opt_key, opt_from, opt_to, "1minute")
             _t.sleep(0.15)
         except Exception as e:
             print(f"  ⚠️  {sym:<15s} — candle fetch failed: {e}")
             continue
-
         if not candles or len(candles) < 5:
             print(f"  ⚠️  {sym:<15s} — not enough candles ({len(candles) if candles else 0})")
             continue
@@ -243,36 +223,49 @@ def main():
         if entry <= 0:
             continue
 
-        sl = round(entry * (1 - SL_PCT), 2)
-        floor_tgt = round(entry * FLOOR_MULT, 2)
-        full_tgt = round(entry * TGT_MULT, 2)
+        sl_price = round(entry * (1 - SL_PCT), 2)
 
-        # Track through 1-min candles
+        # Simulate with stepping rupee floors
         peak = entry
+        active_floor = 0        # current locked floor in ₹
         exit_price = entry
         exit_reason = "eod"
         exit_time = ""
+        peak_pnl = 0.0
 
         entry_idx = candles.index(entry_candle) if entry_candle in candles else 0
 
         for cn in candles[entry_idx + 1:]:
             high = cn["high"]
             low = cn["low"]
-            close = cn["close"]
             t = str(cn.get("date", cn.get("timestamp", "")))
 
             if high > peak:
                 peak = high
 
-            if low <= sl:
-                exit_price = sl
+            # Current P&L range in this candle
+            pnl_high = (high - entry) * lot
+            pnl_low = (low - entry) * lot
+
+            if pnl_high > peak_pnl:
+                peak_pnl = pnl_high
+
+            # Check if we've crossed a new floor step
+            new_floor = (int(pnl_high // FLOOR_STEP)) * FLOOR_STEP
+            if new_floor > active_floor:
+                active_floor = new_floor
+
+            # Check SL (percentage-based on premium)
+            if low <= sl_price:
+                exit_price = sl_price
                 exit_reason = "SL"
                 exit_time = t[11:16] if len(t) > 16 else t
                 break
 
-            if high >= floor_tgt:
-                exit_price = floor_tgt
-                exit_reason = "FLOOR"
+            # Check floor breach — if P&L drops to active floor, exit
+            if active_floor > 0 and pnl_low <= active_floor:
+                exit_price = entry + active_floor / lot
+                exit_reason = f"FLOOR ₹{active_floor}"
                 exit_time = t[11:16] if len(t) > 16 else t
                 break
 
@@ -281,30 +274,34 @@ def main():
             t = str(candles[-1].get("date", candles[-1].get("timestamp", "")))
             exit_time = t[11:16] if len(t) > 16 else t
 
-        pnl_pct = (exit_price - entry) / entry * 100
-        won = exit_price > entry
+        pnl_rs = (exit_price - entry) * lot
+        won = pnl_rs > 0
         if won:
             wins += 1
         else:
             losses += 1
-
-        # Assume 1 lot for P&L
-        lot_pnl = (exit_price - entry) * 1
-        total_pnl += lot_pnl
+        total_pnl += pnl_rs
 
         icon = "✅" if won else "❌"
-        results.append((icon, sym, strike, entry, exit_price, pnl_pct, exit_reason, exit_time, peak))
+        results.append({
+            "icon": icon, "sym": sym, "strike": strike, "lot": lot,
+            "entry": entry, "exit": exit_price, "pnl": pnl_rs,
+            "peak_pnl": peak_pnl, "reason": exit_reason, "time": exit_time,
+        })
 
-        print(f"  {icon} {sym:<15s} {strike:.0f}PE  entry=₹{entry:.1f} → exit=₹{exit_price:.1f} "
-              f"({pnl_pct:+.1f}%) peak=₹{peak:.1f} | {exit_reason} @ {exit_time}")
+        print(f"  {icon} {sym:<12s} {strike:.0f}PE (lot={lot})  "
+              f"entry=₹{entry:.1f} → exit=₹{exit_price:.1f}  "
+              f"P&L=₹{pnl_rs:+,.0f}  peak=₹{peak_pnl:+,.0f} | {exit_reason} @ {exit_time}")
 
     total = wins + losses
     wr = wins / total * 100 if total else 0
+    floor_exits = sum(1 for r in results if "FLOOR" in r["reason"])
+    sl_exits = sum(1 for r in results if r["reason"] == "SL")
+    eod_exits = sum(1 for r in results if r["reason"] == "eod")
     print(f"\n  {'='*55}")
     print(f"  Results: {wins}/{total} wins ({wr:.0f}% WR)")
-    print(f"  Floor hits: {sum(1 for r in results if r[6] == 'FLOOR')}")
-    print(f"  SL hits: {sum(1 for r in results if r[6] == 'SL')}")
-    print(f"  EOD exits: {sum(1 for r in results if r[6] == 'eod')}")
+    print(f"  Total P&L: ₹{total_pnl:+,.0f}")
+    print(f"  Floor exits: {floor_exits} | SL exits: {sl_exits} | EOD exits: {eod_exits}")
     print(f"  {'='*55}\n")
 
 
