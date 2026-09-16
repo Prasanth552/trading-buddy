@@ -8,20 +8,33 @@ Also tests new strategy ideas:
   - Conservative ORB (wider SL, stricter retest, 2:1 RR)
   - VWAP bounce (price touches VWAP, bounces with trend)
 
+Results are persisted to data/scanner_results.json and accumulate across runs.
+Run daily after market close (15:30+) to build up multi-day statistics.
+
 Usage (run on VM where Upstox data is available):
+    # Scan today (run after market close):
+    PYTHONPATH=. .venv/bin/python3 scripts/strategy_scanner.py --index NIFTY
+
+    # Scan specific date range:
     PYTHONPATH=. .venv/bin/python3 scripts/strategy_scanner.py \
-        --from 2026-09-08 --to 2026-09-15 --index NIFTY
+        --from 2026-09-17 --to 2026-09-19 --index NIFTY
+
+    # Show accumulated results only (no new scan):
+    PYTHONPATH=. .venv/bin/python3 scripts/strategy_scanner.py --report
 """
 from __future__ import annotations
 
 import argparse
 import itertools
+import json
+import os
 import sys
 import time as _time
 from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from src.broker.upstox_data import UpstoxData
@@ -666,22 +679,156 @@ def run_cached(spot: list[dict], opt_candles: dict[str, list[dict]],
     return results
 
 
+# ── Persistence ────────────────────────────────────────────────────
+
+RESULTS_FILE = Path(__file__).resolve().parent.parent / "data" / "scanner_results.json"
+
+
+def _trade_to_dict(t: TradeResult) -> dict:
+    s = t.signal
+    return {
+        "date": str(s.ref_date), "time": s.time, "exit_time": t.exit_time,
+        "strategy": s.strategy, "action": s.action,
+        "index": s.index, "strike": s.strike, "option_type": s.option_type,
+        "entry": s.entry_premium, "exit": t.exit_premium,
+        "sl": s.sl_premium, "tgt": s.tgt_premium,
+        "exit_reason": t.exit_reason, "pnl_per_lot": t.pnl_per_lot,
+        "hold_mins": t.hold_mins, "won": t.won,
+    }
+
+
+def load_saved_results() -> dict:
+    if RESULTS_FILE.exists():
+        return json.loads(RESULTS_FILE.read_text())
+    return {"days_scanned": {}, "combo_trades": {}}
+
+
+def save_results(saved: dict):
+    RESULTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    RESULTS_FILE.write_text(json.dumps(saved, indent=2, default=str))
+
+
+def combo_key(strategy: str, label: str) -> str:
+    return f"{strategy}:{label}"
+
+
+def print_report(saved: dict, index_name: str):
+    """Print accumulated results from saved data."""
+    days = sorted(saved["days_scanned"].get(index_name, []))
+    if not days:
+        print(f"\n  No saved results for {index_name}. Run a scan first.")
+        return
+
+    print(f"\n{'='*75}")
+    print(f"  ACCUMULATED RESULTS — {index_name}")
+    print(f"  Days scanned: {len(days)} ({days[0]} → {days[-1]})")
+    print(f"{'='*75}")
+
+    lot = INDEXES[index_name]["lot_size"]
+
+    @dataclass
+    class AccResult:
+        strategy: str
+        label: str
+        trades: int
+        wins: int
+        wr: float
+        total_pnl: float
+        avg_pnl: float
+        trade_list: list[dict]
+
+    results: list[AccResult] = []
+
+    for ck, trades in saved["combo_trades"].items():
+        idx_trades = [t for t in trades if t["index"] == index_name]
+        if not idx_trades:
+            continue
+        wins = sum(1 for t in idx_trades if t["won"])
+        total = len(idx_trades)
+        wr = wins / total * 100 if total > 0 else 0
+        total_pnl = sum(t["pnl_per_lot"] * lot for t in idx_trades)
+        avg_pnl = total_pnl / total if total > 0 else 0
+        strategy, label = ck.split(":", 1)
+        results.append(AccResult(
+            strategy=strategy, label=label,
+            trades=total, wins=wins, wr=wr,
+            total_pnl=total_pnl, avg_pnl=avg_pnl,
+            trade_list=idx_trades,
+        ))
+
+    qualified = [r for r in results if r.trades >= 3]
+    qualified.sort(key=lambda r: (-r.wr, -r.total_pnl))
+
+    print(f"\n  {'Rank':>4s}  {'Strategy':<18s} {'Label':<15s} "
+          f"{'Trades':>6s} {'Wins':>5s} {'WR':>6s} {'P&L':>10s} {'Avg':>8s}")
+    print(f"  {'─'*4}  {'─'*18} {'─'*15} {'─'*6} {'─'*5} {'─'*6} {'─'*10} {'─'*8}")
+
+    for i, c in enumerate(qualified[:20]):
+        marker = "🏆" if c.wr >= 80 else "★" if c.wr >= 70 else " "
+        print(f"  {marker}{i+1:>3d}  {c.strategy:<18s} {c.label:<15s} "
+              f"{c.trades:>6d} {c.wins:>5d} {c.wr:>5.1f}% "
+              f"₹{c.total_pnl:>+9,.0f} ₹{c.avg_pnl:>+7,.0f}")
+
+    # Detail top 5
+    for i, c in enumerate(qualified[:5]):
+        print(f"\n  ┌─ #{i+1} {c.strategy} [{c.label}] {'─' * 40}")
+        print(f"  │ WR: {c.wr:.1f}% ({c.wins}/{c.trades})  P&L: ₹{c.total_pnl:>+,.0f}")
+
+        exits = defaultdict(int)
+        for t in c.trade_list:
+            exits[t["exit_reason"]] += 1
+        print(f"  │ Exits: {dict(exits)}")
+
+        winning_pnl = [t["pnl_per_lot"] * lot for t in c.trade_list if t["won"]]
+        losing_pnl = [t["pnl_per_lot"] * lot for t in c.trade_list if not t["won"]]
+        avg_win = sum(winning_pnl) / len(winning_pnl) if winning_pnl else 0
+        avg_loss = sum(losing_pnl) / len(losing_pnl) if losing_pnl else 0
+        print(f"  │ Avg Win: ₹{avg_win:>+,.0f}  Avg Loss: ₹{avg_loss:>+,.0f}")
+        print(f"  │ Trades:")
+        for t in c.trade_list:
+            w = "✓" if t["won"] else "✗"
+            print(f"  │   {w} {t['date']} {t['time']}→{t['exit_time']} "
+                  f"{t['strike']:.0f}{t['option_type']} "
+                  f"@{t['entry']:.1f}→{t['exit']:.1f} "
+                  f"({t['exit_reason']}) ₹{t['pnl_per_lot']*lot:+,.0f}")
+        print(f"  └{'─' * 65}")
+
+    winners = [c for c in qualified if c.wr >= 80]
+    if winners:
+        print(f"\n  🏆 FOUND {len(winners)} COMBO(S) WITH 80%+ WIN RATE!")
+        for c in winners:
+            print(f"     → {c.strategy} [{c.label}]: {c.wr:.1f}% ({c.wins}/{c.trades}) ₹{c.total_pnl:+,.0f}")
+    elif qualified:
+        best = qualified[0]
+        print(f"\n  Best so far: {best.strategy} [{best.label}] "
+              f"{best.wr:.1f}% ({best.wins}/{best.trades})")
+        print(f"  Run more days to build up statistics.")
+    print()
+
+
 # ── Main ──────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(description="Strategy Scanner — find 80%+ WR combos")
-    parser.add_argument("--from", dest="from_date", required=True)
-    parser.add_argument("--to", dest="to_date", required=True)
+    parser.add_argument("--from", dest="from_date", default=None)
+    parser.add_argument("--to", dest="to_date", default=None)
     parser.add_argument("--index", default="NIFTY")
+    parser.add_argument("--report", action="store_true", help="Show accumulated results only")
     args = parser.parse_args()
 
-    from_date = date.fromisoformat(args.from_date)
-    to_date = date.fromisoformat(args.to_date)
     index_name = args.index.upper()
-
     if index_name not in INDEXES:
         print(f"Unknown index: {index_name}")
         sys.exit(1)
+
+    if args.report:
+        saved = load_saved_results()
+        print_report(saved, index_name)
+        return
+
+    today = datetime.now(IST).date()
+    from_date = date.fromisoformat(args.from_date) if args.from_date else today
+    to_date = date.fromisoformat(args.to_date) if args.to_date else today
 
     print(f"\n{'='*75}")
     print(f"  STRATEGY SCANNER — Finding 80%+ Win Rate Combos")
@@ -697,58 +844,65 @@ def main():
     trading_days = get_trading_days(from_date, to_date)
     print(f"  Trading days: {len(trading_days)}")
 
+    # Load saved results
+    saved = load_saved_results()
+
+    # Check which days are already scanned
+    scanned = set(saved["days_scanned"].get(index_name, []))
+    new_days = [d for d in trading_days if d.isoformat() not in scanned]
+    if not new_days:
+        print(f"\n  All {len(trading_days)} days already scanned. Showing report.")
+        print_report(saved, index_name)
+        return
+
+    print(f"  New days to scan: {len(new_days)} (already scanned: {len(trading_days) - len(new_days)})")
+
     # Phase 1: Fetch and cache all day data
-    print(f"\nPhase 1: Fetching market data (cached for all param sweeps)...")
-    for day in trading_days:
+    print(f"\nPhase 1: Fetching market data...")
+    valid_days = []
+    for day in new_days:
         print(f"  {day} ...", end=" ", flush=True)
         spot, opt, expiry = fetch_day_data(udata, index_name, day, master)
-        if spot:
+        if spot and opt:
             print(f"✓ spot={len(spot)} candles, {len(opt)} option chains")
+            valid_days.append(day)
+        elif spot:
+            print(f"⚠ spot OK but 0 option chains (expiry not in master?)")
         else:
             print("SKIP (no data)")
 
+    if not valid_days:
+        print(f"\n  No valid days with option data. "
+              f"The instrument master only has expiries >= {min(k[1] for k in master if k[0]==index_name) if any(k[0]==index_name for k in master) else '?'}.")
+        print(f"  Run this after market close on a day within those expiry weeks.")
+        if scanned:
+            print_report(saved, index_name)
+        return
+
     # Phase 2: Sweep all strategy + param combinations
-    print(f"\nPhase 2: Scanning strategy combinations...")
+    print(f"\nPhase 2: Scanning {len(valid_days)} day(s)...")
 
     all_combos = []
-
-    # Existing strategies
     for strat_name, param_list in PARAM_GRID.items():
         for params in param_list:
             all_combos.append((strat_name, params))
-
-    # New strategies
     for strat_name, param_list in NEW_STRATEGY_GRID.items():
         for params in param_list:
             all_combos.append((strat_name, params))
 
     print(f"  Total combos to test: {len(all_combos)}")
 
-    @dataclass
-    class ComboResult:
-        strategy: str
-        label: str
-        params: dict
-        trades: int
-        wins: int
-        wr: float
-        total_pnl: float
-        avg_pnl: float
-        daily_trades: list[int]
-        results: list[TradeResult]
-
-    combo_results: list[ComboResult] = []
-
     for combo_idx, (strat_name, params) in enumerate(all_combos):
         label = params.get("label", "?")
-        all_trades: list[TradeResult] = []
+        ck = combo_key(strat_name, label)
+        new_trades: list[TradeResult] = []
         daily_counts = []
 
-        for day in trading_days:
+        for day in valid_days:
             cache_key = (index_name, day)
             spot = _spot_cache.get(cache_key, [])
             opt = _opt_cache.get(cache_key, {})
-            if not spot:
+            if not spot or not opt:
                 daily_counts.append(0)
                 continue
 
@@ -761,102 +915,44 @@ def main():
 
             results = run_cached(spot, opt, index_name, day, expiry, master,
                                  strat_name, params)
-            all_trades.extend(results)
+            new_trades.extend(results)
             daily_counts.append(len(results))
 
-        wins = sum(1 for t in all_trades if t.won)
-        total = len(all_trades)
+        # Save new trades
+        if ck not in saved["combo_trades"]:
+            saved["combo_trades"][ck] = []
+        for t in new_trades:
+            saved["combo_trades"][ck].append(_trade_to_dict(t))
+
+        # Show progress
+        all_saved = saved["combo_trades"][ck]
+        idx_trades = [t for t in all_saved if t["index"] == index_name]
+        total = len(idx_trades)
+        wins = sum(1 for t in idx_trades if t["won"])
         wr = wins / total * 100 if total > 0 else 0
         lot = INDEXES[index_name]["lot_size"]
-        total_pnl = sum(t.pnl_per_lot * lot for t in all_trades)
-        avg_pnl = total_pnl / total if total > 0 else 0
-
-        combo_results.append(ComboResult(
-            strategy=strat_name, label=label, params=params,
-            trades=total, wins=wins, wr=wr,
-            total_pnl=total_pnl, avg_pnl=avg_pnl,
-            daily_trades=daily_counts, results=all_trades,
-        ))
+        total_pnl = sum(t["pnl_per_lot"] * lot for t in idx_trades)
 
         tag = "★" if wr >= 70 and total >= 3 else " "
+        new_tag = f"+{len(new_trades)}" if new_trades else "0"
         print(f"  {tag} {combo_idx+1:>2}/{len(all_combos)}  "
               f"{strat_name:<18s} [{label:<15s}]  "
-              f"{total:>3d} trades  {wins:>3d} wins  {wr:>5.1f}% WR  "
-              f"₹{total_pnl:>+9,.0f}  "
-              f"avg/day={sum(daily_counts)/len(trading_days):.1f}")
+              f"{total:>3d} trades ({new_tag} new)  {wins:>3d} wins  {wr:>5.1f}% WR  "
+              f"₹{total_pnl:>+9,.0f}")
 
-    # Phase 3: Results
-    print(f"\n{'='*75}")
-    print(f"  RESULTS — Sorted by Win Rate (min 3 trades)")
-    print(f"{'='*75}")
+    # Mark days as scanned
+    if index_name not in saved["days_scanned"]:
+        saved["days_scanned"][index_name] = []
+    for d in valid_days:
+        if d.isoformat() not in saved["days_scanned"][index_name]:
+            saved["days_scanned"][index_name].append(d.isoformat())
+    saved["days_scanned"][index_name].sort()
 
-    qualified = [c for c in combo_results if c.trades >= 3]
-    qualified.sort(key=lambda c: (-c.wr, -c.total_pnl))
+    save_results(saved)
+    print(f"\n  Results saved to {RESULTS_FILE}")
 
-    print(f"\n  {'Rank':>4s}  {'Strategy':<18s} {'Label':<15s} "
-          f"{'Trades':>6s} {'Wins':>5s} {'WR':>6s} {'P&L':>10s} {'Avg':>8s}")
-    print(f"  {'─'*4}  {'─'*18} {'─'*15} {'─'*6} {'─'*5} {'─'*6} {'─'*10} {'─'*8}")
-
-    for i, c in enumerate(qualified[:20]):
-        marker = "🏆" if c.wr >= 80 else "★" if c.wr >= 70 else " "
-        print(f"  {marker}{i+1:>3d}  {c.strategy:<18s} {c.label:<15s} "
-              f"{c.trades:>6d} {c.wins:>5d} {c.wr:>5.1f}% "
-              f"₹{c.total_pnl:>+9,.0f} ₹{c.avg_pnl:>+7,.0f}")
-
-    # Show top 5 in detail
-    print(f"\n{'='*75}")
-    print(f"  TOP 5 DETAILED BREAKDOWN")
-    print(f"{'='*75}")
-
-    for i, c in enumerate(qualified[:5]):
-        print(f"\n  ┌─ #{i+1} {c.strategy} [{c.label}] {'─' * 40}")
-        print(f"  │ WR: {c.wr:.1f}% ({c.wins}/{c.trades})  P&L: ₹{c.total_pnl:>+,.0f}")
-
-        exits = defaultdict(int)
-        for t in c.results:
-            exits[t.exit_reason] += 1
-        print(f"  │ Exits: {dict(exits)}")
-
-        winning_pnl = [t.pnl_per_lot * INDEXES[index_name]["lot_size"] for t in c.results if t.won]
-        losing_pnl = [t.pnl_per_lot * INDEXES[index_name]["lot_size"] for t in c.results if not t.won]
-        avg_win = sum(winning_pnl) / len(winning_pnl) if winning_pnl else 0
-        avg_loss = sum(losing_pnl) / len(losing_pnl) if losing_pnl else 0
-        print(f"  │ Avg Win: ₹{avg_win:>+,.0f}  Avg Loss: ₹{avg_loss:>+,.0f}")
-        print(f"  │ Daily: {c.daily_trades}")
-
-        # Key params
-        skip_keys = {"label", "max_signals"}
-        key_params = {k: v for k, v in c.params.items() if k not in skip_keys}
-        print(f"  │ Params: {key_params}")
-
-        # Individual trades
-        print(f"  │ Trades:")
-        for t in c.results:
-            s = t.signal
-            lot = INDEXES[index_name]["lot_size"]
-            pnl = t.pnl_per_lot * lot
-            w = "✓" if t.won else "✗"
-            print(f"  │   {w} {s.ref_date} {s.time}→{t.exit_time} "
-                  f"{s.strike:.0f}{s.option_type} "
-                  f"@{s.entry_premium:.1f}→{t.exit_premium:.1f} "
-                  f"({t.exit_reason}) ₹{pnl:+,.0f}")
-        print(f"  └{'─' * 65}")
-
-    # 80%+ winners
-    winners = [c for c in qualified if c.wr >= 80]
-    if winners:
-        print(f"\n  🏆 FOUND {len(winners)} COMBO(S) WITH 80%+ WIN RATE!")
-        for c in winners:
-            print(f"     → {c.strategy} [{c.label}]: {c.wr:.1f}% ({c.wins}/{c.trades}) ₹{c.total_pnl:+,.0f}")
-    else:
-        # Show best
-        if qualified:
-            best = qualified[0]
-            print(f"\n  ⚠ No 80%+ combos found. Best: {best.strategy} [{best.label}] "
-                  f"{best.wr:.1f}% ({best.wins}/{best.trades})")
-            print(f"    Consider: more trading days, different indices, or new strategy ideas.")
-
-    print()
+    # Show full report
+    print_report(saved, index_name)
 
 
 if __name__ == "__main__":
