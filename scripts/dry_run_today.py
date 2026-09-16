@@ -166,8 +166,13 @@ def sim_momentum_scalp(candles_5min, sym, p):
         elif bar["close"] < bar["open"] and (bar["high"] - bar["close"]) / rng > p["close_position_min"]:
             d = "bearish"
         if not d: continue
+        min_consec = p.get("min_consecutive", 1)
+        if min_consec > 1 and i >= min_consec - 1:
+            recent = candles_5min[i - min_consec + 1:i + 1]
+            if d == "bullish" and not all(b["close"] > b["open"] for b in recent): continue
+            if d == "bearish" and not all(b["close"] < b["open"] for b in recent): continue
         trend = get_trend(candles_5min[:i+1])
-        if trend and trend != d: continue
+        if trend != d: continue
         strike = round_strike(bar["close"], step)
         opt = "CE" if d == "bullish" else "PE"
         results.append({"time": bar["time"], "strategy": "momentum_scalp", "sym": sym,
@@ -204,7 +209,7 @@ def sim_orb_retest(candles_5min, sym, p):
             d = "bearish"
         if not d: continue
         trend = get_trend(candles_5min[:i+1])
-        if trend and trend != d: continue
+        if trend != d: continue
         strike = round_strike(bar["close"], step)
         opt = "CE" if d == "bullish" else "PE"
         results.append({"time": bar["time"], "strategy": "orb_retest", "sym": sym,
@@ -281,7 +286,7 @@ def sim_ema_crossover(candles_5min, sym, p):
             d = "bearish"
         if not d: continue
         trend = get_trend(candles_5min[:i+1])
-        if trend and trend != d: continue
+        if trend != d: continue
         strike = round_strike(bar["close"], step)
         opt = "CE" if d == "bullish" else "PE"
         results.append({"time": bar["time"], "strategy": "ema_crossover", "sym": sym,

@@ -62,31 +62,32 @@ STRATEGY_PARAMS = {
     "momentum_scalp": {
         "body_pct": 0.12,
         "vol_mult": 1.3,
-        "sl_pct": 0.12,
-        "tgt_pct": 0.18,
-        "max_hold_mins": 15,
+        "sl_pct": 0.15,
+        "tgt_pct": 0.15,
+        "max_hold_mins": 20,
         "active_from": "09:20",
         "active_to": "14:30",
         "max_signals": 2,
         "cooldown_mins": 15,
         "close_position_min": 0.60,
+        "min_consecutive": 2,
     },
     "orb_retest": {
         "range_end": "09:44",
         "active_from": "09:50",
         "active_to": "12:00",
         "sl_pct": 0.20,
-        "tgt_pct": 0.40,
-        "max_hold_mins": 45,
+        "tgt_pct": 0.30,
+        "max_hold_mins": 30,
         "min_range_pct": 0.15,
         "max_range_pct": 0.80,
         "retest_pct": 0.10,
         "max_signals": 1,
     },
     "vwap_reversal": {
-        "sl_pct": 0.15,
-        "tgt_pct": 0.25,
-        "max_hold_mins": 25,
+        "sl_pct": 0.18,
+        "tgt_pct": 0.20,
+        "max_hold_mins": 30,
         "active_from": "10:00",
         "active_to": "13:30",
         "max_signals": 1,
@@ -98,9 +99,9 @@ STRATEGY_PARAMS = {
     "ema_crossover": {
         "fast_period": 8,
         "slow_period": 21,
-        "sl_pct": 0.15,
-        "tgt_pct": 0.22,
-        "max_hold_mins": 25,
+        "sl_pct": 0.18,
+        "tgt_pct": 0.18,
+        "max_hold_mins": 30,
         "active_from": "10:00",
         "active_to": "14:00",
         "max_signals": 2,
@@ -382,8 +383,16 @@ def detect_momentum_scalp(candles_5min: list[dict], sym: str,
     if not direction:
         return []
 
+    min_consec = p.get("min_consecutive", 1)
+    if min_consec > 1 and len(candles_5min) >= min_consec:
+        recent = candles_5min[-min_consec:]
+        if direction == "bullish" and not all(b["close"] > b["open"] for b in recent):
+            return []
+        if direction == "bearish" and not all(b["close"] < b["open"] for b in recent):
+            return []
+
     trend = get_trend(candles_5min)
-    if trend and trend != direction:
+    if trend != direction:
         return []
 
     strike = round_strike(c["close"], step)
@@ -455,7 +464,7 @@ def detect_orb_retest(candles_5min: list[dict], sym: str,
         return []
 
     trend = get_trend(candles_5min)
-    if trend and trend != direction:
+    if trend != direction:
         return []
 
     strike = round_strike(latest["close"], step)
@@ -585,7 +594,7 @@ def detect_ema_crossover(candles_5min: list[dict], sym: str,
         return []
 
     trend = get_trend(candles_5min)
-    if trend and trend != direction:
+    if trend != direction:
         return []
 
     cur = candles_5min[-1]
