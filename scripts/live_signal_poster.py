@@ -305,6 +305,35 @@ def calc_vwap(candles: list[dict]) -> list[float]:
     return vwap
 
 
+def get_trend(candles_5min: list[dict]) -> str | None:
+    """Determine current trend using EMA20 + VWAP + recent bar momentum.
+
+    Returns 'bullish', 'bearish', or None (no clear trend).
+    Requires agreement between EMA20 position, VWAP position, and
+    at least 3 of last 5 bars closing in the same direction.
+    """
+    if len(candles_5min) < 21:
+        return None
+
+    closes = [c["close"] for c in candles_5min]
+    ema20 = calc_ema(closes, 20)
+    vwap = calc_vwap(candles_5min)
+
+    price = closes[-1]
+    above_ema = price > ema20[-1]
+    above_vwap = price > vwap[-1]
+
+    last5 = candles_5min[-5:]
+    green = sum(1 for c in last5 if c["close"] > c["open"])
+    red = sum(1 for c in last5 if c["close"] < c["open"])
+
+    if above_ema and above_vwap and green >= 3:
+        return "bullish"
+    if not above_ema and not above_vwap and red >= 3:
+        return "bearish"
+    return None
+
+
 # ── Signal detection ──────────────────────────────────────────────
 
 def detect_momentum_scalp(candles_5min: list[dict], sym: str,
@@ -351,6 +380,10 @@ def detect_momentum_scalp(candles_5min: list[dict], sym: str,
             direction = "bearish"
 
     if not direction:
+        return []
+
+    trend = get_trend(candles_5min)
+    if trend and trend != direction:
         return []
 
     strike = round_strike(c["close"], step)
@@ -419,6 +452,10 @@ def detect_orb_retest(candles_5min: list[dict], sym: str,
         direction = "bearish"
 
     if not direction:
+        return []
+
+    trend = get_trend(candles_5min)
+    if trend and trend != direction:
         return []
 
     strike = round_strike(latest["close"], step)
@@ -545,6 +582,10 @@ def detect_ema_crossover(candles_5min: list[dict], sym: str,
         direction = "bearish"
 
     if not direction:
+        return []
+
+    trend = get_trend(candles_5min)
+    if trend and trend != direction:
         return []
 
     cur = candles_5min[-1]
@@ -942,7 +983,7 @@ def main():
             if stock_list:
                 syms_str += f" + {len(stock_list)} stocks"
             header = f"📊 <b>Signal Bot Started</b>\n{syms_str} | {today}"
-            header += f"\n6 strategies active"
+            header += f"\n5 strategies active (trend-filtered)"
             send_telegram(header, args.dry_run)
 
         active_trades = check_exits(active_trades, udata, args.dry_run, closed_trades)
@@ -985,10 +1026,6 @@ def main():
                     fired_counts[sym]["ema_crossover"])
 
             if is_index:
-                new_signals += detect_short_strangle(
-                    candles_5min, sym, master, expiry, udata,
-                    prev_closes.get(sym), fired_counts[sym]["short_strangle"])
-
                 new_signals += detect_day_end_sell(
                     candles_5min, sym, master, expiry, udata,
                     fired_counts[sym]["day_end_sell"])

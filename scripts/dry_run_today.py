@@ -19,7 +19,7 @@ from src.strategy.live_runner import _build_option_master
 from scripts.live_signal_poster import (
     INDEXES, STOCKS, ALL_INSTRUMENTS, STRATEGY_PARAMS,
     resample_5min, round_strike, next_expiry, calc_vwap, calc_ema,
-    fetch_option_ltp, time_to_mins,
+    fetch_option_ltp, time_to_mins, get_trend,
 )
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -166,6 +166,8 @@ def sim_momentum_scalp(candles_5min, sym, p):
         elif bar["close"] < bar["open"] and (bar["high"] - bar["close"]) / rng > p["close_position_min"]:
             d = "bearish"
         if not d: continue
+        trend = get_trend(candles_5min[:i+1])
+        if trend and trend != d: continue
         strike = round_strike(bar["close"], step)
         opt = "CE" if d == "bullish" else "PE"
         results.append({"time": bar["time"], "strategy": "momentum_scalp", "sym": sym,
@@ -201,6 +203,8 @@ def sim_orb_retest(candles_5min, sym, p):
         elif broke_below and abs(bar["high"] - orb_low) <= retest_zone and bar["close"] < orb_low:
             d = "bearish"
         if not d: continue
+        trend = get_trend(candles_5min[:i+1])
+        if trend and trend != d: continue
         strike = round_strike(bar["close"], step)
         opt = "CE" if d == "bullish" else "PE"
         results.append({"time": bar["time"], "strategy": "orb_retest", "sym": sym,
@@ -276,6 +280,8 @@ def sim_ema_crossover(candles_5min, sym, p):
         elif fast[i-1] >= slow[i-1] and fast[i] < slow[i]:
             d = "bearish"
         if not d: continue
+        trend = get_trend(candles_5min[:i+1])
+        if trend and trend != d: continue
         strike = round_strike(bar["close"], step)
         opt = "CE" if d == "bullish" else "PE"
         results.append({"time": bar["time"], "strategy": "ema_crossover", "sym": sym,
@@ -338,20 +344,6 @@ def main():
         all_signals += sim_ema_crossover(candles_5min, sym, STRATEGY_PARAMS["ema_crossover"])
 
         if sym in INDEXES:
-            p_ss = STRATEGY_PARAMS["short_strangle"]
-            ss_bar = next((c for c in candles_5min if c["time"] == p_ss["entry_time"]), None)
-            if ss_bar:
-                spot = ss_bar["close"]
-                step = inst["step"]
-                atm = round_strike(spot, step)
-                ce_strike = atm + step * p_ss["otm_steps"]
-                pe_strike = atm - step * p_ss["otm_steps"]
-                all_signals.append({
-                    "time": "10:00", "strategy": "short_strangle", "sym": sym,
-                    "strike": ce_strike, "type": f"CE",
-                    "direction": "neutral", "spot": spot, "action": "SELL",
-                })
-
             p_de = STRATEGY_PARAMS["day_end_sell"]
             de_bar = next((c for c in candles_5min if c["time"] == p_de["entry_time"]), None)
             if de_bar and candles_5min:
