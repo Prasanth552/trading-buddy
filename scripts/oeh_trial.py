@@ -174,7 +174,7 @@ def main():
     for c in candidates:
         sym = c["symbol"]
         spot = c["close"]
-        lot = lot_sizes.get(sym, 1)
+        lot = lot_sizes.get(sym, 1) * 2  # 2 lots
 
         # Find all PE options for this symbol
         sym_pe_keys = {k: v for k, v in opt_master.items() if k[0] == sym and k[3] == "PE"}
