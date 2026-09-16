@@ -1,0 +1,18 @@
+[Unit]
+Description=Trading Buddy - Live Signal Poster (Telegram)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/Trading-Buddy
+EnvironmentFile=/home/ubuntu/Trading-Buddy/.env
+ExecStart=/home/ubuntu/Trading-Buddy/.venv/bin/python scripts/live_signal_poster.py --index NIFTY
+Restart=always
+RestartSec=30
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=/home/ubuntu/Trading-Buddy
+
+[Install]
+WantedBy=multi-user.target
