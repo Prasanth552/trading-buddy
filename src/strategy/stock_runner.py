@@ -25,19 +25,19 @@ IST = ZoneInfo("Asia/Kolkata")
 STOCKS = {
     "RELIANCE": {
         "key": "NSE_EQ|INE002A01018",
-        "lot_size": 250, "strike_step": 20, "iv_annual": 0.25,
+        "lot_size": 250, "strike_step": 10, "iv_annual": 0.25,
     },
     "HDFCBANK": {
         "key": "NSE_EQ|INE040A01034",
-        "lot_size": 550, "strike_step": 20, "iv_annual": 0.22,
+        "lot_size": 550, "strike_step": 10, "iv_annual": 0.22,
     },
     "ICICIBANK": {
         "key": "NSE_EQ|INE090A01021",
-        "lot_size": 700, "strike_step": 20, "iv_annual": 0.24,
+        "lot_size": 700, "strike_step": 10, "iv_annual": 0.24,
     },
     "TCS": {
         "key": "NSE_EQ|INE467B01029",
-        "lot_size": 175, "strike_step": 50, "iv_annual": 0.22,
+        "lot_size": 175, "strike_step": 20, "iv_annual": 0.22,
     },
     "INFY": {
         "key": "NSE_EQ|INE009A01021",
@@ -47,10 +47,9 @@ STOCKS = {
         "key": "NSE_EQ|INE062A01020",
         "lot_size": 750, "strike_step": 10, "iv_annual": 0.28,
     },
-    # TATAMOTORS removed — not available in F&O on Upstox
     "BAJFINANCE": {
         "key": "NSE_EQ|INE296A01032",
-        "lot_size": 125, "strike_step": 50, "iv_annual": 0.30,
+        "lot_size": 125, "strike_step": 10, "iv_annual": 0.30,
     },
     "LT": {
         "key": "NSE_EQ|INE018A01030",
@@ -58,7 +57,7 @@ STOCKS = {
     },
     "TATASTEEL": {
         "key": "NSE_EQ|INE081A01020",
-        "lot_size": 5000, "strike_step": 5, "iv_annual": 0.35,
+        "lot_size": 5000, "strike_step": 2.5, "iv_annual": 0.35,
     },
 }
 
