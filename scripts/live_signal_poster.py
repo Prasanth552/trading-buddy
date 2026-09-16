@@ -1,13 +1,15 @@
 """Live signal generator — runs during market hours, detects signals, posts to Telegram.
 
-Uses the same 4 strategies from backtest_multi_strategy.py:
-  1. Momentum Scalp — buy ATM on strong 5-min candle, quick exit
+Strategies (indexes + stocks):
+  1. Momentum Scalp — buy ATM on strong 5-min candle
   2. ORB Retest — buy on breakout + retest confirmation
-  3. Short Strangle — sell OTM CE+PE at 10:00
-  4. Day-End Sell — sell OTM with trend at 14:00
+  3. VWAP Reversal — buy when price bounces off VWAP with confirmation
+  4. EMA Crossover — buy when 8-EMA crosses 21-EMA with momentum
+  5. Short Strangle — sell OTM CE+PE at 10:00 (indexes only)
+  6. Day-End Sell — sell OTM with trend at 14:00 (indexes only)
 
 Usage:
-    PYTHONPATH=. .venv/bin/python3 scripts/live_signal_poster.py [--index all] [--dry-run]
+    PYTHONPATH=. .venv/bin/python3 scripts/live_signal_poster.py [--dry-run]
 """
 from __future__ import annotations
 
@@ -35,40 +37,78 @@ INDEXES = {
         "key": "NSE_INDEX|Nifty 50",
         "step": 50,
         "lot_size": 75,
-        "expiry_weekday": 1,  # Tuesday
+        "expiry_weekday": 1,
     },
     "BANKNIFTY": {
         "key": "NSE_INDEX|Nifty Bank",
         "step": 100,
         "lot_size": 30,
-        "expiry_weekday": 2,  # Wednesday
+        "expiry_weekday": 2,
     },
 }
 
+STOCKS = {
+    "RELIANCE": {"key": "NSE_EQ|INE002A01018", "step": 10, "lot_size": 250, "expiry_weekday": 3},
+    "HDFCBANK": {"key": "NSE_EQ|INE040A01034", "step": 10, "lot_size": 550, "expiry_weekday": 3},
+    "ICICIBANK": {"key": "NSE_EQ|INE090A01021", "step": 10, "lot_size": 700, "expiry_weekday": 3},
+    "TCS": {"key": "NSE_EQ|INE467B01029", "step": 20, "lot_size": 175, "expiry_weekday": 3},
+    "INFY": {"key": "NSE_EQ|INE009A01021", "step": 20, "lot_size": 400, "expiry_weekday": 3},
+    "SBIN": {"key": "NSE_EQ|INE062A01020", "step": 10, "lot_size": 750, "expiry_weekday": 3},
+    "TATAMOTORS": {"key": "NSE_EQ|INE155A01022", "step": 10, "lot_size": 1400, "expiry_weekday": 3},
+    "BAJFINANCE": {"key": "NSE_EQ|INE296A01032", "step": 10, "lot_size": 125, "expiry_weekday": 3},
+}
+
+ALL_INSTRUMENTS = {}
+ALL_INSTRUMENTS.update(INDEXES)
+ALL_INSTRUMENTS.update(STOCKS)
+
 STRATEGY_PARAMS = {
     "momentum_scalp": {
-        "body_pct": 0.10,
-        "vol_mult": 1.3,
+        "body_pct": 0.08,
+        "vol_mult": 1.2,
         "sl_pct": 0.12,
         "tgt_pct": 0.18,
         "max_hold_mins": 15,
-        "active_from": "09:25",
-        "active_to": "14:00",
-        "max_signals": 3,
+        "active_from": "09:20",
+        "active_to": "14:30",
+        "max_signals": 5,
         "cooldown_mins": 10,
-        "close_position_min": 0.55,
+        "close_position_min": 0.50,
     },
     "orb_retest": {
         "range_end": "09:44",
         "active_from": "09:50",
-        "active_to": "12:00",
+        "active_to": "13:00",
         "sl_pct": 0.20,
         "tgt_pct": 0.40,
         "max_hold_mins": 45,
-        "min_range_pct": 0.12,
-        "max_range_pct": 0.85,
-        "retest_pct": 0.12,
-        "max_signals": 1,
+        "min_range_pct": 0.10,
+        "max_range_pct": 0.90,
+        "retest_pct": 0.15,
+        "max_signals": 2,
+    },
+    "vwap_reversal": {
+        "sl_pct": 0.15,
+        "tgt_pct": 0.25,
+        "max_hold_mins": 20,
+        "active_from": "09:45",
+        "active_to": "14:00",
+        "max_signals": 3,
+        "cooldown_mins": 15,
+        "vwap_touch_pct": 0.10,
+        "confirm_bars": 1,
+    },
+    "ema_crossover": {
+        "fast_period": 8,
+        "slow_period": 21,
+        "sl_pct": 0.15,
+        "tgt_pct": 0.22,
+        "max_hold_mins": 25,
+        "active_from": "09:40",
+        "active_to": "14:00",
+        "max_signals": 3,
+        "cooldown_mins": 15,
+        "min_spread_pct": 0.02,
     },
     "short_strangle": {
         "entry_time": "10:00",
@@ -192,7 +232,6 @@ def next_expiry(ref_date: date, weekday: int) -> date:
 
 
 def fetch_spot_candles(udata: UpstoxData, index_key: str) -> list[dict]:
-    """Fetch today's 1-min spot candles."""
     today = now_ist().date()
     candles = []
     try:
@@ -215,7 +254,6 @@ def fetch_spot_candles(udata: UpstoxData, index_key: str) -> list[dict]:
 
 
 def fetch_option_ltp(udata: UpstoxData, inst_key: str) -> float:
-    """Get current LTP for an option."""
     try:
         d = udata._get("/v2/market-quote/ltp", params={"instrument_key": inst_key})
         data = d.get("data", {})
@@ -247,15 +285,37 @@ def resample_5min(candles_1min: list[dict]) -> list[dict]:
     return result
 
 
-# ── Signal detection (reused from backtester) ───────────────────────
+def calc_ema(values: list[float], period: int) -> list[float]:
+    if not values:
+        return []
+    mult = 2 / (period + 1)
+    ema = [values[0]]
+    for v in values[1:]:
+        ema.append(v * mult + ema[-1] * (1 - mult))
+    return ema
 
-def detect_momentum_scalp(candles_5min: list[dict], index_name: str,
+
+def calc_vwap(candles: list[dict]) -> list[float]:
+    cum_vol = 0.0
+    cum_tp_vol = 0.0
+    vwap = []
+    for c in candles:
+        tp = (c["high"] + c["low"] + c["close"]) / 3
+        vol = max(c["volume"], 1)
+        cum_tp_vol += tp * vol
+        cum_vol += vol
+        vwap.append(cum_tp_vol / cum_vol)
+    return vwap
+
+
+# ── Signal detection ──────────────────────────────────────────────
+
+def detect_momentum_scalp(candles_5min: list[dict], sym: str,
                           master: dict, expiry: date, udata: UpstoxData,
                           already_fired: int) -> list[Signal]:
     p = STRATEGY_PARAMS["momentum_scalp"]
-    step = INDEXES[index_name]["step"]
-    signals = []
-    has_volume = any(c["volume"] > 0 for c in candles_5min[:20])
+    inst = ALL_INSTRUMENTS[sym]
+    step = inst["step"]
 
     remaining = p["max_signals"] - already_fired
     if remaining <= 0:
@@ -265,43 +325,32 @@ def detect_momentum_scalp(candles_5min: list[dict], index_name: str,
     if now_t < p["active_from"] or now_t > p["active_to"]:
         return []
 
-    vol_sum, vol_count = 0.0, 0
-    for c in candles_5min:
-        vol_sum += c["volume"]
-        vol_count += 1
+    has_volume = any(c["volume"] > 0 for c in candles_5min[:20])
+    avg_vol = sum(c["volume"] for c in candles_5min) / len(candles_5min) if candles_5min else 0
 
-    avg_vol = vol_sum / vol_count if vol_count > 0 else 0
-
-    last_candle = candles_5min[-1] if candles_5min else None
-    if not last_candle:
+    c = candles_5min[-1] if candles_5min else None
+    if not c or c["open"] == 0:
         return []
 
-    c = last_candle
     body = abs(c["close"] - c["open"])
-    if c["open"] == 0:
-        return []
     body_pct = body / c["open"] * 100
-
     if body_pct < p["body_pct"]:
         return []
 
-    if has_volume and avg_vol > 0:
-        if c["volume"] < avg_vol * p["vol_mult"]:
-            return []
+    if has_volume and avg_vol > 0 and c["volume"] < avg_vol * p["vol_mult"]:
+        return []
 
     rng = c["high"] - c["low"]
     if rng == 0:
         return []
 
-    cp_min = p.get("close_position_min", 0.55)
+    cp_min = p["close_position_min"]
     direction = None
     if c["close"] > c["open"]:
-        close_position = (c["close"] - c["low"]) / rng
-        if close_position > cp_min:
+        if (c["close"] - c["low"]) / rng > cp_min:
             direction = "bullish"
     else:
-        close_position = (c["high"] - c["close"]) / rng
-        if close_position > cp_min:
+        if (c["high"] - c["close"]) / rng > cp_min:
             direction = "bearish"
 
     if not direction:
@@ -309,7 +358,7 @@ def detect_momentum_scalp(candles_5min: list[dict], index_name: str,
 
     strike = round_strike(c["close"], step)
     opt_type = "CE" if direction == "bullish" else "PE"
-    opt_key = master.get((index_name, expiry, strike, opt_type))
+    opt_key = master.get((sym, expiry, strike, opt_type))
     if not opt_key:
         return []
 
@@ -317,23 +366,23 @@ def detect_momentum_scalp(candles_5min: list[dict], index_name: str,
     if entry <= 5:
         return []
 
-    signals.append(Signal(
+    return [Signal(
         time=now_time_str(), strategy="momentum_scalp", action="BUY",
-        index=index_name, strike=strike, option_type=opt_type,
+        index=sym, strike=strike, option_type=opt_type,
         entry_premium=entry,
         sl_premium=round(entry * (1 - p["sl_pct"]), 1),
         tgt_premium=round(entry * (1 + p["tgt_pct"]), 1),
         spot_at_entry=c["close"], instrument_key=opt_key,
         note=f"body={body_pct:.2f}%",
-    ))
-    return signals
+    )]
 
 
-def detect_orb_retest(candles_5min: list[dict], index_name: str,
+def detect_orb_retest(candles_5min: list[dict], sym: str,
                       master: dict, expiry: date, udata: UpstoxData,
                       already_fired: int) -> list[Signal]:
     p = STRATEGY_PARAMS["orb_retest"]
-    step = INDEXES[index_name]["step"]
+    inst = ALL_INSTRUMENTS[sym]
+    step = inst["step"]
 
     if already_fired >= p["max_signals"]:
         return []
@@ -363,10 +412,10 @@ def detect_orb_retest(candles_5min: list[dict], index_name: str,
     latest = recent[-1]
     retest_zone = orb_range * p["retest_pct"] / 100 if p["retest_pct"] > 1 else orb_range * p["retest_pct"]
 
-    direction = None
     broke_above = any(c["high"] > orb_high for c in recent[:-1])
     broke_below = any(c["low"] < orb_low for c in recent[:-1])
 
+    direction = None
     if broke_above and abs(latest["low"] - orb_high) <= retest_zone and latest["close"] > orb_high:
         direction = "bullish"
     elif broke_below and abs(latest["high"] - orb_low) <= retest_zone and latest["close"] < orb_low:
@@ -377,7 +426,7 @@ def detect_orb_retest(candles_5min: list[dict], index_name: str,
 
     strike = round_strike(latest["close"], step)
     opt_type = "CE" if direction == "bullish" else "PE"
-    opt_key = master.get((index_name, expiry, strike, opt_type))
+    opt_key = master.get((sym, expiry, strike, opt_type))
     if not opt_key:
         return []
 
@@ -387,19 +436,133 @@ def detect_orb_retest(candles_5min: list[dict], index_name: str,
 
     return [Signal(
         time=now_time_str(), strategy="orb_retest", action="BUY",
-        index=index_name, strike=strike, option_type=opt_type,
+        index=sym, strike=strike, option_type=opt_type,
         entry_premium=entry,
         sl_premium=round(entry * (1 - p["sl_pct"]), 1),
         tgt_premium=round(entry * (1 + p["tgt_pct"]), 1),
         spot_at_entry=latest["close"], instrument_key=opt_key,
-        note=f"range={orb_low:.0f}-{orb_high:.0f} retest@{now_time_str()}",
+        note=f"range={orb_low:.0f}-{orb_high:.0f}",
     )]
 
 
-def detect_short_strangle(candles_5min: list[dict], index_name: str,
+def detect_vwap_reversal(candles_5min: list[dict], sym: str,
+                         master: dict, expiry: date, udata: UpstoxData,
+                         already_fired: int) -> list[Signal]:
+    p = STRATEGY_PARAMS["vwap_reversal"]
+    inst = ALL_INSTRUMENTS[sym]
+    step = inst["step"]
+
+    if already_fired >= p["max_signals"]:
+        return []
+
+    now_t = now_time_str()
+    if now_t < p["active_from"] or now_t > p["active_to"]:
+        return []
+
+    if len(candles_5min) < 6:
+        return []
+
+    vwap = calc_vwap(candles_5min)
+    cur = candles_5min[-1]
+    prev = candles_5min[-2]
+    cur_vwap = vwap[-1]
+    touch_zone = cur_vwap * p["vwap_touch_pct"] / 100
+
+    direction = None
+    if prev["low"] <= cur_vwap + touch_zone and cur["close"] > cur_vwap and cur["close"] > cur["open"]:
+        direction = "bullish"
+    elif prev["high"] >= cur_vwap - touch_zone and cur["close"] < cur_vwap and cur["close"] < cur["open"]:
+        direction = "bearish"
+
+    if not direction:
+        return []
+
+    strike = round_strike(cur["close"], step)
+    opt_type = "CE" if direction == "bullish" else "PE"
+    opt_key = master.get((sym, expiry, strike, opt_type))
+    if not opt_key:
+        return []
+
+    entry = fetch_option_ltp(udata, opt_key)
+    if entry <= 5:
+        return []
+
+    return [Signal(
+        time=now_time_str(), strategy="vwap_reversal", action="BUY",
+        index=sym, strike=strike, option_type=opt_type,
+        entry_premium=entry,
+        sl_premium=round(entry * (1 - p["sl_pct"]), 1),
+        tgt_premium=round(entry * (1 + p["tgt_pct"]), 1),
+        spot_at_entry=cur["close"], instrument_key=opt_key,
+        note=f"VWAP={cur_vwap:.1f}",
+    )]
+
+
+def detect_ema_crossover(candles_5min: list[dict], sym: str,
+                         master: dict, expiry: date, udata: UpstoxData,
+                         already_fired: int) -> list[Signal]:
+    p = STRATEGY_PARAMS["ema_crossover"]
+    inst = ALL_INSTRUMENTS[sym]
+    step = inst["step"]
+
+    if already_fired >= p["max_signals"]:
+        return []
+
+    now_t = now_time_str()
+    if now_t < p["active_from"] or now_t > p["active_to"]:
+        return []
+
+    if len(candles_5min) < p["slow_period"] + 2:
+        return []
+
+    closes = [c["close"] for c in candles_5min]
+    fast_ema = calc_ema(closes, p["fast_period"])
+    slow_ema = calc_ema(closes, p["slow_period"])
+
+    cur_fast, cur_slow = fast_ema[-1], slow_ema[-1]
+    prev_fast, prev_slow = fast_ema[-2], slow_ema[-2]
+
+    spread_pct = abs(cur_fast - cur_slow) / cur_slow * 100
+    if spread_pct < p["min_spread_pct"]:
+        return []
+
+    direction = None
+    if prev_fast <= prev_slow and cur_fast > cur_slow:
+        direction = "bullish"
+    elif prev_fast >= prev_slow and cur_fast < cur_slow:
+        direction = "bearish"
+
+    if not direction:
+        return []
+
+    cur = candles_5min[-1]
+    strike = round_strike(cur["close"], step)
+    opt_type = "CE" if direction == "bullish" else "PE"
+    opt_key = master.get((sym, expiry, strike, opt_type))
+    if not opt_key:
+        return []
+
+    entry = fetch_option_ltp(udata, opt_key)
+    if entry <= 5:
+        return []
+
+    return [Signal(
+        time=now_time_str(), strategy="ema_crossover", action="BUY",
+        index=sym, strike=strike, option_type=opt_type,
+        entry_premium=entry,
+        sl_premium=round(entry * (1 - p["sl_pct"]), 1),
+        tgt_premium=round(entry * (1 + p["tgt_pct"]), 1),
+        spot_at_entry=cur["close"], instrument_key=opt_key,
+        note=f"EMA8={cur_fast:.1f} x EMA21={cur_slow:.1f}",
+    )]
+
+
+def detect_short_strangle(candles_5min: list[dict], sym: str,
                           master: dict, expiry: date, udata: UpstoxData,
                           prev_close: float | None, already_fired: int) -> list[Signal]:
     p = STRATEGY_PARAMS["short_strangle"]
+    inst = ALL_INSTRUMENTS[sym]
+    step = inst["step"]
 
     if already_fired >= p["max_signals"]:
         return []
@@ -422,13 +585,12 @@ def detect_short_strangle(candles_5min: list[dict], index_name: str,
         if gap_pct > p["max_gap_pct"]:
             return []
 
-    step = INDEXES[index_name]["step"]
     atm = round_strike(spot, step)
     ce_strike = atm + step * p["otm_steps"]
     pe_strike = atm - step * p["otm_steps"]
 
-    ce_key = master.get((index_name, expiry, ce_strike, "CE"))
-    pe_key = master.get((index_name, expiry, pe_strike, "PE"))
+    ce_key = master.get((sym, expiry, ce_strike, "CE"))
+    pe_key = master.get((sym, expiry, pe_strike, "PE"))
     if not ce_key or not pe_key:
         return []
 
@@ -440,7 +602,7 @@ def detect_short_strangle(candles_5min: list[dict], index_name: str,
     combined = ce_premium + pe_premium
     return [Signal(
         time=now_time_str(), strategy="short_strangle", action="SELL",
-        index=index_name, strike=ce_strike, option_type="CE",
+        index=sym, strike=ce_strike, option_type="CE",
         entry_premium=ce_premium,
         sl_premium=round(combined * (1 + p["sl_pct"]), 1),
         tgt_premium=round(combined * (1 - p["tgt_pct"]), 1),
@@ -451,10 +613,12 @@ def detect_short_strangle(candles_5min: list[dict], index_name: str,
     )]
 
 
-def detect_day_end_sell(candles_5min: list[dict], index_name: str,
+def detect_day_end_sell(candles_5min: list[dict], sym: str,
                         master: dict, expiry: date, udata: UpstoxData,
                         already_fired: int) -> list[Signal]:
     p = STRATEGY_PARAMS["day_end_sell"]
+    inst = ALL_INSTRUMENTS[sym]
+    step = inst["step"]
 
     if already_fired >= p["max_signals"]:
         return []
@@ -475,9 +639,7 @@ def detect_day_end_sell(candles_5min: list[dict], index_name: str,
     if abs(trend_pct) < p["min_trend_pct"]:
         return []
 
-    step = INDEXES[index_name]["step"]
     atm = round_strike(current, step)
-
     if trend_pct > 0:
         opt_type = "PE"
         sell_strike = atm - step * p["otm_steps"]
@@ -485,7 +647,7 @@ def detect_day_end_sell(candles_5min: list[dict], index_name: str,
         opt_type = "CE"
         sell_strike = atm + step * p["otm_steps"]
 
-    opt_key = master.get((index_name, expiry, sell_strike, opt_type))
+    opt_key = master.get((sym, expiry, sell_strike, opt_type))
     if not opt_key:
         return []
 
@@ -496,12 +658,12 @@ def detect_day_end_sell(candles_5min: list[dict], index_name: str,
     sl_premium = round(entry * p["sl_mult"], 1)
     return [Signal(
         time=now_time_str(), strategy="day_end_sell", action="SELL",
-        index=index_name, strike=sell_strike, option_type=opt_type,
+        index=sym, strike=sell_strike, option_type=opt_type,
         entry_premium=entry,
         sl_premium=sl_premium,
         tgt_premium=0,
         spot_at_entry=current, instrument_key=opt_key,
-        note=f"sell {opt_type} ({'bullish' if trend_pct > 0 else 'bearish'} day) trend={trend_pct:+.2f}%",
+        note=f"trend={trend_pct:+.2f}%",
     )]
 
 
@@ -591,7 +753,8 @@ def check_exits(active_trades: list[ActiveTrade], udata: UpstoxData,
 
     for trade in active_trades:
         s = trade.signal
-        lot = INDEXES[s.index]["lot_size"]
+        inst = ALL_INSTRUMENTS.get(s.index, {})
+        lot = inst.get("lot_size", 75)
         exited = False
         reason = ""
         pnl = 0.0
@@ -606,17 +769,11 @@ def check_exits(active_trades: list[ActiveTrade], udata: UpstoxData,
 
             time_exit = STRATEGY_PARAMS[s.strategy].get("time_exit", "15:15")
             if current >= s.sl_premium:
-                reason = "SL hit"
-                pnl = pnl_per_lot * lot
-                exited = True
+                reason, pnl, exited = "SL hit", pnl_per_lot * lot, True
             elif current <= s.tgt_premium:
-                reason = "TGT hit"
-                pnl = pnl_per_lot * lot
-                exited = True
+                reason, pnl, exited = "TGT hit", pnl_per_lot * lot, True
             elif now_t >= time_exit:
-                reason = "time exit"
-                pnl = pnl_per_lot * lot
-                exited = True
+                reason, pnl, exited = "time exit", pnl_per_lot * lot, True
         elif s.action == "BUY":
             current = fetch_option_ltp(udata, s.instrument_key)
             pnl_per_lot = (current - s.entry_premium) - 2 * IMPACT_COST
@@ -625,30 +782,20 @@ def check_exits(active_trades: list[ActiveTrade], udata: UpstoxData,
             now_mins = time_to_mins(now_t)
 
             if current <= s.sl_premium:
-                reason = "SL hit"
-                pnl = pnl_per_lot * lot
-                exited = True
+                reason, pnl, exited = "SL hit", pnl_per_lot * lot, True
             elif current >= s.tgt_premium:
-                reason = "TGT hit"
-                pnl = pnl_per_lot * lot
-                exited = True
+                reason, pnl, exited = "TGT hit", pnl_per_lot * lot, True
             elif now_mins - entry_mins >= max_hold:
-                reason = "time exit"
-                pnl = pnl_per_lot * lot
-                exited = True
+                reason, pnl, exited = "time exit", pnl_per_lot * lot, True
         else:
             current = fetch_option_ltp(udata, s.instrument_key)
             pnl_per_lot = (s.entry_premium - current) - 2 * IMPACT_COST
             time_exit = STRATEGY_PARAMS[s.strategy].get("time_exit", "15:10")
 
             if current >= s.sl_premium:
-                reason = "SL hit"
-                pnl = pnl_per_lot * lot
-                exited = True
+                reason, pnl, exited = "SL hit", pnl_per_lot * lot, True
             elif now_t >= time_exit:
-                reason = "time exit"
-                pnl = pnl_per_lot * lot
-                exited = True
+                reason, pnl, exited = "time exit", pnl_per_lot * lot, True
 
         if exited:
             won = pnl > 0
@@ -671,15 +818,13 @@ def check_exits(active_trades: list[ActiveTrade], udata: UpstoxData,
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="Live signal poster to Telegram")
-    parser.add_argument("--index", default="NIFTY")
     parser.add_argument("--dry-run", action="store_true", help="Print signals without posting")
+    parser.add_argument("--no-stocks", action="store_true", help="Skip stock scanning")
     args = parser.parse_args()
 
-    index_arg = args.index.upper()
-    if index_arg == "ALL":
-        index_list = ["NIFTY", "BANKNIFTY"]
-    else:
-        index_list = [index_arg]
+    index_list = list(INDEXES.keys())
+    stock_list = [] if args.no_stocks else list(STOCKS.keys())
+    all_syms = index_list + stock_list
 
     if not args.dry_run and not TELEGRAM_BOT_TOKEN:
         print("ERROR: TELEGRAM_BOT_TOKEN not set in env")
@@ -691,28 +836,28 @@ def main():
 
     today = now_ist().date()
     expiries = {}
-    for ix_name in index_list:
-        expiries[ix_name] = next_expiry(today, INDEXES[ix_name]["expiry_weekday"])
+    for sym in all_syms:
+        expiries[sym] = next_expiry(today, ALL_INSTRUMENTS[sym]["expiry_weekday"])
 
-    print(f"\n{'='*50}")
-    print(f"  LIVE SIGNAL POSTER — {' + '.join(index_list)}")
+    print(f"\n{'='*60}")
+    print(f"  LIVE SIGNAL POSTER")
     print(f"  Date: {today}")
-    for ix in index_list:
-        print(f"  {ix} expiry: {expiries[ix]}")
+    print(f"  Indexes: {', '.join(index_list)}")
+    if stock_list:
+        print(f"  Stocks: {', '.join(stock_list)}")
+    print(f"  Strategies: {', '.join(STRATEGY_PARAMS.keys())}")
     print(f"  Mode: {'DRY RUN' if args.dry_run else 'LIVE POSTING'}")
     print(f"  Channel: {TELEGRAM_CHANNEL}")
-    print(f"{'='*50}")
+    print(f"{'='*60}")
     print(f"  Waiting for Upstox token + market open...\n")
 
-    # Defer UpstoxData init until token is available (refreshes daily)
     udata = None
     prev_closes: dict[str, float] = {}
     active_trades: list[ActiveTrade] = []
     closed_trades: list[ClosedTrade] = []
-    fired_counts: dict[str, dict[str, int]] = {ix: defaultdict(int) for ix in index_list}
+    fired_counts: dict[str, dict[str, int]] = {sym: defaultdict(int) for sym in all_syms}
     last_5min_bar: dict[str, str] = {}
     bot_started = False
-
     scan_interval = 60
 
     while True:
@@ -725,9 +870,9 @@ def main():
             next_monday = now.replace(hour=8, minute=50, second=0, microsecond=0) + timedelta(days=days_until_monday)
             time.sleep((next_monday - now).total_seconds())
             today = now_ist().date()
-            for ix_name in index_list:
-                expiries[ix_name] = next_expiry(today, INDEXES[ix_name]["expiry_weekday"])
-            fired_counts = {ix: defaultdict(int) for ix in index_list}
+            for sym in all_syms:
+                expiries[sym] = next_expiry(today, ALL_INSTRUMENTS[sym]["expiry_weekday"])
+            fired_counts = {sym: defaultdict(int) for sym in all_syms}
             active_trades, closed_trades = [], []
             udata, bot_started = None, False
             continue
@@ -741,9 +886,9 @@ def main():
                 tomorrow = now.replace(hour=8, minute=50, second=0, microsecond=0) + timedelta(days=1)
                 time.sleep((tomorrow - now).total_seconds())
                 today = now_ist().date()
-                for ix_name in index_list:
-                    expiries[ix_name] = next_expiry(today, INDEXES[ix_name]["expiry_weekday"])
-                fired_counts = {ix: defaultdict(int) for ix in index_list}
+                for sym in all_syms:
+                    expiries[sym] = next_expiry(today, ALL_INSTRUMENTS[sym]["expiry_weekday"])
+                fired_counts = {sym: defaultdict(int) for sym in all_syms}
                 active_trades, closed_trades = [], []
                 udata, bot_started = None, False
                 master = _build_option_master(None)
@@ -766,33 +911,36 @@ def main():
                     time.sleep(60)
                     continue
 
-            for ix_name in index_list:
-                idx = INDEXES[ix_name]
+            for sym in all_syms:
+                inst = ALL_INSTRUMENTS[sym]
                 try:
                     yesterday = today - timedelta(days=1)
                     d = udata._get(
-                        f"/v3/historical-candle/{idx['key']}/minutes/1"
+                        f"/v3/historical-candle/{inst['key']}/minutes/1"
                         f"/{yesterday.isoformat()}/{yesterday.isoformat()}")
                     candles = d.get("data", {}).get("candles", [])
                     if candles:
-                        prev_closes[ix_name] = candles[0][4]
+                        prev_closes[sym] = candles[0][4]
                 except Exception:
                     pass
 
         if not bot_started:
             bot_started = True
-            header = f"📊 <b>Signal Bot Started</b>\n{' + '.join(index_list)} | {today}"
-            for ix in index_list:
-                header += f"\n{ix} expiry: {expiries[ix]}"
+            syms_str = ", ".join(index_list)
+            if stock_list:
+                syms_str += f" + {len(stock_list)} stocks"
+            header = f"📊 <b>Signal Bot Started</b>\n{syms_str} | {today}"
+            header += f"\n6 strategies active"
             send_telegram(header, args.dry_run)
 
         active_trades = check_exits(active_trades, udata, args.dry_run, closed_trades)
 
-        for ix_name in index_list:
-            idx = INDEXES[ix_name]
-            expiry = expiries[ix_name]
+        for sym in all_syms:
+            inst = ALL_INSTRUMENTS[sym]
+            expiry = expiries[sym]
+            is_index = sym in INDEXES
 
-            spot_candles = fetch_spot_candles(udata, idx["key"])
+            spot_candles = fetch_spot_candles(udata, inst["key"])
             if not spot_candles:
                 continue
 
@@ -801,39 +949,43 @@ def main():
                 continue
 
             current_bar = candles_5min[-1]["time"]
-            bar_key = f"{ix_name}:{current_bar}"
+            bar_key = f"{sym}:{current_bar}"
 
             new_signals = []
 
-            if bar_key != last_5min_bar.get(ix_name):
-                last_5min_bar[ix_name] = bar_key
+            if bar_key != last_5min_bar.get(sym):
+                last_5min_bar[sym] = bar_key
 
-                sigs = detect_momentum_scalp(
-                    candles_5min, ix_name, master, expiry, udata,
-                    fired_counts[ix_name]["momentum_scalp"])
-                new_signals += sigs
+                new_signals += detect_momentum_scalp(
+                    candles_5min, sym, master, expiry, udata,
+                    fired_counts[sym]["momentum_scalp"])
 
-                sigs = detect_orb_retest(
-                    candles_5min, ix_name, master, expiry, udata,
-                    fired_counts[ix_name]["orb_retest"])
-                new_signals += sigs
+                new_signals += detect_orb_retest(
+                    candles_5min, sym, master, expiry, udata,
+                    fired_counts[sym]["orb_retest"])
 
-            sigs = detect_short_strangle(
-                candles_5min, ix_name, master, expiry, udata,
-                prev_closes.get(ix_name), fired_counts[ix_name]["short_strangle"])
-            new_signals += sigs
+                new_signals += detect_vwap_reversal(
+                    candles_5min, sym, master, expiry, udata,
+                    fired_counts[sym]["vwap_reversal"])
 
-            sigs = detect_day_end_sell(
-                candles_5min, ix_name, master, expiry, udata,
-                fired_counts[ix_name]["day_end_sell"])
-            new_signals += sigs
+                new_signals += detect_ema_crossover(
+                    candles_5min, sym, master, expiry, udata,
+                    fired_counts[sym]["ema_crossover"])
+
+            if is_index:
+                new_signals += detect_short_strangle(
+                    candles_5min, sym, master, expiry, udata,
+                    prev_closes.get(sym), fired_counts[sym]["short_strangle"])
+
+                new_signals += detect_day_end_sell(
+                    candles_5min, sym, master, expiry, udata,
+                    fired_counts[sym]["day_end_sell"])
 
             for sig in new_signals:
                 msg_text = format_signal(sig)
                 msg_id = send_telegram(msg_text, args.dry_run)
-                fired_counts[ix_name][sig.strategy] += 1
+                fired_counts[sym][sig.strategy] += 1
 
-                max_hold = STRATEGY_PARAMS[sig.strategy].get("max_hold_mins", 60)
                 active_trades.append(ActiveTrade(
                     signal=sig,
                     entry_time=sig.time,
@@ -841,7 +993,7 @@ def main():
                     posted_msg_id=msg_id,
                 ))
 
-                print(f"  [{t}] {ix_name} {sig.strategy}: "
+                print(f"  [{t}] {sym} {sig.strategy}: "
                       f"{sig.action} {sig.strike:.0f} {sig.option_type} @ ₹{sig.entry_premium:.1f}")
 
         time.sleep(scan_interval)
