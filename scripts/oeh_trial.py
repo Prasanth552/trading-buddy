@@ -130,45 +130,177 @@ def main():
     for c in candidates:
         print(f"  {c['symbol']:<15s} {c['open']:>8.1f} {c['high']:>8.1f} {c['close']:>8.1f} {c['drop_pct']:>5.2f}%")
 
-    # EOD performance check
+    # PE option performance check with 1-min candles
+    SL_PCT = 0.30
+    FLOOR_MULT = 1.5
+    TGT_MULT = 2.0
+
     print(f"\n{'='*60}")
-    print(f"  EOD PERFORMANCE CHECK")
+    print(f"  PE OPTION PERFORMANCE (1-min candles)")
+    print(f"  SL: {SL_PCT*100:.0f}% | Floor TGT: {FLOOR_MULT}x | Full TGT: {TGT_MULT}x")
     print(f"{'='*60}\n")
 
-    eod_from = datetime.combine(ref_date, datetime.min.time()).replace(hour=15, minute=15)
-    eod_to = datetime.combine(ref_date, datetime.min.time()).replace(hour=15, minute=30)
+    # Build option master from raw UpstoxData master
+    from src.broker.upstox_data import _expiry_to_date
+    import re as _re
+
+    opt_master = {}  # (base_sym, expiry_date, strike, "PE"/"CE") -> instrument_key
+    for inst in master:
+        if inst.get("segment") != "NSE_FO":
+            continue
+        itype = (inst.get("instrument_type") or "").upper()
+        if itype not in ("CE", "PE"):
+            continue
+        tsym = (inst.get("trading_symbol") or "").upper()
+        base = _re.match(r'^([A-Z&]+)', tsym)
+        if not base:
+            continue
+        sym_name = base.group(1)
+        strike_val = float(inst.get("strike_price", 0))
+        ed = _expiry_to_date(inst.get("expiry"))
+        if ed and strike_val > 0:
+            opt_master[(sym_name, ed, strike_val, itype)] = inst.get("instrument_key")
+
+    print(f"  Option master: {len(opt_master)} entries")
+
+    # Find next expiry (Tuesday for stocks)
+    def next_expiry(ref, weekday=1):
+        days = (weekday - ref.weekday()) % 7
+        if days == 0:
+            return ref
+        return ref + timedelta(days=days if days > 0 else 7)
+
+    expiry = next_expiry(ref_date)
+    print(f"  Primary expiry: {expiry}\n")
 
     wins = 0
-    total = 0
+    losses = 0
+    total_pnl = 0
+    results = []
+
     for c in candidates:
-        inst_key = eq_keys.get(c["symbol"])
-        if not inst_key:
+        sym = c["symbol"]
+        spot = c["close"]
+
+        # Find available strikes for this symbol near ATM
+        sym_strikes = sorted({k[2] for k in opt_master if k[0] == sym and k[3] == "PE"})
+        if not sym_strikes:
+            print(f"  ⚠️  {sym:<15s} — no PE options in master")
             continue
+
+        # Find ATM strike closest to spot
+        atm_strike = min(sym_strikes, key=lambda s: abs(s - spot))
+
+        # Try primary expiry, then scan nearby dates
+        opt_key = opt_master.get((sym, expiry, atm_strike, "PE"))
+        used_expiry = expiry
+        if not opt_key:
+            for d in range(0, 8):
+                alt_exp = ref_date + timedelta(days=d)
+                key = opt_master.get((sym, alt_exp, atm_strike, "PE"))
+                if key:
+                    opt_key = key
+                    used_expiry = alt_exp
+                    break
+
+        strike = atm_strike
+
+        if not opt_key:
+            print(f"  ⚠️  {sym:<15s} — no PE option found for strike {atm_strike:.0f}")
+            continue
+
+        # Fetch 1-min PE candles from 09:20 to 15:30
+        opt_from = datetime.combine(ref_date, datetime.min.time()).replace(hour=9, minute=15)
+        opt_to = datetime.combine(ref_date, datetime.min.time()).replace(hour=15, minute=30)
+
         try:
-            eod = ud.historical_data(inst_key, eod_from, eod_to, "5minute")
+            candles = ud.historical_data(opt_key, opt_from, opt_to, "1minute")
             _t.sleep(0.15)
-        except Exception:
+        except Exception as e:
+            print(f"  ⚠️  {sym:<15s} — candle fetch failed: {e}")
             continue
 
-        if not eod:
+        if not candles or len(candles) < 5:
+            print(f"  ⚠️  {sym:<15s} — not enough candles ({len(candles) if candles else 0})")
             continue
 
-        total += 1
-        eod_close = eod[-1]["close"]
-        still_down = eod_close < c["open"]
-        if still_down:
+        # Entry = first candle close after 09:20
+        entry_candle = None
+        for cn in candles:
+            t = cn.get("date", cn.get("timestamp", ""))
+            if isinstance(t, str) and "09:2" in t:
+                entry_candle = cn
+                break
+        if not entry_candle:
+            entry_candle = candles[0]
+
+        entry = entry_candle["close"]
+        if entry <= 0:
+            continue
+
+        sl = round(entry * (1 - SL_PCT), 2)
+        floor_tgt = round(entry * FLOOR_MULT, 2)
+        full_tgt = round(entry * TGT_MULT, 2)
+
+        # Track through 1-min candles
+        peak = entry
+        exit_price = entry
+        exit_reason = "eod"
+        exit_time = ""
+
+        entry_idx = candles.index(entry_candle) if entry_candle in candles else 0
+
+        for cn in candles[entry_idx + 1:]:
+            high = cn["high"]
+            low = cn["low"]
+            close = cn["close"]
+            t = str(cn.get("date", cn.get("timestamp", "")))
+
+            if high > peak:
+                peak = high
+
+            if low <= sl:
+                exit_price = sl
+                exit_reason = "SL"
+                exit_time = t[11:16] if len(t) > 16 else t
+                break
+
+            if high >= floor_tgt:
+                exit_price = floor_tgt
+                exit_reason = "FLOOR"
+                exit_time = t[11:16] if len(t) > 16 else t
+                break
+
+        if exit_reason == "eod":
+            exit_price = candles[-1]["close"]
+            t = str(candles[-1].get("date", candles[-1].get("timestamp", "")))
+            exit_time = t[11:16] if len(t) > 16 else t
+
+        pnl_pct = (exit_price - entry) / entry * 100
+        won = exit_price > entry
+        if won:
             wins += 1
-        icon = "✅" if still_down else "❌"
-        move_pct = (eod_close - c["open"]) / c["open"] * 100
-        pe_pnl = c["open"] - eod_close
-        print(f"  {icon} {c['symbol']:<15s} open={c['open']:.1f} → eod={eod_close:.1f} "
-              f"({move_pct:+.2f}%) PE profit direction: {'YES' if still_down else 'NO'}")
+        else:
+            losses += 1
 
+        # Assume 1 lot for P&L
+        lot_pnl = (exit_price - entry) * 1
+        total_pnl += lot_pnl
+
+        icon = "✅" if won else "❌"
+        results.append((icon, sym, strike, entry, exit_price, pnl_pct, exit_reason, exit_time, peak))
+
+        print(f"  {icon} {sym:<15s} {strike:.0f}PE  entry=₹{entry:.1f} → exit=₹{exit_price:.1f} "
+              f"({pnl_pct:+.1f}%) peak=₹{peak:.1f} | {exit_reason} @ {exit_time}")
+
+    total = wins + losses
     wr = wins / total * 100 if total else 0
-    print(f"\n  {'='*50}")
-    print(f"  Results: {wins}/{total} would have closed in profit ({wr:.0f}% WR)")
-    print(f"  (PE buyers profit when stock closes below open)")
-    print(f"  {'='*50}\n")
+    print(f"\n  {'='*55}")
+    print(f"  Results: {wins}/{total} wins ({wr:.0f}% WR)")
+    print(f"  Floor hits: {sum(1 for r in results if r[6] == 'FLOOR')}")
+    print(f"  SL hits: {sum(1 for r in results if r[6] == 'SL')}")
+    print(f"  EOD exits: {sum(1 for r in results if r[6] == 'eod')}")
+    print(f"  {'='*55}\n")
 
 
 if __name__ == "__main__":
