@@ -54,9 +54,20 @@ def main():
             if tsym:
                 eq_keys[tsym] = inst.get("instrument_key")
 
+    # Debug: check how many F&O names match EQ symbols
+    matched = [s for s in universe if s in eq_keys]
+    unmatched = [s for s in universe if s not in eq_keys]
+    if unmatched[:5]:
+        print(f"  Sample unmatched F&O names: {unmatched[:5]}")
+        # Try to find what EQ symbols look like for these
+        for um in unmatched[:3]:
+            close = [k for k in eq_keys if um in k or k in um]
+            if close:
+                print(f"    {um} → possible EQ matches: {close[:3]}")
+
     print(f"\n{'='*60}")
     print(f"  OEH TRIAL SCAN — {ref_date}")
-    print(f"  F&O Universe: {len(universe)} stocks")
+    print(f"  F&O Universe: {len(universe)} stocks | EQ matched: {len(matched)}")
     print(f"{'='*60}\n")
 
     from_dt = datetime.combine(ref_date, datetime.min.time()).replace(hour=9, minute=15)
