@@ -139,17 +139,21 @@ OEL_UNIVERSE: list[str] = []
 
 def _build_fno_universe(master: list[dict]) -> list[str]:
     """Extract all unique stock symbols that have NSE_FO options listed."""
+    import re
     fno_syms: set[str] = set()
-    index_names = {"NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY", "NIFTY BANK", "NIFTY 50"}
+    index_names = {"NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY"}
     for inst in master:
         if inst.get("segment") != "NSE_FO":
             continue
         itype = (inst.get("instrument_type") or "").upper()
         if itype not in ("CE", "PE"):
             continue
-        name = (inst.get("name") or "").upper()
-        if name and name not in index_names:
-            fno_syms.add(name)
+        tsym = (inst.get("trading_symbol") or "").upper()
+        base = re.match(r'^([A-Z&]+)', tsym)
+        if base:
+            name = base.group(1)
+            if name and name not in index_names and len(name) >= 2:
+                fno_syms.add(name)
     return sorted(fno_syms)
 
 # ---------------------------------------------------------------------------

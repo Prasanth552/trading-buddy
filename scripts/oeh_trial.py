@@ -29,9 +29,15 @@ def build_fno_universe(master):
             continue
         if (inst.get("instrument_type") or "").upper() not in ("CE", "PE"):
             continue
-        name = (inst.get("name") or "").upper()
-        if name and name not in INDEX_NAMES:
-            syms.add(name)
+        tsym = (inst.get("trading_symbol") or "").upper()
+        # trading_symbol is like "RELIANCE24SEP26CE2600" — extract the base name
+        # by stripping digits and option suffixes
+        import re
+        base = re.match(r'^([A-Z&]+)', tsym)
+        if base:
+            name = base.group(1)
+            if name and name not in INDEX_NAMES and len(name) >= 2:
+                syms.add(name)
     return sorted(syms)
 
 
