@@ -5,14 +5,14 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=ubuntu
-WorkingDirectory=/home/ubuntu/Trading-Buddy
-EnvironmentFile=/home/ubuntu/Trading-Buddy/.env
-ExecStart=/home/ubuntu/Trading-Buddy/.venv/bin/python scripts/live_signal_poster.py --index NIFTY
+User=pklprasanth522
+WorkingDirectory=/home/pklprasanth522/Trading-Buddy
+EnvironmentFile=/home/pklprasanth522/Trading-Buddy/.env
+ExecStart=/home/pklprasanth522/Trading-Buddy/.venv/bin/python scripts/live_signal_poster.py --index NIFTY
 Restart=always
 RestartSec=30
 Environment=PYTHONUNBUFFERED=1
-Environment=PYTHONPATH=/home/ubuntu/Trading-Buddy
+Environment=PYTHONPATH=/home/pklprasanth522/Trading-Buddy
 
 [Install]
 WantedBy=multi-user.target
