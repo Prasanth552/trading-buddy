@@ -1,7 +1,8 @@
-"""Replay today's candles through all signal poster strategies (offline dry run).
+"""Replay today's candles through signal strategies with P&L simulation.
 
-Fetches today's candles from Upstox for all instruments, walks through
-each 5-min bar simulating what the live poster would have detected.
+For each detected signal, simulates exit using subsequent 5-min bars:
+- BUY options: tracks spot movement, estimates option premium change
+- Checks SL, TGT, and max hold time exits
 
 Usage:
     PYTHONPATH=. .venv/bin/python3 scripts/dry_run_today.py [--no-stocks]
@@ -18,7 +19,7 @@ from src.strategy.live_runner import _build_option_master
 from scripts.live_signal_poster import (
     INDEXES, STOCKS, ALL_INSTRUMENTS, STRATEGY_PARAMS,
     resample_5min, round_strike, next_expiry, calc_vwap, calc_ema,
-    fetch_option_ltp,
+    fetch_option_ltp, time_to_mins,
 )
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -51,6 +52,96 @@ def fetch_todays_candles(udata: UpstoxData, inst_key: str) -> list[dict]:
     return rows
 
 
+def simulate_exit(signal: dict, candles_5min: list[dict], params: dict) -> dict:
+    """Simulate trade exit using subsequent spot candles.
+
+    For BUY CE: option gains when spot goes up, loses when spot goes down.
+    For BUY PE: option gains when spot goes down, loses when spot goes up.
+    We estimate option premium change as ~0.5 * spot_change (ATM delta ≈ 0.5).
+    """
+    entry_time = signal["time"]
+    entry_spot = signal["spot"]
+    strategy = signal["strategy"]
+    p = params[strategy]
+
+    sl_pct = p.get("sl_pct", 0.15)
+    tgt_pct = p.get("tgt_pct", 0.20)
+    max_hold = p.get("max_hold_mins", p.get("time_exit", 20))
+
+    if isinstance(max_hold, str):
+        max_hold_mins = time_to_mins(max_hold) - time_to_mins(entry_time)
+    else:
+        max_hold_mins = max_hold
+
+    is_ce = "CE" in signal.get("type", "CE")
+    is_sell = signal.get("action", "BUY") == "SELL"
+
+    entry_idx = None
+    for i, c in enumerate(candles_5min):
+        if c["time"] >= entry_time:
+            entry_idx = i
+            break
+    if entry_idx is None:
+        return {"exit_reason": "no_data", "pnl_pct": 0, "exit_time": entry_time}
+
+    for j in range(entry_idx + 1, len(candles_5min)):
+        bar = candles_5min[j]
+        elapsed = time_to_mins(bar["time"]) - time_to_mins(entry_time)
+
+        spot_change_pct = (bar["close"] - entry_spot) / entry_spot * 100
+
+        if is_sell:
+            if is_ce:
+                option_pnl_pct = -spot_change_pct * 3.0
+            else:
+                option_pnl_pct = spot_change_pct * 3.0
+        else:
+            if is_ce:
+                option_pnl_pct = spot_change_pct * 3.0
+            else:
+                option_pnl_pct = -spot_change_pct * 3.0
+
+        high_spot_pct = (bar["high"] - entry_spot) / entry_spot * 100
+        low_spot_pct = (bar["low"] - entry_spot) / entry_spot * 100
+
+        if not is_sell:
+            if is_ce:
+                best_pnl = high_spot_pct * 3.0
+                worst_pnl = low_spot_pct * 3.0
+            else:
+                best_pnl = -low_spot_pct * 3.0
+                worst_pnl = -high_spot_pct * 3.0
+        else:
+            if is_ce:
+                best_pnl = -low_spot_pct * 3.0
+                worst_pnl = -high_spot_pct * 3.0
+            else:
+                best_pnl = high_spot_pct * 3.0
+                worst_pnl = low_spot_pct * 3.0
+
+        if worst_pnl <= -sl_pct * 100:
+            return {"exit_reason": "SL", "pnl_pct": -sl_pct * 100, "exit_time": bar["time"],
+                    "hold_mins": elapsed}
+
+        if best_pnl >= tgt_pct * 100:
+            return {"exit_reason": "TGT", "pnl_pct": tgt_pct * 100, "exit_time": bar["time"],
+                    "hold_mins": elapsed}
+
+        if elapsed >= max_hold_mins:
+            return {"exit_reason": "TIME", "pnl_pct": option_pnl_pct, "exit_time": bar["time"],
+                    "hold_mins": elapsed}
+
+    last = candles_5min[-1]
+    spot_change_pct = (last["close"] - entry_spot) / entry_spot * 100
+    if not is_sell:
+        final_pnl = (spot_change_pct * 3.0) if is_ce else (-spot_change_pct * 3.0)
+    else:
+        final_pnl = (-spot_change_pct * 3.0) if is_ce else (spot_change_pct * 3.0)
+
+    return {"exit_reason": "EOD", "pnl_pct": final_pnl, "exit_time": last["time"],
+            "hold_mins": time_to_mins(last["time"]) - time_to_mins(entry_time)}
+
+
 def sim_momentum_scalp(candles_5min, sym, p):
     inst = ALL_INSTRUMENTS[sym]
     step = inst["step"]
@@ -79,7 +170,7 @@ def sim_momentum_scalp(candles_5min, sym, p):
         opt = "CE" if d == "bullish" else "PE"
         results.append({"time": bar["time"], "strategy": "momentum_scalp", "sym": sym,
                         "strike": strike, "type": opt, "direction": d, "spot": bar["close"],
-                        "body_pct": body_pct, "action": "BUY"})
+                        "action": "BUY"})
         fired += 1
     return results
 
@@ -143,7 +234,7 @@ def sim_vwap_reversal(candles_5min, sym, p):
         opt = "CE" if d == "bullish" else "PE"
         results.append({"time": bar["time"], "strategy": "vwap_reversal", "sym": sym,
                         "strike": strike, "type": opt, "direction": d, "spot": bar["close"],
-                        "vwap": cur_vwap, "action": "BUY"})
+                        "action": "BUY"})
         fired += 1
     return results
 
@@ -173,7 +264,7 @@ def sim_ema_crossover(candles_5min, sym, p):
         opt = "CE" if d == "bullish" else "PE"
         results.append({"time": bar["time"], "strategy": "ema_crossover", "sym": sym,
                         "strike": strike, "type": opt, "direction": d, "spot": bar["close"],
-                        "ema_fast": fast[i], "ema_slow": slow[i], "action": "BUY"})
+                        "action": "BUY"})
         fired += 1
     return results
 
@@ -198,29 +289,39 @@ def main():
     master = _build_option_master(None)
 
     today = datetime.now(IST).date()
-    all_signals = []
+
+    # Fetch all candles first
+    candle_data: dict[str, list[dict]] = {}
+    candle_5m_data: dict[str, list[dict]] = {}
 
     for sym in all_syms:
         inst = ALL_INSTRUMENTS[sym]
-        expiry = next_expiry(today, inst["expiry_weekday"])
-
         print(f"  Fetching {sym}...")
         candles_1min = fetch_todays_candles(udata, inst["key"])
         if not candles_1min:
-            print(f"    No candles for {sym}")
+            print(f"    No candles")
             continue
-
         candles_5min = resample_5min(candles_1min)
-        print(f"    {len(candles_1min)} 1m → {len(candles_5min)} 5m bars "
+        candle_data[sym] = candles_1min
+        candle_5m_data[sym] = candles_5min
+        print(f"    {len(candles_1min)} 1m → {len(candles_5min)} 5m "
               f"({candles_1min[0]['time']}-{candles_1min[-1]['time']})")
+
+    # Detect signals
+    all_signals = []
+    for sym in all_syms:
+        if sym not in candle_5m_data:
+            continue
+        candles_5min = candle_5m_data[sym]
+        inst = ALL_INSTRUMENTS[sym]
+        expiry = next_expiry(today, inst["expiry_weekday"])
 
         all_signals += sim_momentum_scalp(candles_5min, sym, STRATEGY_PARAMS["momentum_scalp"])
         all_signals += sim_orb_retest(candles_5min, sym, STRATEGY_PARAMS["orb_retest"])
         all_signals += sim_vwap_reversal(candles_5min, sym, STRATEGY_PARAMS["vwap_reversal"])
         all_signals += sim_ema_crossover(candles_5min, sym, STRATEGY_PARAMS["ema_crossover"])
 
-        is_index = sym in INDEXES
-        if is_index:
+        if sym in INDEXES:
             p_ss = STRATEGY_PARAMS["short_strangle"]
             ss_bar = next((c for c in candles_5min if c["time"] == p_ss["entry_time"]), None)
             if ss_bar:
@@ -229,18 +330,11 @@ def main():
                 atm = round_strike(spot, step)
                 ce_strike = atm + step * p_ss["otm_steps"]
                 pe_strike = atm - step * p_ss["otm_steps"]
-                ce_key = master.get((sym, expiry, ce_strike, "CE"))
-                pe_key = master.get((sym, expiry, pe_strike, "PE"))
-                if ce_key and pe_key:
-                    ce_ltp = fetch_option_ltp(udata, ce_key)
-                    pe_ltp = fetch_option_ltp(udata, pe_key)
-                    if ce_ltp > 5 and pe_ltp > 5:
-                        all_signals.append({
-                            "time": "10:00", "strategy": "short_strangle", "sym": sym,
-                            "strike": ce_strike, "type": f"CE+PE({pe_strike})",
-                            "entry": ce_ltp + pe_ltp, "direction": "neutral",
-                            "spot": spot, "action": "SELL",
-                        })
+                all_signals.append({
+                    "time": "10:00", "strategy": "short_strangle", "sym": sym,
+                    "strike": ce_strike, "type": f"CE",
+                    "direction": "neutral", "spot": spot, "action": "SELL",
+                })
 
             p_de = STRATEGY_PARAMS["day_end_sell"]
             de_bar = next((c for c in candles_5min if c["time"] == p_de["entry_time"]), None)
@@ -260,34 +354,67 @@ def main():
                             "time": "14:00", "strategy": "day_end_sell", "sym": sym,
                             "strike": sell_strike, "type": opt_type,
                             "direction": "bullish" if trend_pct > 0 else "bearish",
-                            "spot": current, "trend_pct": trend_pct, "action": "SELL",
+                            "spot": current, "action": "SELL",
                         })
+
+    # Simulate exits for each signal
+    for sig in all_signals:
+        sym = sig["sym"]
+        if sym in candle_5m_data:
+            exit_result = simulate_exit(sig, candle_5m_data[sym], STRATEGY_PARAMS)
+            sig.update(exit_result)
 
     all_signals.sort(key=lambda s: s["time"])
 
-    print(f"\n{'='*60}")
-    print(f"  DRY RUN RESULTS — {today}")
+    # Print results
+    print(f"\n{'='*70}")
+    print(f"  DRY RUN WITH P&L — {today}")
     print(f"  Instruments: {', '.join(all_syms)}")
-    print(f"{'='*60}")
+    print(f"{'='*70}")
 
     if not all_signals:
-        print("\n  No signals detected today.\n")
-    else:
-        print(f"\n  {len(all_signals)} signal(s) detected:\n")
-        by_strategy = defaultdict(int)
-        for s in all_signals:
-            by_strategy[s["strategy"]] += 1
-            print(f"  [{s['time']}] {s['sym']} — {s['strategy']}")
-            print(f"    {s['action']} {s['sym']} {s['strike']:.0f} {s['type']}")
-            print(f"    Spot: {s['spot']:.1f} | {s['direction']}")
-            if "vwap" in s: print(f"    VWAP: {s['vwap']:.1f}")
-            if "ema_fast" in s: print(f"    EMA8={s['ema_fast']:.1f} x EMA21={s['ema_slow']:.1f}")
-            print()
+        print("\n  No signals detected.\n")
+        return
 
-        print(f"  --- By strategy ---")
-        for strat, count in sorted(by_strategy.items(), key=lambda x: -x[1]):
-            print(f"    {strat}: {count}")
-        print()
+    wins = [s for s in all_signals if s.get("pnl_pct", 0) > 0]
+    losses = [s for s in all_signals if s.get("pnl_pct", 0) <= 0]
+    total = len(all_signals)
+    wr = len(wins) / total * 100 if total else 0
+    avg_win = sum(s["pnl_pct"] for s in wins) / len(wins) if wins else 0
+    avg_loss = sum(s["pnl_pct"] for s in losses) / len(losses) if losses else 0
+
+    print(f"\n  SUMMARY: {total} signals | {len(wins)} wins | {len(losses)} losses | WR: {wr:.0f}%")
+    print(f"  Avg win: {avg_win:+.1f}% | Avg loss: {avg_loss:+.1f}%")
+    print()
+
+    # By strategy
+    by_strat = defaultdict(lambda: {"total": 0, "wins": 0, "pnl_sum": 0.0})
+    for s in all_signals:
+        st = by_strat[s["strategy"]]
+        st["total"] += 1
+        if s.get("pnl_pct", 0) > 0: st["wins"] += 1
+        st["pnl_sum"] += s.get("pnl_pct", 0)
+
+    print(f"  {'Strategy':<20} {'Signals':>8} {'Wins':>6} {'WR':>6} {'Total P&L%':>10}")
+    print(f"  {'-'*50}")
+    for strat, st in sorted(by_strat.items(), key=lambda x: -x[1]["pnl_sum"]):
+        wr_s = st["wins"] / st["total"] * 100 if st["total"] else 0
+        print(f"  {strat:<20} {st['total']:>8} {st['wins']:>6} {wr_s:>5.0f}% {st['pnl_sum']:>+9.1f}%")
+    print()
+
+    # Detailed signals
+    print(f"  {'Time':<7} {'Sym':<12} {'Strategy':<18} {'Action':<5} {'Strike':>8} {'Type':<4} "
+          f"{'Exit':>5} {'P&L%':>7} {'Hold':>5}")
+    print(f"  {'-'*75}")
+    for s in all_signals:
+        icon = "✅" if s.get("pnl_pct", 0) > 0 else "❌"
+        exit_r = s.get("exit_reason", "?")[:4]
+        pnl = s.get("pnl_pct", 0)
+        hold = s.get("hold_mins", 0)
+        print(f"  {icon} {s['time']:<5} {s['sym']:<12} {s['strategy']:<18} {s['action']:<5} "
+              f"{s['strike']:>7.0f} {s['type']:<4} {exit_r:>5} {pnl:>+6.1f}% {hold:>4}m")
+
+    print()
 
 
 if __name__ == "__main__":
