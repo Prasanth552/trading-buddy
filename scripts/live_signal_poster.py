@@ -50,12 +50,8 @@ INDEXES = {
 STOCKS = {
     "RELIANCE": {"key": "NSE_EQ|INE002A01018", "step": 10, "lot_size": 250, "expiry_weekday": 3},
     "HDFCBANK": {"key": "NSE_EQ|INE040A01034", "step": 10, "lot_size": 550, "expiry_weekday": 3},
-    "ICICIBANK": {"key": "NSE_EQ|INE090A01021", "step": 10, "lot_size": 700, "expiry_weekday": 3},
-    "TCS": {"key": "NSE_EQ|INE467B01029", "step": 20, "lot_size": 175, "expiry_weekday": 3},
-    "INFY": {"key": "NSE_EQ|INE009A01021", "step": 20, "lot_size": 400, "expiry_weekday": 3},
     "SBIN": {"key": "NSE_EQ|INE062A01020", "step": 10, "lot_size": 750, "expiry_weekday": 3},
     "TATAMOTORS": {"key": "NSE_EQ|INE155A01022", "step": 10, "lot_size": 1400, "expiry_weekday": 3},
-    "BAJFINANCE": {"key": "NSE_EQ|INE296A01032", "step": 10, "lot_size": 125, "expiry_weekday": 3},
 }
 
 ALL_INSTRUMENTS = {}
@@ -64,39 +60,40 @@ ALL_INSTRUMENTS.update(STOCKS)
 
 STRATEGY_PARAMS = {
     "momentum_scalp": {
-        "body_pct": 0.08,
-        "vol_mult": 1.2,
+        "body_pct": 0.12,
+        "vol_mult": 1.3,
         "sl_pct": 0.12,
         "tgt_pct": 0.18,
         "max_hold_mins": 15,
         "active_from": "09:20",
         "active_to": "14:30",
-        "max_signals": 5,
-        "cooldown_mins": 10,
-        "close_position_min": 0.50,
+        "max_signals": 2,
+        "cooldown_mins": 15,
+        "close_position_min": 0.60,
     },
     "orb_retest": {
         "range_end": "09:44",
         "active_from": "09:50",
-        "active_to": "13:00",
+        "active_to": "12:00",
         "sl_pct": 0.20,
         "tgt_pct": 0.40,
         "max_hold_mins": 45,
-        "min_range_pct": 0.10,
-        "max_range_pct": 0.90,
-        "retest_pct": 0.15,
-        "max_signals": 2,
+        "min_range_pct": 0.15,
+        "max_range_pct": 0.80,
+        "retest_pct": 0.10,
+        "max_signals": 1,
     },
     "vwap_reversal": {
         "sl_pct": 0.15,
         "tgt_pct": 0.25,
-        "max_hold_mins": 20,
-        "active_from": "09:45",
-        "active_to": "14:00",
-        "max_signals": 3,
-        "cooldown_mins": 15,
-        "vwap_touch_pct": 0.10,
-        "confirm_bars": 1,
+        "max_hold_mins": 25,
+        "active_from": "10:00",
+        "active_to": "13:30",
+        "max_signals": 1,
+        "cooldown_mins": 20,
+        "vwap_touch_pct": 0.05,
+        "min_bounce_pct": 0.08,
+        "confirm_bars": 2,
     },
     "ema_crossover": {
         "fast_period": 8,
@@ -104,11 +101,11 @@ STRATEGY_PARAMS = {
         "sl_pct": 0.15,
         "tgt_pct": 0.22,
         "max_hold_mins": 25,
-        "active_from": "09:40",
+        "active_from": "10:00",
         "active_to": "14:00",
-        "max_signals": 3,
-        "cooldown_mins": 15,
-        "min_spread_pct": 0.02,
+        "max_signals": 2,
+        "cooldown_mins": 20,
+        "min_spread_pct": 0.03,
     },
     "short_strangle": {
         "entry_time": "10:00",
@@ -459,19 +456,34 @@ def detect_vwap_reversal(candles_5min: list[dict], sym: str,
     if now_t < p["active_from"] or now_t > p["active_to"]:
         return []
 
-    if len(candles_5min) < 6:
+    confirm = p.get("confirm_bars", 2)
+    if len(candles_5min) < 6 + confirm:
         return []
 
     vwap = calc_vwap(candles_5min)
     cur = candles_5min[-1]
-    prev = candles_5min[-2]
     cur_vwap = vwap[-1]
     touch_zone = cur_vwap * p["vwap_touch_pct"] / 100
+    min_bounce = cur_vwap * p.get("min_bounce_pct", 0.08) / 100
+
+    touch_bar = candles_5min[-1 - confirm]
+    touched_below = touch_bar["low"] <= cur_vwap + touch_zone and touch_bar["low"] >= cur_vwap - touch_zone
+    touched_above = touch_bar["high"] >= cur_vwap - touch_zone and touch_bar["high"] <= cur_vwap + touch_zone
+
+    confirm_ok_bull = all(
+        candles_5min[-1 - confirm + j]["close"] > candles_5min[-1 - confirm + j]["open"]
+        for j in range(1, confirm + 1)
+    )
+    confirm_ok_bear = all(
+        candles_5min[-1 - confirm + j]["close"] < candles_5min[-1 - confirm + j]["open"]
+        for j in range(1, confirm + 1)
+    )
 
     direction = None
-    if prev["low"] <= cur_vwap + touch_zone and cur["close"] > cur_vwap and cur["close"] > cur["open"]:
+    bounce_size = abs(cur["close"] - cur_vwap)
+    if touched_below and confirm_ok_bull and cur["close"] > cur_vwap and bounce_size >= min_bounce:
         direction = "bullish"
-    elif prev["high"] >= cur_vwap - touch_zone and cur["close"] < cur_vwap and cur["close"] < cur["open"]:
+    elif touched_above and confirm_ok_bear and cur["close"] < cur_vwap and bounce_size >= min_bounce:
         direction = "bearish"
 
     if not direction:

@@ -213,21 +213,37 @@ def sim_orb_retest(candles_5min, sym, p):
 def sim_vwap_reversal(candles_5min, sym, p):
     inst = ALL_INSTRUMENTS[sym]
     step = inst["step"]
-    if len(candles_5min) < 6: return []
+    confirm = p.get("confirm_bars", 2)
+    if len(candles_5min) < 6 + confirm: return []
     vwap = calc_vwap(candles_5min)
     results, fired = [], 0
 
-    for i in range(2, len(candles_5min)):
+    for i in range(confirm + 2, len(candles_5min)):
         bar = candles_5min[i]
-        prev = candles_5min[i-1]
         if bar["time"] < p["active_from"] or bar["time"] > p["active_to"] or fired >= p["max_signals"]:
             continue
         cur_vwap = vwap[i]
         touch_zone = cur_vwap * p["vwap_touch_pct"] / 100
+        min_bounce = cur_vwap * p.get("min_bounce_pct", 0.08) / 100
+
+        touch_bar = candles_5min[i - confirm]
+        touched_below = touch_bar["low"] <= cur_vwap + touch_zone and touch_bar["low"] >= cur_vwap - touch_zone
+        touched_above = touch_bar["high"] >= cur_vwap - touch_zone and touch_bar["high"] <= cur_vwap + touch_zone
+
+        confirm_ok_bull = all(
+            candles_5min[i - confirm + j]["close"] > candles_5min[i - confirm + j]["open"]
+            for j in range(1, confirm + 1)
+        )
+        confirm_ok_bear = all(
+            candles_5min[i - confirm + j]["close"] < candles_5min[i - confirm + j]["open"]
+            for j in range(1, confirm + 1)
+        )
+
+        bounce_size = abs(bar["close"] - cur_vwap)
         d = None
-        if prev["low"] <= cur_vwap + touch_zone and bar["close"] > cur_vwap and bar["close"] > bar["open"]:
+        if touched_below and confirm_ok_bull and bar["close"] > cur_vwap and bounce_size >= min_bounce:
             d = "bullish"
-        elif prev["high"] >= cur_vwap - touch_zone and bar["close"] < cur_vwap and bar["close"] < bar["open"]:
+        elif touched_above and confirm_ok_bear and bar["close"] < cur_vwap and bounce_size >= min_bounce:
             d = "bearish"
         if not d: continue
         strike = round_strike(bar["close"], step)
