@@ -64,23 +64,23 @@ STOCKS = {
 STRATEGIES = {
     "ema20_rsi50": dict(
         ema_period=20, rsi_period=14, rsi_bull=50, rsi_bear=50,
-        entry_dte_range=(15, 28), profit_target_pct=0.50,
-        stop_loss_mult=2.0, close_dte=5,
+        entry_dte_range=(15, 28), profit_target_pct=0.30,
+        stop_loss_mult=2.0, close_dte=5, book_profit_after_days=2,
     ),
     "ema20_rsi60": dict(
         ema_period=20, rsi_period=14, rsi_bull=60, rsi_bear=40,
-        entry_dte_range=(5, 35), profit_target_pct=0.50,
-        stop_loss_mult=2.0, close_dte=2,
+        entry_dte_range=(5, 35), profit_target_pct=0.30,
+        stop_loss_mult=2.0, close_dte=2, book_profit_after_days=2,
     ),
     "ema20_rsi50_tight": dict(
         ema_period=20, rsi_period=14, rsi_bull=50, rsi_bear=50,
-        entry_dte_range=(15, 28), profit_target_pct=0.40,
-        stop_loss_mult=1.5, close_dte=5,
+        entry_dte_range=(15, 28), profit_target_pct=0.30,
+        stop_loss_mult=1.5, close_dte=5, book_profit_after_days=2,
     ),
     "ema20_rsi50_wide": dict(
         ema_period=20, rsi_period=14, rsi_bull=50, rsi_bear=50,
-        entry_dte_range=(15, 28), profit_target_pct=0.60,
-        stop_loss_mult=3.0, close_dte=5,
+        entry_dte_range=(15, 28), profit_target_pct=0.30,
+        stop_loss_mult=3.0, close_dte=5, book_profit_after_days=2,
     ),
 }
 
@@ -347,8 +347,8 @@ def calc_charges(premium, lot_size, num_legs=4):
 # Core spread runners
 # ---------------------------------------------------------------------------
 def run_bull_put_spread(daily_candles, stock_name, entry_date, expiry_date, *,
-                        lots=1, profit_target_pct=0.50, stop_loss_mult=2.0,
-                        close_dte=5, uclient=None):
+                        lots=1, profit_target_pct=0.30, stop_loss_mult=2.0,
+                        close_dte=5, book_profit_after_days=2, uclient=None):
     stk = STOCKS[stock_name]
     iv, step = stk["iv_annual"], stk["strike_step"]
     lot_size = stk["lot_size"] * lots
@@ -422,6 +422,10 @@ def run_bull_put_spread(daily_candles, stock_name, entry_date, expiry_date, *,
         if rem <= close_dte:
             exit_date, exit_reason, exit_spread_val = dd, "dte_exit", csv
             exit_pnl = upnl * lot_size; break
+        days_held = (dd - entry_date).days
+        if days_held >= book_profit_after_days and upnl > 0:
+            exit_date, exit_reason, exit_spread_val = dd, "eod_book", csv
+            exit_pnl = upnl * lot_size; break
 
     if exit_date is None:
         exit_date, exit_reason = expiry_date, "expiry"
@@ -446,8 +450,8 @@ def run_bull_put_spread(daily_candles, stock_name, entry_date, expiry_date, *,
 
 
 def run_bear_call_spread(daily_candles, stock_name, entry_date, expiry_date, *,
-                         lots=1, profit_target_pct=0.50, stop_loss_mult=2.0,
-                         close_dte=5, uclient=None):
+                         lots=1, profit_target_pct=0.30, stop_loss_mult=2.0,
+                         close_dte=5, book_profit_after_days=2, uclient=None):
     stk = STOCKS[stock_name]
     iv, step = stk["iv_annual"], stk["strike_step"]
     lot_size = stk["lot_size"] * lots
@@ -518,6 +522,10 @@ def run_bear_call_spread(daily_candles, stock_name, entry_date, expiry_date, *,
             exit_pnl = upnl * lot_size; break
         if rem <= close_dte:
             exit_date, exit_reason, exit_spread_val = dd, "dte_exit", csv
+            exit_pnl = upnl * lot_size; break
+        days_held = (dd - entry_date).days
+        if days_held >= book_profit_after_days and upnl > 0:
+            exit_date, exit_reason, exit_spread_val = dd, "eod_book", csv
             exit_pnl = upnl * lot_size; break
 
     if exit_date is None:
@@ -629,12 +637,14 @@ def run_day(ref_date: date, lots: int = 1, *, force: bool = False) -> dict:
                                                     lots=lots, profit_target_pct=params["profit_target_pct"],
                                                     stop_loss_mult=params["stop_loss_mult"],
                                                     close_dte=params["close_dte"],
+                                                    book_profit_after_days=params.get("book_profit_after_days", 2),
                                                     uclient=uclient)
                         else:
                             r = run_bear_call_spread(daily, stock_name, ref_date, sig["expiry"],
                                                      lots=lots, profit_target_pct=params["profit_target_pct"],
                                                      stop_loss_mult=params["stop_loss_mult"],
                                                      close_dte=params["close_dte"],
+                                                     book_profit_after_days=params.get("book_profit_after_days", 2),
                                                      uclient=uclient)
                         r["rsi"] = sig["rsi"]
                         r["ema"] = sig["ema"]
