@@ -109,6 +109,7 @@ OEH_RUN_TIME = "09:20"          # IST — check after first 5-min candle
 OEH_LIST_TIME = "09:16"         # IST — early list using 1-min candle
 OEH_MAX_TRADES = 5              # max trades per scan
 OEH_SL_PCT = 0.30               # 30% of premium as stop-loss
+OEH_MAX_SL = 5000               # cap max SL at ₹5000
 OEH_FLOOR_STEP = 1500           # ₹1500 stepping floor (lock ₹1500, then ₹3000, ₹4500...)
 OEH_TOLERANCE = 0.05            # ₹0.05 tolerance for high <= open check
 OEH_MIN_DROP_PCT = 0.3          # skip candidates with <0.3% drop (weak signal)
@@ -893,6 +894,8 @@ def _loss_cap_for_channel(ch: str) -> float:
         return CH2F_MAX_LOSS
     if ch == "ch2":
         return CH2_MAX_LOSS
+    if ch in ("oeh", "oel"):
+        return OEH_MAX_SL
     return MAX_LOSS_PER_TRADE
 
 

@@ -132,6 +132,7 @@ def main():
 
     # PE option performance — rupee-based stepping floors
     SL_PCT = 0.30
+    MAX_SL_RS = 5000   # cap max loss at ₹5000
     FLOOR_STEP = 1500  # ₹1500 steps: lock ₹1500, then ₹3000, ₹4500 ...
 
     print(f"\n{'='*60}")
@@ -223,7 +224,9 @@ def main():
         if entry <= 0:
             continue
 
-        sl_price = round(entry * (1 - SL_PCT), 2)
+        sl_pct_price = entry * (1 - SL_PCT)
+        sl_cap_price = entry - (MAX_SL_RS / lot)
+        sl_price = round(max(sl_pct_price, sl_cap_price), 2)
 
         # Simulate with stepping rupee floors
         peak = entry
