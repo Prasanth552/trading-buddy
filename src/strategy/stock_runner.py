@@ -694,6 +694,120 @@ def _load_day_from_db(ref_date):
 
 
 # ---------------------------------------------------------------------------
+# Daily refresh of active positions
+# ---------------------------------------------------------------------------
+def refresh_active_positions(today: date | None = None) -> list[dict]:
+    """Re-evaluate open positions with fresh candle data.
+
+    Finds trades where exit_reason='expiry' and expiry_date > today, then
+    re-simulates with updated candles to check profit target / eod_book / SL.
+    """
+    init_stock_strategy_db()
+    if today is None:
+        today = date.today()
+    with db.get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM stock_strategy_results WHERE skipped=0 "
+            "AND exit_reason='expiry' AND expiry_date>?",
+            (today.isoformat(),)).fetchall()
+    if not rows:
+        return []
+
+    uclient = UpstoxData()
+    updated = []
+    for row in rows:
+        row = dict(row)
+        stock_name = row["stock"]
+        if stock_name not in STOCKS:
+            continue
+        stk = STOCKS[stock_name]
+        entry_date = date.fromisoformat(row["entry_date"])
+        expiry_date = date.fromisoformat(row["expiry_date"])
+        net_credit = row["net_credit"]
+        sell_strike = row["sell_strike"]
+        buy_strike = row["buy_strike"]
+        direction = row["direction"]
+        lot_size = stk["lot_size"] * (row.get("lots") or 1)
+        strategy = row["strategy"]
+        params = STRATEGIES.get(strategy, {})
+        profit_target_pct = params.get("profit_target_pct", 0.30)
+        stop_loss_mult = params.get("stop_loss_mult", 2.0)
+        close_dte = params.get("close_dte", 5)
+        book_profit_after_days = params.get("book_profit_after_days", 2)
+
+        profit_target = net_credit * profit_target_pct
+        stop_loss_premium = net_credit * stop_loss_mult
+
+        buffer_start = entry_date - timedelta(days=5)
+        candles = fetch_daily_candles(uclient, stock_name, buffer_start,
+                                     today + timedelta(days=1))
+        trading_days = sorted(
+            [c for c in candles
+             if entry_date.isoformat() < c["date"][:10] <= today.isoformat()],
+            key=lambda c: c["date"])
+
+        exit_date = exit_reason = exit_spread_val = None
+        exit_pnl = 0
+        opt_type = "PE" if direction == "bullish" else "CE"
+        iv = stk["iv_annual"]
+
+        for dc in trading_days:
+            dd = date.fromisoformat(dc["date"][:10])
+            ds = dc["close"]
+            rem = (expiry_date - dd).days
+
+            real_exit = fetch_stock_option_ltp(uclient, stock_name, expiry_date,
+                                              sell_strike, buy_strike, opt_type)
+            if real_exit:
+                csv = real_exit["sell"] - real_exit["buy"]
+            else:
+                if opt_type == "PE":
+                    csv = est_put_prem(ds, sell_strike, rem, iv) - est_put_prem(ds, buy_strike, rem, iv)
+                else:
+                    csv = est_call_prem(ds, sell_strike, rem, iv) - est_call_prem(ds, buy_strike, rem, iv)
+            upnl = net_credit - csv
+
+            if upnl >= profit_target:
+                exit_date, exit_reason, exit_spread_val = dd, "profit_target", csv
+                exit_pnl = upnl * lot_size; break
+            if csv >= net_credit + stop_loss_premium:
+                exit_date, exit_reason, exit_spread_val = dd, "stop_loss", csv
+                exit_pnl = upnl * lot_size; break
+            if rem <= close_dte:
+                exit_date, exit_reason, exit_spread_val = dd, "dte_exit", csv
+                exit_pnl = upnl * lot_size; break
+            days_held = (dd - entry_date).days
+            if days_held >= book_profit_after_days and upnl > 0:
+                exit_date, exit_reason, exit_spread_val = dd, "eod_book", csv
+                exit_pnl = upnl * lot_size; break
+
+        if exit_date is None:
+            continue
+
+        charges = calc_charges(net_credit + (exit_spread_val or 0), lot_size)
+        net_pnl = round(exit_pnl - charges, 2)
+
+        with db.get_conn() as conn:
+            conn.execute(
+                "UPDATE stock_strategy_results SET exit_date=?, exit_reason=?, "
+                "exit_spread_val=?, gross_pnl=?, charges=?, net_pnl=? "
+                "WHERE date=? AND strategy=? AND stock=?",
+                (exit_date.isoformat(), exit_reason, round(exit_spread_val, 2),
+                 round(exit_pnl, 2), charges, net_pnl,
+                 row["date"], strategy, stock_name))
+
+        updated.append({
+            "stock": stock_name, "strategy": strategy,
+            "entry_date": row["entry_date"], "exit_date": exit_date.isoformat(),
+            "exit_reason": exit_reason, "net_pnl": net_pnl,
+        })
+        _log.info("Refreshed %s/%s: %s on %s pnl=%+.0f",
+                  stock_name, strategy, exit_reason, exit_date, net_pnl)
+
+    return updated
+
+
+# ---------------------------------------------------------------------------
 # Backfill + query helpers
 # ---------------------------------------------------------------------------
 def backfill(from_date: date, to_date: date, lots: int = 1, *, force: bool = False):
