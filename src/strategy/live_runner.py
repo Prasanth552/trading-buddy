@@ -58,15 +58,18 @@ IDX_OPTION_SEGMENTS = {
 STRATEGIES = {
     "kitchen_sink": dict(
         entry_hour=9, entry_min=30, sl_pct=0.35,
-        combined_sl=True, trailing=True, vol_filter=True,
+        combined_sl=True, trailing=False, vol_filter=True,
+        floor_step=1500,
     ),
     "vf_920_sl30": dict(
         entry_hour=9, entry_min=20, sl_pct=0.30,
         combined_sl=False, trailing=False, vol_filter=True,
+        floor_step=1500,
     ),
     "entry_945_sl30": dict(
         entry_hour=9, entry_min=45, sl_pct=0.30,
         combined_sl=False, trailing=False, vol_filter=False,
+        floor_step=1500,
     ),
 }
 
@@ -311,7 +314,7 @@ def invalidate_option_master():
 def run_straddle(candles, idx_name, ref_date, *,
                  entry_hour, entry_min, sl_pct,
                  combined_sl=False, trailing=False, vol_filter=False,
-                 lots=1):
+                 floor_step=1500, lots=1):
     """Run short straddle and return result dict (no printing)."""
     idx = INDEXES[idx_name]
     iv = idx["iv_annual"]
@@ -352,7 +355,7 @@ def run_straddle(candles, idx_name, ref_date, *,
     ce_exit_prem = pe_exit_prem = None
     exit_reason = "time_3:10"
     best_combined_profit = 0.0
-    trail_active = False
+    current_floor = 0
     exit_time = None
 
     e_idx = candles.index(entry_candle)
@@ -381,18 +384,19 @@ def run_straddle(candles, idx_name, ref_date, *,
                 pe_exit_prem = pe_sl
                 pe_alive = False
 
-        if trailing and ce_alive and pe_alive:
-            current_profit = total_prem - (ce_now + pe_now)
-            best_combined_profit = max(best_combined_profit, current_profit)
-            if current_profit / total_prem >= 0.40:
-                trail_active = True
-            if trail_active and best_combined_profit > 0:
-                give_back = best_combined_profit * 0.20
-                if current_profit < best_combined_profit - give_back:
-                    ce_exit_prem, pe_exit_prem = ce_now, pe_now
-                    exit_reason = "trailing"
-                    exit_time = _candle_time_str(c)
-                    break
+        current_profit = (total_prem - (ce_now + pe_now)) * lot_size
+        best_combined_profit = max(best_combined_profit, current_profit)
+
+        if floor_step and current_profit >= floor_step:
+            new_floor = (int(current_profit) // floor_step) * floor_step
+            if new_floor > current_floor:
+                current_floor = new_floor
+
+        if current_floor > 0 and current_profit < current_floor:
+            ce_exit_prem, pe_exit_prem = ce_now, pe_now
+            exit_reason = f"floor_{current_floor}"
+            exit_time = _candle_time_str(c)
+            break
 
         if h >= 15 and m >= 10:
             if ce_alive:
