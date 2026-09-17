@@ -82,23 +82,7 @@ PARAM_GRID = {
          "max_signals": 2, "cooldown_mins": 15, "close_position_min": 0.55,
          "label": "wide_tgt"},
     ],
-    "orb_retest": [
-        # Original
-        {"range_end": "09:44", "active_from": "09:50", "active_to": "12:00",
-         "sl_pct": 0.20, "tgt_pct": 0.40, "max_hold_mins": 45,
-         "min_range_pct": 0.12, "max_range_pct": 0.85,
-         "retest_pct": 0.12, "max_signals": 1, "label": "orig"},
-        # Conservative: wider ORB window, tighter SL
-        {"range_end": "09:59", "active_from": "10:05", "active_to": "12:00",
-         "sl_pct": 0.15, "tgt_pct": 0.25, "max_hold_mins": 30,
-         "min_range_pct": 0.15, "max_range_pct": 0.70,
-         "retest_pct": 0.08, "max_signals": 1, "label": "conservative"},
-        # Quick ORB
-        {"range_end": "09:44", "active_from": "09:50", "active_to": "11:00",
-         "sl_pct": 0.12, "tgt_pct": 0.20, "max_hold_mins": 20,
-         "min_range_pct": 0.15, "max_range_pct": 0.60,
-         "retest_pct": 0.10, "max_signals": 1, "label": "quick"},
-    ],
+    # orb_retest removed — 0% WR across all variants on Sep 17
     "day_end_sell": [
         # Original
         {"entry_time": "14:00", "otm_steps": 2, "sl_mult": 2.0,
