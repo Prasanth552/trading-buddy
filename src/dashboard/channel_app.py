@@ -552,6 +552,59 @@ def api_stock_strategy_trades(strategy: str = None, date: str = None, days: int 
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+@app.post("/api/stock-strategy/refresh")
+def api_stock_strategy_refresh() -> JSONResponse:
+    """Re-evaluate active positions with fresh candle data."""
+    try:
+        from src.strategy.stock_runner import refresh_active_positions
+        updated = refresh_active_positions()
+        _api_cache.pop("stock_sum:120", None)
+        _api_cache.pop("stock_sum:90", None)
+        return JSONResponse({"updated": updated, "count": len(updated)})
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@app.get("/api/stock-strategy/daily-pnl")
+def api_stock_strategy_daily_pnl(days: int = 120, strategy: str = None) -> JSONResponse:
+    """Per-exit-date P&L breakdown for the daily view."""
+    try:
+        from datetime import date as _d, timedelta as _td
+        from src.strategy.stock_runner import init_stock_strategy_db
+        init_stock_strategy_db()
+        cutoff = (_d.today() - _td(days=days)).isoformat()
+        with db.get_conn() as conn:
+            if strategy:
+                rows = conn.execute(
+                    "SELECT * FROM stock_strategy_results WHERE date>=? AND skipped=0 "
+                    "AND strategy=? ORDER BY exit_date DESC, stock",
+                    (cutoff, strategy)).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM stock_strategy_results WHERE date>=? AND skipped=0 "
+                    "ORDER BY exit_date DESC, stock",
+                    (cutoff,)).fetchall()
+        by_exit = {}
+        for r in rows:
+            r = dict(r)
+            ed = r.get("exit_date") or r.get("date")
+            if ed not in by_exit:
+                by_exit[ed] = {"date": ed, "pnl": 0, "trades": [], "wins": 0}
+            by_exit[ed]["pnl"] += r.get("net_pnl") or 0
+            by_exit[ed]["trades"].append(r)
+            if (r.get("net_pnl") or 0) > 0:
+                by_exit[ed]["wins"] += 1
+        result = []
+        for d in sorted(by_exit, reverse=True):
+            v = by_exit[d]
+            v["pnl"] = round(v["pnl"], 2)
+            v["count"] = len(v["trades"])
+            result.append(v)
+        return JSONResponse(result)
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
 @app.get("/api/stock-strategy/live")
 def api_stock_strategy_live() -> JSONResponse:
     """Live stock spread positions (real prices via ema20_rsi60)."""
@@ -1118,7 +1171,9 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
 
 <!-- Strategy comparison -->
 <div class=sec>
-  <div class=sec-h>Stock Credit Spreads <span class=badge id=stockDays>-</span></div>
+  <div class=sec-h>Stock Credit Spreads <span class=badge id=stockDays>-</span>
+    <button onclick="refreshStockPositions()" style="float:right;font-size:9px;padding:2px 8px;border-radius:4px;border:1px solid var(--bd);background:var(--cd);color:var(--tx);cursor:pointer" id=stockRefreshBtn>Refresh Positions</button>
+  </div>
   <div class=fpills id=stockPills></div>
 </div>
 
@@ -1133,22 +1188,22 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
   <div class=cw style="height:160px"><canvas id=stockChart></canvas></div>
 </div>
 
+<!-- Active positions -->
+<div class=sec id=stockActiveSec>
+  <div class=sec-h>Active Positions <span class=badge id=stockActiveCount>0</span></div>
+  <div id=stockActive></div>
+</div>
+
 <!-- Per-stock breakdown -->
 <div class=sec id=stockBreakdownSec>
   <div class=sec-h>Stock Breakdown</div>
   <div id=stockBreakdown style="max-height:350px;overflow-y:auto"></div>
 </div>
 
-<!-- Today's trades (interactive) -->
-<div class=sec id=stockTodaySec>
-  <div class=sec-h>Today's trades</div>
-  <div id=stockToday></div>
-</div>
-
-<!-- Trade history (expandable per-day) -->
-<div class=sec id=stockLogSec>
-  <div class=sec-h>Daily log <span style="font-size:10px;color:var(--mt);font-weight:400">(tap to expand)</span></div>
-  <div id=stockLog style="max-height:500px;overflow-y:auto;padding:0 2px"></div>
+<!-- Daily P&L (by exit date) -->
+<div class=sec id=stockDailySec>
+  <div class=sec-h>Daily P&L <span style="font-size:10px;color:var(--mt);font-weight:400">(by exit date — tap to expand)</span></div>
+  <div id=stockDaily style="max-height:600px;overflow-y:auto;padding:0 2px"></div>
 </div>
 
 </div>
@@ -1721,37 +1776,37 @@ function focusStrat(s){_stratFocus=s;if(_stratCache)renderStrat(_stratCache)}
 // ── Stocks tab rendering ──
 async function loadStocks(){
   if(_stocksCache&&Date.now()-_stocksCacheTs<STOCKS_CACHE_MS){renderStocks(_stocksCache);return}
-  $('stockCards').innerHTML='<div class="skel" style="height:90px"></div><div class="skel" style="height:90px;margin-top:8px"></div><div class="skel" style="height:90px;margin-top:8px"></div><div class="skel" style="height:90px;margin-top:8px"></div>';
-  $('stockToday').innerHTML='<div class="skel" style="height:60px"></div>';
-  $('stockLog').innerHTML='<div class="skel" style="height:200px"></div>';
+  $('stockCards').innerHTML='<div class="skel" style="height:90px"></div><div class="skel" style="height:90px;margin-top:8px"></div>';
+  $('stockDaily').innerHTML='<div class="skel" style="height:200px"></div>';
   $('stockBreakdown').innerHTML='<div class="skel" style="height:150px"></div>';
+  $('stockActive').innerHTML='<div class="skel" style="height:60px"></div>';
   try{
-    const [sumResp,todayResp,stocksResp,activeResp]=await Promise.all([
+    const [sumResp,stocksResp,activeResp,dailyResp]=await Promise.all([
       fetch('/api/stock-strategy/summary?days=120'),
-      fetch('/api/stock-strategy/today'),
       fetch('/api/stock-strategy/stocks?days=120'),
-      fetch('/api/stock-strategy/active')
+      fetch('/api/stock-strategy/active'),
+      fetch('/api/stock-strategy/daily-pnl?days=120&strategy='+_stocksFocus)
     ]);
-    const sum=await sumResp.json(),today=await todayResp.json(),stocks=await stocksResp.json(),active=await activeResp.json();
-    // Merge: if today has no trades but active does, use active positions
-    const merged={};
-    for(const s of Object.keys(active||{})){
-      if(!today[s]||!Object.keys(today[s].stocks||{}).length){
-        merged[s]=active[s];
-        // Mark these as active (from previous entry)
-        for(const st of Object.keys(merged[s].stocks||{})){merged[s].stocks[st]._active=true}
-      }else{merged[s]=today[s]}
-    }
-    for(const s of Object.keys(today||{})){if(!merged[s])merged[s]=today[s]}
-    _stocksCache={sum,today:merged,stocks};_stocksCacheTs=Date.now();
+    const sum=await sumResp.json(),stocks=await stocksResp.json(),active=await activeResp.json(),daily=await dailyResp.json();
+    _stocksCache={sum,stocks,active,daily};_stocksCacheTs=Date.now();
     renderStocks(_stocksCache);
   }catch(e){$('stockCards').innerHTML='<div class=empty>'+e+'</div>'}
-  finally{['stockToday','stockLog','stockBreakdown'].forEach(id=>{const el=$(id);if(el&&el.querySelector('.skel'))el.innerHTML=''})}
+  finally{['stockDaily','stockBreakdown','stockActive'].forEach(id=>{const el=$(id);if(el&&el.querySelector('.skel'))el.innerHTML=''})}
 }
 
-function _stockSections(show){['stockChartSec','stockBreakdownSec','stockTodaySec','stockLogSec'].forEach(id=>{const e=$(id);if(e)e.style.display=show?'':'none'})}
+async function refreshStockPositions(){
+  const btn=$('stockRefreshBtn');btn.textContent='Refreshing...';btn.disabled=true;
+  try{
+    const resp=await fetch('/api/stock-strategy/refresh',{method:'POST'});
+    const data=await resp.json();
+    btn.textContent=data.count?data.count+' updated':'No changes';
+    _stocksCacheTs=0;setTimeout(()=>{loadStocks();btn.textContent='Refresh Positions';btn.disabled=false},1500);
+  }catch(e){btn.textContent='Error';setTimeout(()=>{btn.textContent='Refresh Positions';btn.disabled=false},2000)}
+}
+
+function _stockSections(show){['stockChartSec','stockBreakdownSec','stockActiveSec','stockDailySec'].forEach(id=>{const e=$(id);if(e)e.style.display=show?'':'none'})}
 function renderStocks(data){
-  const {sum,today,stocks}=data;
+  const {sum,stocks,active,daily}=data;
   if(!sum||sum.error||!Object.keys(sum).length){$('stockCards').innerHTML='<div class=empty>No stock strategy data yet.</div>';_stockSections(false);return}
   const order=['ema20_rsi50','ema20_rsi60','ema20_rsi50_tight','ema20_rsi50_wide'];
   const strats=order.filter(s=>sum[s]);
@@ -1781,9 +1836,9 @@ function renderStocks(data){
   }).join('');
 
   renderStockChart(sum,strats);
+  renderStockActive(active);
   renderStockBreakdown(stocks);
-  renderStockToday(today,strats);
-  renderStockLog(sum[_stocksFocus],_stocksFocus);
+  renderStockDaily(daily);
 }
 
 function renderStockChart(sum,strats){
@@ -1838,10 +1893,10 @@ function renderStockBreakdown(stocks){
 
 function _stockTradeCard(r){
   const pnlCls=(r.net_pnl||0)>=0?'pos':'neg';
-  const dirTag=r.direction==='bull_put'?'<span class="trd-tag bull">BULL PUT</span>':'<span class="trd-tag bear">BEAR CALL</span>';
-  const activeTag=r._active?'<span class="trd-tag" style="background:#3b82f6;color:#fff">ACTIVE</span>':'';
+  const dirTag=r.direction==='bullish'?'<span class="trd-tag bull">BULL PUT</span>':'<span class="trd-tag bear">BEAR CALL</span>';
+  const srcTag=r.premium_source==='real'?'<span class="trd-tag" style="background:#22c55e;color:#fff;font-size:8px">REAL</span>':'<span class="trd-tag" style="background:#ef4444;color:#fff;font-size:8px">BS</span>';
   return '<div class=trd-card>'+
-    '<div class=trd-top><span class=trd-sym>'+r.stock+'</span><div style="display:flex;gap:4px">'+activeTag+dirTag+_exitTag(r.exit_reason)+'</div></div>'+
+    '<div class=trd-top><span class=trd-sym>'+r.stock+'</span><div style="display:flex;gap:4px">'+srcTag+dirTag+_exitTag(r.exit_reason)+'</div></div>'+
     '<div class=trd-grid>'+
       '<div class=trd-row><span class=trd-k>Entry</span><span class=trd-v>'+(r.entry_date||r.date||'-')+'</span></div>'+
       '<div class=trd-row><span class=trd-k>Exit</span><span class=trd-v>'+(r.exit_date||'-')+'</span></div>'+
@@ -1866,68 +1921,80 @@ function _stockTradeCard(r){
   '</div>';
 }
 
-function renderStockToday(today,strats){
-  if(!today||!Object.keys(today).length){
-    $('stockToday').innerHTML='<div class=empty>No stock trades today</div>';return}
-  let html='';
-  let hasActive=false;
-  strats.forEach(s=>{
-    const sd=today[s];if(!sd)return;
-    const pnlCls=sd.day_pnl>0?'pos':sd.day_pnl<0?'neg':'';
-    const id='skt_'+s;
-    const trades=Object.values(sd.stocks||{});
-    if(!trades.length)return;
-    if(trades.some(t=>t._active))hasActive=true;
-    const label=trades.some(t=>t._active)?'active':'stocks';
+function renderStockActive(active){
+  if(!active||!Object.keys(active).length){
+    $('stockActive').innerHTML='<div class=empty>No active positions</div>';
+    $('stockActiveCount').textContent='0';return}
+  let count=0,html='';
+  for(const s of Object.keys(active)){
+    const trades=Object.values(active[s].stocks||{});
+    if(!trades.length)continue;
+    count+=trades.length;
+    const pnl=active[s].day_pnl||0;
+    const pnlCls=pnl>0?'pos':pnl<0?'neg':'';
+    const id='ska_'+s;
     html+='<div class=trd-group>'+
       '<div class=trd-hdr onclick="togTrd(\''+id+'\')">'+
         '<span class=trd-lbl><span class="trd-arrow" id="'+id+'_a">&#9654;</span>'+s.replace(/_/g,' ')+'</span>'+
-        '<div class=trd-rt><span class=trd-count>'+trades.length+' '+label+'</span><span class="str-idx-pnl '+pnlCls+'">'+inr(sd.day_pnl)+'</span></div>'+
+        '<div class=trd-rt><span class=trd-count>'+trades.length+' active</span><span class="str-idx-pnl '+pnlCls+'">'+inr(pnl)+'</span></div>'+
       '</div>'+
       '<div class=trd-body id="'+id+'">'+trades.map(r=>_stockTradeCard(r)).join('')+'</div>'+
     '</div>';
-  });
-  // Update section header if showing active positions
-  const hdr=document.querySelector('#stocksView .sec-h:last-of-type');
-  if(hdr&&hdr.textContent.includes("Today"))hdr.textContent=hasActive?"Active Positions":"Today's trades";
-  $('stockToday').innerHTML=html||'<div class=empty>No stock trades today</div>';
+  }
+  $('stockActiveCount').textContent=count;
+  $('stockActive').innerHTML=html||'<div class=empty>No active positions</div>';
 }
 
-async function loadStockDayDetail(dt,container){
-  if(container.dataset.loaded){container.classList.toggle('open');return}
-  container.innerHTML='<div class="skel" style="height:60px;margin:8px"></div>';
-  container.classList.add('open');
-  try{
-    const resp=await fetch('/api/stock-strategy/trades?date='+dt+'&strategy='+_stocksFocus);
-    const rows=await resp.json();
-    if(!rows.length){container.innerHTML='<div style="padding:8px;font-size:10px;color:var(--mt)">No trades</div>';container.dataset.loaded='1';return}
-    container.innerHTML=rows.map(r=>_stockTradeCard(r)).join('');
-    container.dataset.loaded='1';
-  }catch(e){container.innerHTML='<div style="padding:8px;color:var(--rd)">'+e+'</div>'}
-}
-
-function renderStockLog(data,sname){
-  if(!data||!data.dates||!data.dates.length){$('stockLog').innerHTML='<div class=empty>No history</div>';return}
-  const mx=Math.max(...data.pnls.map(Math.abs))||1;
-  $('stockLog').innerHTML=data.dates.map((d,i)=>{
-    const p=data.pnls[i];const isGreen=p>0;
+function renderStockDaily(daily){
+  if(!daily||!daily.length){$('stockDaily').innerHTML='<div class=empty>No exit data</div>';return}
+  const mx=Math.max(...daily.map(d=>Math.abs(d.pnl)))||1;
+  let cumPnl=0;
+  const sorted=[...daily].reverse();
+  const cumMap={};
+  sorted.forEach(d=>{cumPnl+=d.pnl;cumMap[d.date]=cumPnl});
+  $('stockDaily').innerHTML=daily.map(d=>{
+    const p=d.pnl;const isGreen=p>0;
     const pct=Math.abs(p)/mx*100;
     const col=isGreen?'var(--gn)':'var(--rd)';
     const bg=isGreen?'var(--gd)':'var(--rdd)';
-    const wd=d.split('-');const short=wd[1]+'-'+wd[2];
-    const cum=data.cumulative[i];
-    const trades=cum?cum.trades:'?';
-    const detId='skld_'+d.replace(/-/g,'');
-    return '<div class=str-day-row onclick="loadStockDayDetail(\''+d+'\',$( \''+detId+'\'))">'+
+    const wd=d.date.split('-');const short=wd[1]+'-'+wd[2];
+    const wr=d.count?Math.round(d.wins/d.count*100):0;
+    const detId='skdl_'+d.date.replace(/-/g,'');
+    const cum=cumMap[d.date]||0;
+    const cumCls=cum>=0?'pos':'neg';
+    return '<div class=str-day-row onclick="togStockDay(\''+detId+'\')">'+
       '<span class=str-day-date>'+short+'</span>'+
       '<div class=str-day-bar style="background:'+bg+'"><div class=str-day-fill style="width:'+pct+'%;background:'+col+'"></div></div>'+
       '<span class="str-day-val '+(isGreen?'pos':'neg')+'">'+inr(p)+'</span>'+
-      '<span style="font-size:9px;color:var(--mt);width:30px;text-align:center">'+trades+'t</span></div>'+
-      '<div class=str-day-detail id="'+detId+'"></div>'
+      '<span style="font-size:9px;color:var(--mt);width:50px;text-align:center">'+d.count+'t '+wr+'%</span>'+
+    '</div>'+
+    '<div class=str-day-detail id="'+detId+'" style="display:none">'+
+      '<div style="padding:4px 8px;font-size:10px;color:var(--mt);display:flex;justify-content:space-between">'+
+        '<span>Cumulative: <b class="'+cumCls+'">'+inr(cum)+'</b></span>'+
+        '<span>'+d.wins+'/'+d.count+' wins</span>'+
+      '</div>'+
+      d.trades.map(r=>_stockTradeCard(r)).join('')+
+    '</div>'
   }).join('');
 }
 
-function focusStock(s){_stocksFocus=s;if(_stocksCache)renderStocks(_stocksCache)}
+function togStockDay(id){
+  const el=$(id);if(!el)return;
+  el.style.display=el.style.display==='none'?'block':'none';
+}
+
+async function focusStock(s){
+  _stocksFocus=s;
+  if(_stocksCache){
+    renderStocks(_stocksCache);
+    try{
+      const resp=await fetch('/api/stock-strategy/daily-pnl?days=120&strategy='+s);
+      const daily=await resp.json();
+      _stocksCache.daily=daily;
+      renderStockDaily(daily);
+    }catch(e){}
+  }
+}
 
 async function load(){
   if(CH==='strat'){loadStrat();return}
