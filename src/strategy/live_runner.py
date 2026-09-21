@@ -311,10 +311,31 @@ def invalidate_option_master():
 # ---------------------------------------------------------------------------
 # Core: run a single strategy on a single index for one day
 # ---------------------------------------------------------------------------
+def _fetch_option_candles(uclient, idx_name, ref_date, atm, opt_type):
+    """Fetch 5-min historical candles for an option, return {timestamp: candle} map."""
+    master_opts = _build_option_master(uclient)
+    expiry = _next_expiry(ref_date, idx_name, master_opts)
+    if not expiry:
+        return None, None
+    ikey = master_opts.get((idx_name, expiry, atm, opt_type))
+    if not ikey:
+        return None, None
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    IST = ZoneInfo("Asia/Kolkata")
+    from_dt = datetime(ref_date.year, ref_date.month, ref_date.day, 9, 0, tzinfo=IST)
+    to_dt = datetime(ref_date.year, ref_date.month, ref_date.day, 16, 0, tzinfo=IST)
+    candles = uclient.historical_data(ikey, from_dt, to_dt, "5minute")
+    if not candles:
+        return None, None
+    by_ts = {c["date"][:16]: c for c in candles}
+    return by_ts, ikey
+
+
 def run_straddle(candles, idx_name, ref_date, *,
                  entry_hour, entry_min, sl_pct,
                  combined_sl=False, trailing=False, vol_filter=False,
-                 floor_step=1500, lots=1):
+                 floor_step=1500, lots=1, uclient=None):
     """Run short straddle and return result dict (no printing)."""
     idx = INDEXES[idx_name]
     iv = idx["iv_annual"]
@@ -341,8 +362,21 @@ def run_straddle(candles, idx_name, ref_date, *,
     mins_entry = _candle_minutes(entry_candle)
     T_entry = _dte_fraction(ref_date, idx_name, mins_entry)
 
-    ce_entry = est_prem(spot_entry, atm, "CE", T_entry, iv)
-    pe_entry = est_prem(spot_entry, atm, "PE", T_entry, iv)
+    prem_source = "bs"
+    ce_ocandles = pe_ocandles = None
+    if uclient:
+        ce_ocandles, _ = _fetch_option_candles(uclient, idx_name, ref_date, atm, "CE")
+        pe_ocandles, _ = _fetch_option_candles(uclient, idx_name, ref_date, atm, "PE")
+
+    entry_ts = entry_candle["date"][:16]
+    if ce_ocandles and pe_ocandles and entry_ts in ce_ocandles and entry_ts in pe_ocandles:
+        ce_entry = ce_ocandles[entry_ts]["close"]
+        pe_entry = pe_ocandles[entry_ts]["close"]
+        prem_source = "real"
+        _log.info("REAL entry %s %s CE=%.2f PE=%.2f", idx_name, entry_ts, ce_entry, pe_entry)
+    else:
+        ce_entry = est_prem(spot_entry, atm, "CE", T_entry, iv)
+        pe_entry = est_prem(spot_entry, atm, "PE", T_entry, iv)
     total_prem = ce_entry + pe_entry
 
     if combined_sl:
@@ -364,11 +398,18 @@ def run_straddle(candles, idx_name, ref_date, *,
         mins = _candle_minutes(c)
         T = _dte_fraction(ref_date, idx_name, mins)
         spot = c["close"]
+        ts = c["date"][:16]
 
-        ce_now = est_prem(spot, atm, "CE", T, iv)
-        pe_now = est_prem(spot, atm, "PE", T, iv)
-        ce_worst = est_prem(c["high"], atm, "CE", T, iv)
-        pe_worst = est_prem(c["low"], atm, "PE", T, iv)
+        if prem_source == "real" and ce_ocandles and pe_ocandles and ts in ce_ocandles and ts in pe_ocandles:
+            ce_now = ce_ocandles[ts]["close"]
+            pe_now = pe_ocandles[ts]["close"]
+            ce_worst = ce_ocandles[ts]["high"]
+            pe_worst = pe_ocandles[ts]["high"]
+        else:
+            ce_now = est_prem(spot, atm, "CE", T, iv)
+            pe_now = est_prem(spot, atm, "PE", T, iv)
+            ce_worst = est_prem(c["high"], atm, "CE", T, iv)
+            pe_worst = est_prem(c["low"], atm, "PE", T, iv)
 
         if combined_sl:
             if ce_worst + pe_worst >= sl_level:
@@ -378,10 +419,10 @@ def run_straddle(candles, idx_name, ref_date, *,
                 break
         else:
             if ce_alive and ce_worst >= ce_sl:
-                ce_exit_prem = ce_sl
+                ce_exit_prem = ce_now if prem_source == "real" else ce_sl
                 ce_alive = False
             if pe_alive and pe_worst >= pe_sl:
-                pe_exit_prem = pe_sl
+                pe_exit_prem = pe_now if prem_source == "real" else pe_sl
                 pe_alive = False
 
         current_profit = (total_prem - (ce_now + pe_now)) * lot_size
@@ -407,11 +448,18 @@ def run_straddle(candles, idx_name, ref_date, *,
             break
 
     last = candles[-1]
+    last_ts = last["date"][:16]
     T_last = _dte_fraction(ref_date, idx_name, _candle_minutes(last))
     if ce_exit_prem is None:
-        ce_exit_prem = est_prem(last["close"], atm, "CE", T_last, iv)
+        if prem_source == "real" and ce_ocandles and last_ts in ce_ocandles:
+            ce_exit_prem = ce_ocandles[last_ts]["close"]
+        else:
+            ce_exit_prem = est_prem(last["close"], atm, "CE", T_last, iv)
     if pe_exit_prem is None:
-        pe_exit_prem = est_prem(last["close"], atm, "PE", T_last, iv)
+        if prem_source == "real" and pe_ocandles and last_ts in pe_ocandles:
+            pe_exit_prem = pe_ocandles[last_ts]["close"]
+        else:
+            pe_exit_prem = est_prem(last["close"], atm, "PE", T_last, iv)
     if exit_time is None:
         exit_time = _candle_time_str(last)
 
@@ -437,6 +485,7 @@ def run_straddle(candles, idx_name, ref_date, *,
         "ce_exit": round(ce_exit_prem, 2),
         "pe_exit": round(pe_exit_prem, 2),
         "dte": dte,
+        "premium_source": prem_source,
     }
 
 
@@ -472,7 +521,7 @@ def run_day(ref_date: date, lots: int = 1, *, force: bool = False) -> dict:
             if not candles or len(candles) < 20:
                 r = {"skipped": True, "skip_reason": "no_data", "net_pnl": 0, "dte": None}
             else:
-                r = run_straddle(candles, idx_name, ref_date, lots=lots, **params)
+                r = run_straddle(candles, idx_name, ref_date, lots=lots, uclient=uclient, **params)
             idx_results[idx_name] = r
             day_pnl += r["net_pnl"]
 
@@ -491,7 +540,7 @@ def run_day(ref_date: date, lots: int = 1, *, force: bool = False) -> dict:
                      r.get("ce_pnl"), r.get("pe_pnl"),
                      r.get("charges"), r["net_pnl"],
                      1 if r.get("skipped") else 0, r.get("skip_reason"), r.get("dte"),
-                     "bs"))
+                     r.get("premium_source", "bs")))
 
         results[sname] = {"day_pnl": round(day_pnl, 2), "indexes": idx_results}
     return results
