@@ -44,6 +44,7 @@ def build_fno_universe(master):
 def main():
     parser = argparse.ArgumentParser(description="OEH trial scanner")
     parser.add_argument("--date", default=None, help="Date to scan (YYYY-MM-DD), default today")
+    parser.add_argument("--max-sl", type=int, default=5000, help="Max SL in rupees (default 5000)")
     args = parser.parse_args()
 
     ref_date = date.fromisoformat(args.date) if args.date else datetime.now(IST).date()
@@ -132,7 +133,7 @@ def main():
 
     # PE option performance — rupee-based stepping floors
     SL_PCT = 0.30
-    MAX_SL_RS = 5000   # cap max loss at ₹5000
+    MAX_SL_RS = args.max_sl
     FLOOR_LEVELS = [500, 1500, 3000, 4500, 6000, 7500, 9000]  # progressive floors
 
     print(f"\n{'='*60}")
