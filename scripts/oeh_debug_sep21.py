@@ -48,7 +48,7 @@ from_dt = datetime.combine(ref_date, datetime.min.time()).replace(hour=9, minute
 to_dt = datetime.combine(ref_date, datetime.min.time()).replace(hour=9, minute=25)
 
 # Try fetching NIFTY first to verify data exists for this date
-from src.config import config
+import config
 nifty_key = config.UPSTOX_INDEX_KEYS.get("NSE:NIFTY 50")
 if nifty_key:
     try:
