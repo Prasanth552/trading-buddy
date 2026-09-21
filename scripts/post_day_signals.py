@@ -31,30 +31,40 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHANNEL = os.environ.get("TELEGRAM_SIGNAL_CHANNEL", "-1004385130897")
 
 
+def _tg_post(data: dict) -> dict:
+    for attempt in range(4):
+        resp = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            data=data, timeout=10)
+        if resp.ok:
+            return resp.json().get("result", {})
+        if resp.status_code == 429:
+            retry_after = resp.json().get("parameters", {}).get("retry_after", 10)
+            print(f"  Rate limited, waiting {retry_after}s...")
+            _time.sleep(retry_after + 1)
+            continue
+        print(f"  FAILED: {resp.text}")
+        return {}
+    return {}
+
+
 def send(text: str) -> int:
-    resp = requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        data={"chat_id": TELEGRAM_CHANNEL, "text": text, "parse_mode": "HTML"},
-        timeout=10)
-    if resp.ok:
-        msg_id = resp.json().get("result", {}).get("message_id", 0)
+    result = _tg_post({"chat_id": TELEGRAM_CHANNEL, "text": text, "parse_mode": "HTML"})
+    msg_id = result.get("message_id", 0)
+    if msg_id:
         print(f"  Posted (msg_id={msg_id})")
-        return msg_id
-    print(f"  FAILED: {resp.text}")
-    return 0
+    return msg_id
 
 
 def reply(text: str, reply_to: int):
     data = {"chat_id": TELEGRAM_CHANNEL, "text": text, "parse_mode": "HTML"}
     if reply_to:
         data["reply_to_message_id"] = reply_to
-    resp = requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        data=data, timeout=10)
-    if resp.ok:
-        print(f"  Reply (msg_id={resp.json().get('result',{}).get('message_id',0)})")
+    result = _tg_post(data)
+    if result.get("message_id"):
+        print(f"  Reply (msg_id={result['message_id']})")
     else:
-        print(f"  Reply FAILED: {resp.text}")
+        print(f"  Reply FAILED")
 
 
 # ── OEH Scanner (Open=High stock PE buys) ────────────────────────
@@ -164,8 +174,8 @@ def run_oeh_scan(ref_date: date):
     from_dt = datetime(year, month, day, 9, 15, tzinfo=IST)
     to_dt = datetime(year, month, day, 9, 16, tzinfo=IST)
 
-    # Step 1: Find OEH candidates
-    print("  OEH: Scanning Open=High stocks...")
+    # Step 1: Find OEH (Open=High → PE) and OEL (Open=Low → CE) candidates
+    print("  OEH/OEL: Scanning stocks...")
     candidates = []
     scanned = 0
     for sym in OEH_UNIVERSE:
@@ -189,17 +199,28 @@ def run_oeh_scan(ref_date: date):
         open_p = candles[0]["open"]
         if open_p <= 0:
             continue
-        if candles[0]["high"] > open_p + OEH_TOLERANCE:
-            continue
+        high_p = candles[0]["high"]
+        low_p = candles[0]["low"]
         close_p = candles[0]["close"]
-        drop_pct = (open_p - close_p) / open_p * 100
-        if drop_pct < OEH_MIN_DROP_PCT:
-            continue
-        candidates.append({"symbol": sym, "open": open_p, "close": close_p,
-                           "drop_pct": drop_pct})
 
-    candidates.sort(key=lambda x: x["drop_pct"], reverse=True)
-    print(f"  OEH: {len(candidates)} candidates from {scanned} stocks")
+        # OEH: High ≤ Open (bearish) → buy PE
+        if high_p <= open_p + OEH_TOLERANCE:
+            drop_pct = (open_p - close_p) / open_p * 100
+            if drop_pct >= OEH_MIN_DROP_PCT:
+                candidates.append({"symbol": sym, "open": open_p, "close": close_p,
+                                   "move_pct": drop_pct, "direction": "bearish", "opt_type": "PE"})
+
+        # OEL: Low ≥ Open (bullish) → buy CE
+        if low_p >= open_p - OEH_TOLERANCE:
+            rise_pct = (close_p - open_p) / open_p * 100
+            if rise_pct >= OEH_MIN_DROP_PCT:
+                candidates.append({"symbol": sym, "open": open_p, "close": close_p,
+                                   "move_pct": rise_pct, "direction": "bullish", "opt_type": "CE"})
+
+    candidates.sort(key=lambda x: x["move_pct"], reverse=True)
+    oeh_count = sum(1 for c in candidates if c["direction"] == "bearish")
+    oel_count = sum(1 for c in candidates if c["direction"] == "bullish")
+    print(f"  OEH: {oeh_count} bearish + {oel_count} bullish = {len(candidates)} candidates from {scanned} stocks")
 
     if not candidates:
         return []
@@ -211,25 +232,26 @@ def run_oeh_scan(ref_date: date):
 
     for c in candidates:
         sym = c["symbol"]
+        opt_type = c["opt_type"]  # PE for OEH, CE for OEL
         step = strike_steps.get(sym, 50)
         atm = round(c["open"] / step) * step
 
-        # Find nearest PE option
-        all_pe = []
+        # Find nearest option of the right type
+        all_opts = []
         for inst in master:
             if inst.get("segment") not in ("NSE_FO", "BSE_FO"):
                 continue
             asym = (inst.get("asset_symbol") or "").upper()
-            if asym != sym or inst.get("instrument_type") != "PE":
+            if asym != sym or inst.get("instrument_type") != opt_type:
                 continue
             sp = float(inst.get("strike_price", -1))
             exp = _expiry_to_date(inst.get("expiry"))
             if exp and exp >= ref_date and sp > 0:
-                all_pe.append((sp, exp, inst))
-        if not all_pe:
+                all_opts.append((sp, exp, inst))
+        if not all_opts:
             continue
-        all_pe.sort(key=lambda x: (abs(x[0] - atm), x[1]))
-        best = all_pe[0]
+        all_opts.sort(key=lambda x: (abs(x[0] - atm), x[1]))
+        best = all_opts[0]
         strike = best[0]
         expiry = best[1]
         opt_key = best[2].get("instrument_key")
@@ -265,10 +287,13 @@ def run_oeh_scan(ref_date: date):
         exit_price, exit_reason = walk_candles_floor(filtered, entry, sl, tgt, qty)
         pnl = round((exit_price - entry) * qty, 2)
 
+        direction_label = "BUY PE" if opt_type == "PE" else "BUY CE"
         trades.append({
             "type": "oeh",
             "symbol": sym,
             "strike": strike,
+            "opt_type": opt_type,
+            "direction_label": direction_label,
             "expiry": expiry.strftime("%d%b"),
             "entry": entry,
             "sl": sl,
@@ -280,7 +305,7 @@ def run_oeh_scan(ref_date: date):
             "exit_reason": exit_reason,
             "pnl": pnl,
             "won": pnl > 0,
-            "drop_pct": c["drop_pct"],
+            "move_pct": c["move_pct"],
         })
 
     print(f"  OEH: {len(trades)} trades backtested")
@@ -407,7 +432,7 @@ def post_all(ref_date: date, oeh_trades: list, straddle_trades: list, spread_tra
         f"━━━━━━━━━━━━━━━━━━━━━\n"
     )
     if oeh_count:
-        opening += f"🟢 Stock Picks (OEH): {oeh_count}\n"
+        opening += f"🟢 Stock Picks: {oeh_count}\n"
     if str_count:
         opening += f"🔷 Index Straddles: {str_count}\n"
     if spr_count:
@@ -426,14 +451,15 @@ def post_all(ref_date: date, oeh_trades: list, straddle_trades: list, spread_tra
         sig_num += 1
         total += 1
 
+        move_emoji = "📉" if t["opt_type"] == "PE" else "📈"
         entry_msg = (
-            f"🟢 <b>Signal #{sig_num} — BUY PE</b>\n\n"
-            f"📌 {t['symbol']} {t['strike']:.0f} PE ({t['expiry']})\n"
+            f"🟢 <b>Signal #{sig_num} — {t['direction_label']}</b>\n\n"
+            f"📌 {t['symbol']} {t['strike']:.0f} {t['opt_type']} ({t['expiry']})\n"
             f"💰 Entry: ₹{t['entry']:.1f}\n"
             f"🛑 SL: ₹{t['sl']:.1f} (₹{t['sl_amount']:,})\n"
             f"🎯 TGT: ₹{t['tgt']:.1f} (₹{t['tgt_amount']:,})\n"
             f"📦 Qty: {t['lot']} | ⏰ 09:20\n"
-            f"📉 Drop: {t['drop_pct']:.1f}%"
+            f"{move_emoji} Move: {t['move_pct']:.1f}%"
         )
         msg_id = send(entry_msg)
         _time.sleep(1.5)
@@ -445,7 +471,7 @@ def post_all(ref_date: date, oeh_trades: list, straddle_trades: list, spread_tra
         emoji = "✅" if t["won"] else "❌"
 
         exit_msg = (
-            f"{emoji} <b>EXIT — {t['symbol']} {t['strike']:.0f} PE</b>\n\n"
+            f"{emoji} <b>EXIT — {t['symbol']} {t['strike']:.0f} {t['opt_type']}</b>\n\n"
             f"📊 Exit: ₹{t['exit_price']:.1f} ({t['exit_reason']})\n"
             f"💰 <b>P&L: ₹{pnl:+,.0f}</b>"
         )
