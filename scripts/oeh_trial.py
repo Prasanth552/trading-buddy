@@ -133,11 +133,11 @@ def main():
     # PE option performance — rupee-based stepping floors
     SL_PCT = 0.30
     MAX_SL_RS = 5000   # cap max loss at ₹5000
-    FLOOR_STEP = 1500  # ₹1500 steps: lock ₹1500, then ₹3000, ₹4500 ...
+    FLOOR_LEVELS = [500, 1500, 3000, 4500, 6000, 7500, 9000]  # progressive floors
 
     print(f"\n{'='*60}")
     print(f"  PE OPTION PERFORMANCE (1-min candles)")
-    print(f"  SL: {SL_PCT*100:.0f}% of entry | Floor steps: ₹{FLOOR_STEP}")
+    print(f"  SL: {SL_PCT*100:.0f}% of entry | Floors: {FLOOR_LEVELS[:4]}...")
     print(f"{'='*60}\n")
 
     # Build option master + lot_size map from raw master
@@ -253,10 +253,10 @@ def main():
             if pnl_high > peak_pnl:
                 peak_pnl = pnl_high
 
-            # Check if we've crossed a new floor step
-            new_floor = (int(pnl_high // FLOOR_STEP)) * FLOOR_STEP
-            if new_floor > active_floor:
-                active_floor = new_floor
+            # Check if we've crossed a new floor level
+            for fl in FLOOR_LEVELS:
+                if pnl_high >= fl and fl > active_floor:
+                    active_floor = fl
 
             # Check SL (percentage-based on premium)
             if low <= sl_price:
