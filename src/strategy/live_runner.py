@@ -332,30 +332,15 @@ def _fetch_option_candles(uclient, idx_name, ref_date, atm, opt_type):
     return by_ts, ikey
 
 
-def run_straddle(candles, idx_name, ref_date, *,
-                 entry_hour, entry_min, sl_pct,
-                 combined_sl=False, trailing=False, vol_filter=False,
-                 floor_step=1500, lots=1, uclient=None):
-    """Run short straddle and return result dict (no printing)."""
+def _run_single_straddle(candles, idx_name, ref_date, entry_candle, *,
+                         sl_pct, combined_sl=False, vol_filter=False,
+                         floor_step=1500, lots=1, uclient=None):
+    """Run one straddle leg from a given entry candle. Returns result + exit candle index."""
     idx = INDEXES[idx_name]
     iv = idx["iv_annual"]
     lot_size = idx["lot_size"] * lots
     step = idx["strike_step"]
     dte = _days_to_expiry(ref_date, idx_name)
-
-    fr = _first_candle_range(candles)
-    if vol_filter and fr > idx["vol_skip_range"]:
-        return {"skipped": True, "skip_reason": "vol_filter", "net_pnl": 0,
-                "dte": dte, "vol_range": round(fr)}
-
-    entry_candle = None
-    for c in candles:
-        h, m = _candle_hm(c)
-        if h > entry_hour or (h == entry_hour and m >= entry_min):
-            entry_candle = c
-            break
-    if not entry_candle:
-        return {"skipped": True, "skip_reason": "no_entry", "net_pnl": 0, "dte": dte}
 
     spot_entry = entry_candle["close"]
     atm = round_strike(spot_entry, step)
@@ -391,9 +376,10 @@ def run_straddle(candles, idx_name, ref_date, *,
     best_combined_profit = 0.0
     current_floor = 0
     exit_time = None
+    exit_candle_idx = None
 
     e_idx = candles.index(entry_candle)
-    for c in candles[e_idx + 1:]:
+    for ci, c in enumerate(candles[e_idx + 1:], start=e_idx + 1):
         h, m = _candle_hm(c)
         mins = _candle_minutes(c)
         T = _dte_fraction(ref_date, idx_name, mins)
@@ -416,6 +402,7 @@ def run_straddle(candles, idx_name, ref_date, *,
                 ce_exit_prem, pe_exit_prem = ce_now, pe_now
                 exit_reason = "combined_sl"
                 exit_time = _candle_time_str(c)
+                exit_candle_idx = ci
                 break
         else:
             if ce_alive and ce_worst >= ce_sl:
@@ -437,6 +424,7 @@ def run_straddle(candles, idx_name, ref_date, *,
             ce_exit_prem, pe_exit_prem = ce_now, pe_now
             exit_reason = f"floor_{current_floor}"
             exit_time = _candle_time_str(c)
+            exit_candle_idx = ci
             break
 
         if h >= 15 and m >= 10:
@@ -445,6 +433,7 @@ def run_straddle(candles, idx_name, ref_date, *,
             if pe_alive:
                 pe_exit_prem = pe_now
             exit_time = _candle_time_str(c)
+            exit_candle_idx = ci
             break
 
     last = candles[-1]
@@ -462,6 +451,8 @@ def run_straddle(candles, idx_name, ref_date, *,
             pe_exit_prem = est_prem(last["close"], atm, "PE", T_last, iv)
     if exit_time is None:
         exit_time = _candle_time_str(last)
+    if exit_candle_idx is None:
+        exit_candle_idx = len(candles) - 1
 
     ce_pnl = (ce_entry - ce_exit_prem) * lot_size
     pe_pnl = (pe_entry - pe_exit_prem) * lot_size
@@ -486,6 +477,81 @@ def run_straddle(candles, idx_name, ref_date, *,
         "pe_exit": round(pe_exit_prem, 2),
         "dte": dte,
         "premium_source": prem_source,
+    }, exit_candle_idx
+
+
+def run_straddle(candles, idx_name, ref_date, *,
+                 entry_hour, entry_min, sl_pct,
+                 combined_sl=False, trailing=False, vol_filter=False,
+                 floor_step=1500, lots=1, uclient=None):
+    """Run short straddle with re-entry after floor exits."""
+    idx = INDEXES[idx_name]
+    dte = _days_to_expiry(ref_date, idx_name)
+
+    fr = _first_candle_range(candles)
+    if vol_filter and fr > idx["vol_skip_range"]:
+        return {"skipped": True, "skip_reason": "vol_filter", "net_pnl": 0,
+                "dte": dte, "vol_range": round(fr)}
+
+    entry_candle = None
+    for c in candles:
+        h, m = _candle_hm(c)
+        if h > entry_hour or (h == entry_hour and m >= entry_min):
+            entry_candle = c
+            break
+    if not entry_candle:
+        return {"skipped": True, "skip_reason": "no_entry", "net_pnl": 0, "dte": dte}
+
+    params = dict(sl_pct=sl_pct, combined_sl=combined_sl, vol_filter=vol_filter,
+                  floor_step=floor_step, lots=lots, uclient=uclient)
+
+    legs = []
+    current_entry = entry_candle
+    max_reentries = 5
+
+    for _ in range(max_reentries + 1):
+        result, exit_idx = _run_single_straddle(
+            candles, idx_name, ref_date, current_entry, **params)
+        legs.append(result)
+
+        if not result["exit_reason"].startswith("floor_"):
+            break
+        if exit_idx + 1 >= len(candles):
+            break
+        next_candle = candles[exit_idx + 1]
+        nh, nm = _candle_hm(next_candle)
+        if nh >= 15 and nm >= 0:
+            break
+        current_entry = next_candle
+        _log.info("RE-ENTRY %s after %s at %s", idx_name,
+                  result["exit_reason"], _candle_time_str(next_candle))
+
+    if len(legs) == 1:
+        return legs[0]
+
+    total_pnl = sum(l["net_pnl"] for l in legs)
+    total_charges = sum(l["charges"] for l in legs)
+    reasons = [l["exit_reason"] for l in legs]
+    sources = list({l["premium_source"] for l in legs})
+
+    return {
+        "skipped": False,
+        "net_pnl": round(total_pnl, 2),
+        "ce_pnl": round(sum(l["ce_pnl"] for l in legs), 2),
+        "pe_pnl": round(sum(l["pe_pnl"] for l in legs), 2),
+        "charges": round(total_charges, 2),
+        "exit_reason": "+".join(reasons),
+        "entry_time": legs[0]["entry_time"],
+        "exit_time": legs[-1]["exit_time"],
+        "spot_entry": legs[0]["spot_entry"],
+        "atm_strike": legs[0]["atm_strike"],
+        "ce_entry": legs[0]["ce_entry"],
+        "pe_entry": legs[0]["pe_entry"],
+        "ce_exit": legs[-1]["ce_exit"],
+        "pe_exit": legs[-1]["pe_exit"],
+        "dte": dte,
+        "premium_source": sources[0] if len(sources) == 1 else "mixed",
+        "legs": len(legs),
     }
 
 
