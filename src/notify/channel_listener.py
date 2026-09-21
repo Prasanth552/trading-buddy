@@ -110,7 +110,8 @@ OEH_LIST_TIME = "09:16"         # IST — early list using 1-min candle
 OEH_MAX_TRADES = 5              # max trades per scan
 OEH_SL_PCT = 0.30               # 30% of premium as stop-loss
 OEH_MAX_SL = 5000               # cap max SL at ₹5000
-OEH_FLOOR_STEP = 1500           # ₹1500 stepping floor (lock ₹1500, then ₹3000, ₹4500...)
+OEH_FLOOR_STEP = 1500           # legacy — used as fallback; live uses OEH_FLOOR_LEVELS
+OEH_FLOOR_LEVELS = [500, 1500, 3000, 4500, 6000, 7500, 9000]  # progressive floors
 OEH_TOLERANCE = 0.05            # ₹0.05 tolerance for high <= open check
 OEH_MIN_DROP_PCT = 0.3          # skip candidates with <0.3% drop (weak signal)
 OEH_BLOCKLIST = {"GODREJCP", "GRASIM"}  # repeat losers — skip these
@@ -123,7 +124,8 @@ OEL_RUN_TIME = "09:20"
 OEL_LIST_TIME = "09:16"
 OEL_MAX_TRADES = 5
 OEL_SL_PCT = 0.30
-OEL_FLOOR_STEP = 1500           # same stepping floor as OEH
+OEL_FLOOR_STEP = 1500           # legacy — used as fallback; live uses OEL_FLOOR_LEVELS
+OEL_FLOOR_LEVELS = [500, 1500, 3000, 4500, 6000, 7500, 9000]  # progressive floors
 OEL_TOLERANCE = 0.05
 OEL_MIN_RISE_PCT = 0.3
 OEL_BLOCKLIST: set[str] = set()
@@ -907,6 +909,15 @@ def _floor_for_channel(ch: str) -> float:
     return PROFIT_TARGET
 
 
+def _floor_levels_for_channel(ch: str) -> list[float] | None:
+    """Return progressive floor levels for OEH/OEL, None for fixed-step channels."""
+    if ch == "oeh":
+        return OEH_FLOOR_LEVELS
+    if ch == "oel":
+        return OEL_FLOOR_LEVELS
+    return None
+
+
 def _execute_and_notify(sig: ParsedSignal, channel: str, ch_label: str) -> None:
     """Execute a channel signal with filter scoring and notifications."""
     global _ch2_last_executed
@@ -1661,7 +1672,7 @@ async def _run_oeh_scan():
             _notify(
                 f"*[OEH] Trade placed (2 lots)*\n"
                 f"{result['symbol']} x{result['qty']}\n"
-                f"Entry: {result['entry']} | SL: {result['sl']} | Floor: ₹{OEH_FLOOR_STEP} steps\n"
+                f"Entry: {result['entry']} | SL: {result['sl']} | Floors: ₹500→₹1500→₹3000...\n"
                 f"Signal: {c['symbol']} Open={c['open']:.2f} Hi={c['max_high']:.2f} "
                 f"(drop {c['drop_pct']:.1f}% in 15min)"
             )
@@ -1935,7 +1946,7 @@ async def _run_oel_scan():
             _notify(
                 f"*[OEL] Trade placed (2 lots)*\n"
                 f"{result['symbol']} x{result['qty']}\n"
-                f"Entry: {result['entry']} | SL: {result['sl']} | Floor: ₹{OEL_FLOOR_STEP} steps\n"
+                f"Entry: {result['entry']} | SL: {result['sl']} | Floors: ₹500→₹1500→₹3000...\n"
                 f"Signal: {c['symbol']} Open={c['open']:.2f} Low={c['min_low']:.2f} "
                 f"(rise {c['rise_pct']:.1f}% in 15min)"
             )
@@ -2337,19 +2348,26 @@ async def start_listener() -> None:
                             f"Auto-closed to protect capital."
                         )
                     else:
-                        step = _floor_for_channel(trade["channel"] or "ch1")
+                        ch = trade["channel"] or "ch1"
+                        levels = _floor_levels_for_channel(ch)
                         peak = _peak_net[tid]
-                        if peak >= step:
-                            stepped_floor = int(peak // step) * step
-                            if net_pnl <= stepped_floor:
-                                log.info("FLOOR EXIT for %s: peak=₹%.0f floor=₹%d current=₹%.0f",
-                                         trade["symbol"], peak, stepped_floor, net_pnl)
-                                _close_trade_by_id(tid, ltp, "profit_floor")
-                                _peak_net.pop(tid, None)
-                                _notify(
-                                    f"🔒 *Profit floor hit* — {trade['symbol']}\n"
-                                    f"Peak: ₹{peak:+,.0f} | Floor: ₹{stepped_floor:,} | Exit: ₹{net_pnl:+,.0f}"
-                                )
+                        if levels is not None:
+                            stepped_floor = 0
+                            for fl in levels:
+                                if peak >= fl:
+                                    stepped_floor = fl
+                        else:
+                            step = _floor_for_channel(ch)
+                            stepped_floor = int(peak // step) * step if peak >= step else 0
+                        if stepped_floor > 0 and net_pnl <= stepped_floor:
+                            log.info("FLOOR EXIT for %s: peak=₹%.0f floor=₹%d current=₹%.0f",
+                                     trade["symbol"], peak, stepped_floor, net_pnl)
+                            _close_trade_by_id(tid, ltp, "profit_floor")
+                            _peak_net.pop(tid, None)
+                            _notify(
+                                f"🔒 *Profit floor hit* — {trade['symbol']}\n"
+                                f"Peak: ₹{peak:+,.0f} | Floor: ₹{stepped_floor:,} | Exit: ₹{net_pnl:+,.0f}"
+                            )
             except Exception as exc:  # noqa: BLE001
                 _monitor_fail_count += 1
                 if _monitor_fail_count % 60 == 0:
