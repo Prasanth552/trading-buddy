@@ -2383,7 +2383,7 @@ async def start_listener() -> None:
             if first_run and mc.is_trading_day():
                 first_run = False
                 scheduled = now.replace(hour=h, minute=m, second=0, microsecond=0)
-                if now > scheduled and now.hour < 15:
+                if now > scheduled and now.hour < 20:
                     log.info("[CH5] Missed scheduled %s run — catching up now", SCANNER_RUN_TIME)
                     await _run_scanner_once()
                     continue
@@ -2427,7 +2427,7 @@ async def start_listener() -> None:
             if first_run and mc.is_trading_day():
                 first_run = False
                 scheduled = now.replace(hour=h, minute=m, second=0, microsecond=0)
-                if now > scheduled and now.hour < 15:
+                if now > scheduled and now.hour < 20:
                     log.info("[OEH] Missed scheduled %s run — catching up now", OEH_RUN_TIME)
                     await _run_oeh_scan()
                     continue
@@ -2498,7 +2498,7 @@ async def start_listener() -> None:
             if first_run and mc.is_trading_day():
                 first_run = False
                 scheduled = now.replace(hour=h, minute=m, second=0, microsecond=0)
-                if now > scheduled and now.hour < 15:
+                if now > scheduled and now.hour < 20:
                     log.info("[OEL] Missed scheduled %s run — catching up now", OEL_RUN_TIME)
                     await _run_oel_scan()
                     continue
