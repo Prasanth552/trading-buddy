@@ -94,7 +94,7 @@ def run_orb_day(ref_date, ud, master, eq_keys, universe, opt_master, lot_sizes, 
     for c in candidates:
         sym = c["symbol"]
         inst_key = eq_keys.get(sym)
-        full_from = datetime.combine(ref_date, datetime.min.time()).replace(hour=9, minute=30)
+        full_from = datetime.combine(ref_date, datetime.min.time()).replace(hour=9, minute=15)
         full_to = datetime.combine(ref_date, datetime.min.time()).replace(hour=15, minute=30)
         try:
             day_candles = ud.historical_data(inst_key, full_from, full_to, "5minute")
@@ -104,10 +104,13 @@ def run_orb_day(ref_date, ud, master, eq_keys, universe, opt_master, lot_sizes, 
         if not day_candles:
             continue
 
-        # Find first breakout candle (close above range_high or below range_low)
-        for dc in day_candles:
+        # Skip first 3 candles (the opening range itself: 9:15, 9:20, 9:25)
+        post_range = [dc for dc in day_candles if str(dc.get("date", dc.get("timestamp", "")))[11:16] >= "09:30"]
+
+        # Find first breakout candle (high breaks above range_high, or low breaks below range_low)
+        for dc in post_range:
             t = str(dc.get("date", dc.get("timestamp", "")))
-            if dc["close"] > c["range_high"]:
+            if dc["high"] > c["range_high"]:
                 breakouts.append({
                     **c,
                     "direction": "bullish",
@@ -115,7 +118,7 @@ def run_orb_day(ref_date, ud, master, eq_keys, universe, opt_master, lot_sizes, 
                     "breakout_time": t,
                 })
                 break
-            elif dc["close"] < c["range_low"]:
+            elif dc["low"] < c["range_low"]:
                 breakouts.append({
                     **c,
                     "direction": "bearish",
