@@ -571,7 +571,7 @@ def execute_signal(sig: ParsedSignal, *, channel: str = "ch1", max_lots: int | N
         "qty": qty,
         "price": entry_price,
         "stop_price": sig.stop_loss,
-        "target_price": sig.targets[0],
+        "target_price": sig.targets[0] if sig.targets else 0,
         "broker_key": instrument_token,
         "mode": config.MODE,
         "status": "OPEN",
