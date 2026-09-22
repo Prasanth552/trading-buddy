@@ -111,7 +111,7 @@ OEH_MAX_TRADES = 5              # max trades per scan
 OEH_SL_PCT = 0.30               # 30% of premium as stop-loss
 OEH_MAX_SL = 5000               # cap max SL at ₹5000
 OEH_FLOOR_STEP = 1500           # legacy — used as fallback; live uses OEH_FLOOR_LEVELS
-OEH_FLOOR_LEVELS = [500, 1500, 3000, 4500, 6000, 7500, 9000]  # progressive floors
+OEH_FLOOR_LEVELS = [500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5500, 6000]  # ₹500 steps
 OEH_TOLERANCE = 0.05            # ₹0.05 tolerance for high <= open check
 OEH_MIN_DROP_PCT = 0.3          # skip candidates with <0.3% drop (weak signal)
 OEH_BLOCKLIST = {"GODREJCP", "GRASIM"}  # repeat losers — skip these
@@ -125,7 +125,7 @@ OEL_LIST_TIME = "09:16"
 OEL_MAX_TRADES = 5
 OEL_SL_PCT = 0.30
 OEL_FLOOR_STEP = 1500           # legacy — used as fallback; live uses OEL_FLOOR_LEVELS
-OEL_FLOOR_LEVELS = [500, 1500, 3000, 4500, 6000, 7500, 9000]  # progressive floors
+OEL_FLOOR_LEVELS = [500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5500, 6000]  # ₹500 steps
 OEL_TOLERANCE = 0.05
 OEL_MIN_RISE_PCT = 0.3
 OEL_BLOCKLIST: set[str] = set()
