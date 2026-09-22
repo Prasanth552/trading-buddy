@@ -131,11 +131,25 @@ OEL_MIN_RISE_PCT = 0.3
 OEL_BLOCKLIST: set[str] = set()
 
 # ---------------------------------------------------------------------------
+# ORB (Opening Range Breakout) scanner
+# ---------------------------------------------------------------------------
+ORB_ENABLED = True
+ORB_RUN_TIME = "09:25"          # IST — 5 min after first candle closes (9:20)
+ORB_MAX_TRADES = 10
+ORB_SL_PCT = 0.30
+ORB_MAX_SL_RS = 5000
+ORB_FLOOR_LEVELS = [500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5500, 6000]
+ORB_MIN_RANGE_PCT = 0.3         # opening range must be >= 0.3% of open
+ORB_MAX_RANGE_PCT = 3.0         # skip if range is too wide
+ORB_BLOCKLIST = {"GODREJCP", "GRASIM"}
+
+# ---------------------------------------------------------------------------
 # EOD Report — sent to Telegram at market close
 # ---------------------------------------------------------------------------
 EOD_REPORT_TIME = "15:35"  # IST — 5 min after market close
 OEH_UNIVERSE: list[str] = []  # populated at scan time from F&O master
 OEL_UNIVERSE: list[str] = []
+ORB_UNIVERSE: list[str] = []
 
 
 def _build_fno_universe(master: list[dict]) -> list[str]:
@@ -896,7 +910,7 @@ def _loss_cap_for_channel(ch: str) -> float:
         return CH2F_MAX_LOSS
     if ch == "ch2":
         return CH2_MAX_LOSS
-    if ch in ("oeh", "oel"):
+    if ch in ("oeh", "oel", "orb"):
         return OEH_MAX_SL
     return MAX_LOSS_PER_TRADE
 
@@ -904,17 +918,19 @@ def _loss_cap_for_channel(ch: str) -> float:
 def _floor_for_channel(ch: str) -> float:
     if ch == "ch2f":
         return CH2F_PROFIT_FLOOR
-    if ch in ("oeh", "oel"):
+    if ch in ("oeh", "oel", "orb"):
         return OEH_FLOOR_STEP
     return PROFIT_TARGET
 
 
 def _floor_levels_for_channel(ch: str) -> list[float] | None:
-    """Return progressive floor levels for OEH/OEL, None for fixed-step channels."""
+    """Return progressive floor levels for OEH/OEL/ORB, None for fixed-step channels."""
     if ch == "oeh":
         return OEH_FLOOR_LEVELS
     if ch == "oel":
         return OEL_FLOOR_LEVELS
+    if ch == "orb":
+        return ORB_FLOOR_LEVELS
     return None
 
 
@@ -1684,6 +1700,181 @@ async def _run_oeh_scan():
     _notify(
         f"*[OEH] Scan complete: {executed}/{len(top)} trades placed*\n"
         f"Candidates found: {len(candidates)} | Scanned: {scanned}\n{summary}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# ORB (Opening Range Breakout) scanner
+# ---------------------------------------------------------------------------
+async def _run_orb_scan():
+    """Scan F&O universe for ORB breakouts after first 5-min candle."""
+    import time as _t
+    import re
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from src.broker.upstox_data import UpstoxData, load_cached_token, _expiry_to_date
+
+    IST = ZoneInfo(config.TIMEZONE)
+    log.info("[ORB] Scanner starting...")
+
+    token = load_cached_token()
+    if not token:
+        log.error("[ORB] No valid Upstox token")
+        _notify("*[ORB] Scanner SKIPPED* — No Upstox token.")
+        return
+
+    _notify("*[ORB] Scanning for Opening Range Breakouts...*")
+
+    try:
+        ud = UpstoxData(access_token=token)
+        master = ud._load_master()
+    except Exception as exc:
+        log.error("[ORB] Failed to load instrument master: %s", exc)
+        _notify(f"[ORB] Scanner error: {exc}")
+        return
+
+    eq_keys = {}
+    for inst in master:
+        if inst.get("segment") == "NSE_EQ":
+            tsym = (inst.get("trading_symbol") or "").upper()
+            if tsym:
+                eq_keys[tsym] = inst.get("instrument_key")
+
+    global ORB_UNIVERSE
+    if not ORB_UNIVERSE:
+        ORB_UNIVERSE = _build_fno_universe(master)
+        log.info("[ORB] Built F&O universe: %d stocks", len(ORB_UNIVERSE))
+
+    # Build option master + lot sizes
+    opt_master = {}
+    lot_sizes = {}
+    for inst in master:
+        if inst.get("segment") != "NSE_FO":
+            continue
+        itype = (inst.get("instrument_type") or "").upper()
+        if itype not in ("CE", "PE"):
+            continue
+        tsym = (inst.get("trading_symbol") or "").upper()
+        base = re.match(r'^([A-Z&]+)', tsym)
+        if not base:
+            continue
+        sym_name = base.group(1)
+        strike_val = float(inst.get("strike_price", 0))
+        ed = _expiry_to_date(inst.get("expiry"))
+        if ed and strike_val > 0:
+            opt_master[(sym_name, ed, strike_val, itype)] = inst.get("instrument_key")
+            ls = int(inst.get("lot_size") or 0)
+            if ls > 0:
+                lot_sizes[sym_name] = ls
+
+    today = datetime.now(IST).date()
+    full_from = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=15)
+    full_to = datetime.combine(today, datetime.min.time()).replace(hour=15, minute=30)
+
+    # Phase 1: Fetch 5-min candles, identify opening ranges and breakouts
+    candidates = []
+    scanned = 0
+
+    for sym in ORB_UNIVERSE:
+        if sym in ORB_BLOCKLIST:
+            continue
+        inst_key = eq_keys.get(sym)
+        if not inst_key:
+            continue
+
+        try:
+            candles = ud.historical_data(inst_key, full_from, full_to, "5minute")
+            _t.sleep(0.12)
+        except Exception as exc:
+            err = str(exc)
+            if "429" in err or "rate" in err.lower():
+                _t.sleep(2)
+                try:
+                    candles = ud.historical_data(inst_key, full_from, full_to, "5minute")
+                except Exception:
+                    continue
+            else:
+                continue
+
+        scanned += 1
+        if not candles or len(candles) < 3:
+            continue
+
+        range_high = candles[0]["high"]
+        range_low = candles[0]["low"]
+        range_open = candles[0]["open"]
+        if range_open <= 0:
+            continue
+
+        range_pct = (range_high - range_low) / range_open * 100
+        if range_pct < ORB_MIN_RANGE_PCT or range_pct > ORB_MAX_RANGE_PCT:
+            continue
+
+        # Find first breakout in post-range candles
+        for dc in candles[1:]:
+            t = str(dc.get("date", dc.get("timestamp", "")))
+            if dc["high"] > range_high:
+                candidates.append({
+                    "symbol": sym, "direction": "bullish",
+                    "range_pct": range_pct, "breakout_time": t,
+                    "breakout_price": dc["close"],
+                })
+                break
+            elif dc["low"] < range_low:
+                candidates.append({
+                    "symbol": sym, "direction": "bearish",
+                    "range_pct": range_pct, "breakout_time": t,
+                    "breakout_price": dc["close"],
+                })
+                break
+
+    log.info("[ORB] Scanned %d stocks, found %d breakouts", scanned, len(candidates))
+
+    if not candidates:
+        _notify(f"[ORB] No breakouts found (scanned {scanned} stocks)")
+        return
+
+    # Sort by range_pct descending (strongest ranges first), take top N
+    candidates.sort(key=lambda x: x["range_pct"], reverse=True)
+    top = candidates[:ORB_MAX_TRADES]
+
+    summary_lines = []
+    executed = 0
+
+    for c in top:
+        sym = c["symbol"]
+        opt_type = "CE" if c["direction"] == "bullish" else "PE"
+
+        parsed = _resolve_atm_strike(sym, opt_type)
+        if parsed is None:
+            summary_lines.append(f"SKIP {sym} {opt_type} — could not resolve ATM")
+            continue
+
+        parsed.stop_loss = round(parsed.trigger_price * (1 - ORB_SL_PCT), 2)
+        parsed.targets = []
+
+        result = execute_signal(parsed, channel="orb", max_lots=2)
+        if result["placed"]:
+            executed += 1
+            dir_tag = "▲" if c["direction"] == "bullish" else "▼"
+            summary_lines.append(
+                f"BUY {result['symbol']} x{result['qty']} @ {result['entry']:.2f} "
+                f"({dir_tag} rng={c['range_pct']:.1f}%)"
+            )
+            _notify(
+                f"*[ORB] Trade placed (2 lots)*\n"
+                f"{dir_tag} {result['symbol']} x{result['qty']}\n"
+                f"Entry: {result['entry']} | SL: {result['sl']} | Floors: ₹500→₹1000→₹1500...\n"
+                f"Breakout: {sym} {c['direction']} (range {c['range_pct']:.1f}%)"
+            )
+        else:
+            summary_lines.append(f"FAIL {sym} {opt_type} — {result['reason']}")
+
+    summary = "\n".join(summary_lines)
+    log.info("[ORB] Scan done: %d/%d executed\n%s", executed, len(top), summary)
+    _notify(
+        f"*[ORB] Scan complete: {executed}/{len(top)} trades placed*\n"
+        f"Breakouts found: {len(candidates)} | Scanned: {scanned}\n{summary}"
     )
 
 
@@ -2567,6 +2758,49 @@ async def start_listener() -> None:
 
     asyncio.get_event_loop().create_task(_oel_list_scheduler())
     log.info("OEL early list scheduler started — runs daily at %s IST", OEL_LIST_TIME)
+
+    # --- ORB Scanner: run once daily at ORB_RUN_TIME ---
+    async def _orb_scheduler():
+        from zoneinfo import ZoneInfo
+        from datetime import datetime, timedelta
+        IST = ZoneInfo(config.TIMEZONE)
+
+        h, m = map(int, ORB_RUN_TIME.split(":"))
+        first_run = True
+
+        while True:
+            if not ORB_ENABLED:
+                await asyncio.sleep(60)
+                continue
+
+            now = datetime.now(IST)
+
+            if first_run and mc.is_trading_day():
+                first_run = False
+                scheduled = now.replace(hour=h, minute=m, second=0, microsecond=0)
+                if now > scheduled:
+                    log.info("[ORB] Missed scheduled %s run — catching up now", ORB_RUN_TIME)
+                    await _run_orb_scan()
+                    continue
+            first_run = False
+
+            target = now.replace(hour=h, minute=m, second=0, microsecond=0)
+            if now >= target:
+                target += timedelta(days=1)
+
+            wait_secs = (target - now).total_seconds()
+            log.info("[ORB] Next scan at %s IST (in %.0f min)",
+                     target.strftime("%Y-%m-%d %H:%M"), wait_secs / 60)
+            await asyncio.sleep(wait_secs)
+
+            if not mc.is_trading_day():
+                log.info("[ORB] Not a trading day, skipping scan")
+                continue
+
+            await _run_orb_scan()
+
+    asyncio.get_event_loop().create_task(_orb_scheduler())
+    log.info("ORB scanner started — runs daily at %s IST", ORB_RUN_TIME)
 
     # --- EOD Report: send daily at 15:35 IST ---
     async def _eod_report_scheduler():
