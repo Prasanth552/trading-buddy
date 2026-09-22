@@ -47,11 +47,14 @@ def build_fno_universe(master):
 
 
 def run_orb_day(ref_date, ud, master, eq_keys, universe, opt_master, lot_sizes, max_trades=10):
-    from_dt = datetime.combine(ref_date, datetime.min.time()).replace(hour=9, minute=15)
-    to_dt = datetime.combine(ref_date, datetime.min.time()).replace(hour=9, minute=30)
-
+    # Fetch full day candles for each stock (9:15-15:30, 5-min)
+    # Opening range = first candle only (9:15-9:20) for tighter range
     candidates = []
     scanned = 0
+    full_from = datetime.combine(ref_date, datetime.min.time()).replace(hour=9, minute=15)
+    full_to = datetime.combine(ref_date, datetime.min.time()).replace(hour=15, minute=30)
+
+    all_day_candles = {}
 
     for sym in universe:
         if sym in BLOCKLIST:
@@ -60,18 +63,20 @@ def run_orb_day(ref_date, ud, master, eq_keys, universe, opt_master, lot_sizes, 
         if not inst_key:
             continue
         try:
-            candles = ud.historical_data(inst_key, from_dt, to_dt, "5minute")
+            candles = ud.historical_data(inst_key, full_from, full_to, "5minute")
             _t.sleep(0.12)
         except Exception:
             continue
 
         scanned += 1
-        if not candles or len(candles) < 1:
+        if not candles or len(candles) < 6:
             continue
 
-        # Opening range = high/low of first 15 min (up to 3 candles of 5-min)
-        range_high = max(c["high"] for c in candles)
-        range_low = min(c["low"] for c in candles)
+        all_day_candles[sym] = candles
+
+        # Opening range = first candle (9:15-9:20)
+        range_high = candles[0]["high"]
+        range_low = candles[0]["low"]
         range_open = candles[0]["open"]
 
         if range_open <= 0:
@@ -89,31 +94,18 @@ def run_orb_day(ref_date, ud, master, eq_keys, universe, opt_master, lot_sizes, 
             "range_pct": range_pct,
         })
 
-    # Now fetch 5-min candles for the full day to detect breakout
+    # Detect breakouts using cached day candles
     breakouts = []
+    broke_up_count = 0
+    broke_dn_count = 0
     for c in candidates:
         sym = c["symbol"]
-        inst_key = eq_keys.get(sym)
-        full_from = datetime.combine(ref_date, datetime.min.time()).replace(hour=9, minute=15)
-        full_to = datetime.combine(ref_date, datetime.min.time()).replace(hour=15, minute=30)
-        try:
-            day_candles = ud.historical_data(inst_key, full_from, full_to, "5minute")
-            _t.sleep(0.12)
-        except Exception:
-            continue
+        day_candles = all_day_candles.get(sym)
         if not day_candles:
             continue
 
-        # Debug: print first candidate's candle timestamps
-        if not breakouts and len(breakouts) == 0 and c == candidates[0]:
-            print(f"\n  DEBUG {sym}: range_high={c['range_high']:.2f} range_low={c['range_low']:.2f}")
-            print(f"  DEBUG candles: {len(day_candles)}")
-            for dc in day_candles[:8]:
-                t = str(dc.get("date", dc.get("timestamp", "")))
-                print(f"    {t} O={dc['open']:.2f} H={dc['high']:.2f} L={dc['low']:.2f} C={dc['close']:.2f}")
-
-        # Skip first 3 candles (the opening range itself: 9:15, 9:20, 9:25)
-        post_range = [dc for dc in day_candles if str(dc.get("date", dc.get("timestamp", "")))[11:16] >= "09:30"]
+        # Skip first candle (the opening range itself: 9:15)
+        post_range = day_candles[1:]  # everything after first 5-min candle
 
         # Find first breakout candle (high breaks above range_high, or low breaks below range_low)
         for dc in post_range:
@@ -140,6 +132,19 @@ def run_orb_day(ref_date, ud, master, eq_keys, universe, opt_master, lot_sizes, 
     top = breakouts[:max_trades]
 
     print(f"\n  Scanned: {scanned} | Ranges valid: {len(candidates)} | Breakouts: {len(breakouts)} | Taking: {len(top)}")
+
+    if not breakouts:
+        # Count how many actually broke the range
+        for c in candidates:
+            day_candles = all_day_candles.get(c["symbol"])
+            if not day_candles:
+                continue
+            post = day_candles[1:]
+            if any(dc["high"] > c["range_high"] for dc in post):
+                broke_up_count += 1
+            if any(dc["low"] < c["range_low"] for dc in post):
+                broke_dn_count += 1
+        print(f"  DEBUG: {broke_up_count} broke high, {broke_dn_count} broke low (but not detected?)")
 
     if not top:
         print("  No ORB breakouts found.")
