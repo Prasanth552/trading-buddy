@@ -134,7 +134,7 @@ def main():
     # PE option performance — rupee-based stepping floors
     SL_PCT = 0.30
     MAX_SL_RS = args.max_sl
-    FLOOR_LEVELS = [500, 1500, 3000, 4500, 6000, 7500, 9000]  # progressive floors
+    FLOOR_LEVELS = [500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5500, 6000]  # ₹500 steps
 
     print(f"\n{'='*60}")
     print(f"  PE OPTION PERFORMANCE (1-min candles)")
