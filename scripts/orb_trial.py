@@ -104,6 +104,14 @@ def run_orb_day(ref_date, ud, master, eq_keys, universe, opt_master, lot_sizes, 
         if not day_candles:
             continue
 
+        # Debug: print first candidate's candle timestamps
+        if not breakouts and len(breakouts) == 0 and c == candidates[0]:
+            print(f"\n  DEBUG {sym}: range_high={c['range_high']:.2f} range_low={c['range_low']:.2f}")
+            print(f"  DEBUG candles: {len(day_candles)}")
+            for dc in day_candles[:8]:
+                t = str(dc.get("date", dc.get("timestamp", "")))
+                print(f"    {t} O={dc['open']:.2f} H={dc['high']:.2f} L={dc['low']:.2f} C={dc['close']:.2f}")
+
         # Skip first 3 candles (the opening range itself: 9:15, 9:20, 9:25)
         post_range = [dc for dc in day_candles if str(dc.get("date", dc.get("timestamp", "")))[11:16] >= "09:30"]
 
