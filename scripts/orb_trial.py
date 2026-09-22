@@ -46,7 +46,7 @@ def build_fno_universe(master):
     return sorted(syms)
 
 
-def run_orb_day(ref_date, ud, master, eq_keys, universe, opt_master, lot_sizes):
+def run_orb_day(ref_date, ud, master, eq_keys, universe, opt_master, lot_sizes, max_trades=10):
     from_dt = datetime.combine(ref_date, datetime.min.time()).replace(hour=9, minute=15)
     to_dt = datetime.combine(ref_date, datetime.min.time()).replace(hour=9, minute=30)
 
@@ -126,7 +126,7 @@ def run_orb_day(ref_date, ud, master, eq_keys, universe, opt_master, lot_sizes):
 
     # Sort by range_pct descending (strongest ranges first)
     breakouts.sort(key=lambda x: x["range_pct"], reverse=True)
-    top = breakouts[:MAX_TRADES]
+    top = breakouts[:max_trades]
 
     print(f"\n  Scanned: {scanned} | Ranges valid: {len(candidates)} | Breakouts: {len(breakouts)} | Taking: {len(top)}")
 
@@ -268,11 +268,10 @@ def main():
     parser.add_argument("--date", default=None, help="Single date (YYYY-MM-DD)")
     parser.add_argument("--from", dest="from_date", default=None, help="Start date")
     parser.add_argument("--to", dest="to_date", default=None, help="End date")
-    parser.add_argument("--max-trades", type=int, default=MAX_TRADES, help="Max trades per day")
+    parser.add_argument("--max-trades", type=int, default=10, help="Max trades per day")
     args = parser.parse_args()
 
-    global MAX_TRADES
-    MAX_TRADES = args.max_trades
+    max_trades = args.max_trades
 
     if args.date:
         dates = [date.fromisoformat(args.date)]
@@ -336,7 +335,7 @@ def main():
         print(f"{'='*60}")
 
         results, wins, losses, total_pnl = run_orb_day(
-            ref_date, ud, master, eq_keys, matched, opt_master, lot_sizes
+            ref_date, ud, master, eq_keys, matched, opt_master, lot_sizes, max_trades
         )
         grand_wins += wins
         grand_losses += losses
