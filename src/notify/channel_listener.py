@@ -1138,6 +1138,32 @@ def parse_signal_ch2(text: str) -> ParsedSignal | None:
         trigger = _ch2_pending.get("trigger", 0)
         sl = _ch2_pending.get("sl", 0)
 
+        # If trigger is still 0 but we have targets, try LTP as trigger
+        if targets and trigger <= 0:
+            try:
+                from src.broker.upstox_data import UpstoxData, load_cached_token
+                _tok = load_cached_token()
+                if _tok:
+                    _ud = UpstoxData(access_token=_tok)
+                    _sym = _ch2_pending["symbol"]
+                    _strike = _ch2_pending["strike"]
+                    _ot = _ch2_pending["opt_type"]
+                    from src.broker.upstox_client import UpstoxClient
+                    _uc = UpstoxClient()
+                    _ikey = _uc.find_option(_sym, _strike, _ot)
+                    if _ikey:
+                        _ltp_d = _ud._get("/v2/market-quote/ltp",
+                                          params={"instrument_key": _ikey}).get("data", {})
+                        for _v in _ltp_d.values():
+                            _lp = _v.get("last_price")
+                            if _lp and _lp > 0:
+                                trigger = float(_lp)
+                                _ch2_pending["trigger"] = trigger
+                                log.info("[CH2] No trigger in message — using LTP %.1f as entry", trigger)
+                                break
+            except Exception as _e:
+                log.warning("[CH2] LTP lookup for trigger failed: %s", _e)
+
         if targets and trigger > 0:
             if sl <= 0:
                 # Have TGT but no SL yet — wait for one more message unless buffer is old
