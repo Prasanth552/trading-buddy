@@ -372,7 +372,7 @@ def monitor_tick(ref_date: date):
                      round(charges, 2), round(net_pnl, 2),
                      now_ist().isoformat(), pos["id"]))
 
-            log.info("  CLOSED %s/%s: %s | PnL: %+,.0f (charges: %.0f)",
+            log.info("  CLOSED %s/%s: %s | PnL: %+.0f (charges: %.0f)",
                      strategy_name, idx_name, exit_reason, net_pnl, charges)
 
             # Also write to strategy_results for historical continuity
@@ -443,7 +443,7 @@ def run_stock_strategies(ref_date: date):
             trades = {k: v for k, v in data.get("stocks", {}).items() if not v.get("skipped")}
             if not trades:
                 continue
-            log.info("  %s: %+,.0f (%d trades)", sname, data["day_pnl"], len(trades))
+            log.info("  %s: %+.0f (%d trades)", sname, data["day_pnl"], len(trades))
             params = STRATEGIES.get(sname, {})
             tgt_pct = params.get("profit_target_pct", 0.50)
             sl_mult = params.get("stop_loss_mult", 2.0)
@@ -460,13 +460,13 @@ def run_stock_strategies(ref_date: date):
                 _notify(
                     f"📈 *[STOCK] {tag} — {stock}*\n"
                     f"Pair: {pair}\n"
-                    f"Spot: {t.get('spot_entry', 0):.1f} | Credit: {credit:.2f}\n"
+                    f"Spot: {(t.get('spot_entry') or 0):.1f} | Credit: {credit:.2f}\n"
                     f"TGT: spread → {tgt_spread:.2f} ({tgt_pct*100:.0f}% profit) | "
                     f"SL: spread → {sl_spread:.2f} ({sl_mult:.1f}x loss)\n"
                     f"Expiry: {t.get('expiry_date', '—')} | DTE: {t.get('dte_at_entry', '—')}\n"
                     f"Strategy: {sname.replace('_', ' ')}\n"
                     f"Result: {t.get('exit_reason', '—')} on {t.get('exit_date', '—')} | "
-                    f"P&L: ₹{t.get('net_pnl', 0):+,.0f}"
+                    f"P&L: ₹{(t.get('net_pnl') or 0):+,.0f}"
                 )
         return res
     except Exception:
@@ -600,7 +600,7 @@ def run_trading_day(ref_date: date, lots: int = 1):
                 log.info("Stock spreads: closed %d positions", len(closed))
                 for c in closed:
                     reason = c.get("exit_reason", "—")
-                    pnl = c.get("net_pnl", 0)
+                    pnl = c.get("net_pnl") or 0
                     _notify(
                         f"📊 *[STOCK EXIT] {c['stock']}*\n"
                         f"Reason: {reason} | P&L: ₹{pnl:+,.0f}"
