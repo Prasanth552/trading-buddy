@@ -2820,6 +2820,83 @@ async def start_listener() -> None:
     asyncio.get_event_loop().create_task(_orb_scheduler())
     log.info("ORB scanner started — runs daily at %s IST", ORB_RUN_TIME)
 
+    # --- Stock Credit Spread Runner: run once daily at 09:45 IST ---
+    STOCK_RUN_TIME = "09:45"
+
+    async def _stock_scheduler():
+        from zoneinfo import ZoneInfo
+        from datetime import datetime, timedelta
+        IST = ZoneInfo(config.TIMEZONE)
+
+        h, m = map(int, STOCK_RUN_TIME.split(":"))
+        first_run = True
+
+        while True:
+            now = datetime.now(IST)
+
+            if first_run and mc.is_trading_day():
+                first_run = False
+                scheduled = now.replace(hour=h, minute=m, second=0, microsecond=0)
+                if now > scheduled:
+                    log.info("[STOCK] Missed scheduled %s run — catching up now", STOCK_RUN_TIME)
+                    try:
+                        await _run_stock_strategy()
+                    except Exception as exc:
+                        log.error("[STOCK] Catch-up run failed: %s", exc, exc_info=True)
+                    continue
+            first_run = False
+
+            target = now.replace(hour=h, minute=m, second=0, microsecond=0)
+            if now >= target:
+                target += timedelta(days=1)
+
+            wait_secs = (target - now).total_seconds()
+            log.info("[STOCK] Next run at %s IST (in %.0f min)",
+                     target.strftime("%Y-%m-%d %H:%M"), wait_secs / 60)
+            await asyncio.sleep(wait_secs)
+
+            if not mc.is_trading_day():
+                log.info("[STOCK] Not a trading day, skipping")
+                continue
+
+            try:
+                await _run_stock_strategy()
+            except Exception as exc:
+                log.error("[STOCK] Scheduler run failed: %s", exc, exc_info=True)
+
+    async def _run_stock_strategy():
+        """Run stock credit spread strategies for today."""
+        from src.strategy.stock_runner import run_day
+        from src.utils import market_calendar as mc
+        import asyncio
+
+        today = mc.now_ist().date()
+        log.info("[STOCK] Running stock credit spread strategies for %s", today)
+        _notify(f"*[STOCK] Running credit spread strategies for {today}...*")
+
+        result = await asyncio.get_event_loop().run_in_executor(None, run_day, today, 1)
+
+        total_pnl = 0.0
+        total_trades = 0
+        lines = []
+        for strat, data in result.items():
+            strat_pnl = data.get("day_pnl", 0)
+            stocks = {k: v for k, v in data.get("stocks", {}).items() if not v.get("skipped")}
+            total_pnl += strat_pnl
+            total_trades += len(stocks)
+            if stocks:
+                lines.append(f"  {strat}: ₹{strat_pnl:+,.0f} ({len(stocks)} trades)")
+
+        summary = "\n".join(lines) if lines else "  No new trades today"
+        log.info("[STOCK] Done: %d trades, P&L: ₹%.0f\n%s", total_trades, total_pnl, summary)
+        _notify(
+            f"*[STOCK] Credit spreads — {today}*\n"
+            f"Trades: {total_trades} | P&L: ₹{total_pnl:+,.0f}\n{summary}"
+        )
+
+    asyncio.get_event_loop().create_task(_stock_scheduler())
+    log.info("Stock strategy scheduler started — runs daily at %s IST", STOCK_RUN_TIME)
+
     # --- EOD Report: send daily at 15:35 IST ---
     async def _eod_report_scheduler():
         from zoneinfo import ZoneInfo
