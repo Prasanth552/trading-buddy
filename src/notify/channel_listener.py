@@ -624,7 +624,7 @@ def execute_signal(sig: ParsedSignal, *, channel: str = "ch1", max_lots: int | N
         "qty": qty,
         "entry": entry_price,
         "sl": sig.stop_loss,
-        "target": sig.targets[0],
+        "target": sig.targets[0] if sig.targets else 0,
         "broker_key": instrument_token,
     }
 
@@ -2638,7 +2638,10 @@ async def start_listener() -> None:
                 scheduled = now.replace(hour=h, minute=m, second=0, microsecond=0)
                 if now > scheduled:
                     log.info("[OEH] Missed scheduled %s run — catching up now", OEH_RUN_TIME)
-                    await _run_oeh_scan()
+                    try:
+                        await _run_oeh_scan()
+                    except Exception as exc:
+                        log.error("[OEH] Catch-up scan failed: %s", exc, exc_info=True)
                     continue
             first_run = False
 
@@ -2655,7 +2658,10 @@ async def start_listener() -> None:
                 log.info("[OEH] Not a trading day, skipping scan")
                 continue
 
-            await _run_oeh_scan()
+            try:
+                await _run_oeh_scan()
+            except Exception as exc:
+                log.error("[OEH] Scheduler scan failed: %s", exc, exc_info=True)
 
     asyncio.get_event_loop().create_task(_oeh_scheduler())
     log.info("OEH scanner started — runs daily at %s IST", OEH_RUN_TIME)
@@ -2709,7 +2715,10 @@ async def start_listener() -> None:
                 scheduled = now.replace(hour=h, minute=m, second=0, microsecond=0)
                 if now > scheduled:
                     log.info("[OEL] Missed scheduled %s run — catching up now", OEL_RUN_TIME)
-                    await _run_oel_scan()
+                    try:
+                        await _run_oel_scan()
+                    except Exception as exc:
+                        log.error("[OEL] Catch-up scan failed: %s", exc, exc_info=True)
                     continue
             first_run = False
 
@@ -2726,7 +2735,10 @@ async def start_listener() -> None:
                 log.info("[OEL] Not a trading day, skipping scan")
                 continue
 
-            await _run_oel_scan()
+            try:
+                await _run_oel_scan()
+            except Exception as exc:
+                log.error("[OEL] Scheduler scan failed: %s", exc, exc_info=True)
 
     asyncio.get_event_loop().create_task(_oel_scheduler())
     log.info("OEL scanner started — runs daily at %s IST", OEL_RUN_TIME)
@@ -2780,7 +2792,10 @@ async def start_listener() -> None:
                 scheduled = now.replace(hour=h, minute=m, second=0, microsecond=0)
                 if now > scheduled:
                     log.info("[ORB] Missed scheduled %s run — catching up now", ORB_RUN_TIME)
-                    await _run_orb_scan()
+                    try:
+                        await _run_orb_scan()
+                    except Exception as exc:
+                        log.error("[ORB] Catch-up scan failed: %s", exc, exc_info=True)
                     continue
             first_run = False
 
@@ -2797,7 +2812,10 @@ async def start_listener() -> None:
                 log.info("[ORB] Not a trading day, skipping scan")
                 continue
 
-            await _run_orb_scan()
+            try:
+                await _run_orb_scan()
+            except Exception as exc:
+                log.error("[ORB] Scheduler scan failed: %s", exc, exc_info=True)
 
     asyncio.get_event_loop().create_task(_orb_scheduler())
     log.info("ORB scanner started — runs daily at %s IST", ORB_RUN_TIME)
@@ -3113,10 +3131,11 @@ async def start_listener() -> None:
                             ref_sig = reply_sig
                         if _ch2_can_execute(ref_sig, event.message.id,
                                             origin_msg_id=event.message.id):
+                            tgt0 = ref_sig.targets[0] if ref_sig.targets else 0
                             log.info("[CH2] AGAIN executing: %s SL=%.1f TGT=%.1f",
-                                     trade_sym, ref_sig.stop_loss, ref_sig.targets[0])
+                                     trade_sym, ref_sig.stop_loss, tgt0)
                             _notify(f"*[CH2] Re-entry executing:*\n{trade_sym}\n"
-                                    f"SL: {ref_sig.stop_loss} | TGT: {ref_sig.targets[0]}")
+                                    f"SL: {ref_sig.stop_loss} | TGT: {tgt0}")
                             _execute_and_notify(ref_sig, channel, ch_label)
                         else:
                             log.info("[CH2] AGAIN blocked by dedup: %s", trade_sym)
@@ -3169,7 +3188,7 @@ async def start_listener() -> None:
                              sig.symbol, int(sig.strike), sig.option_type, sig.trigger_price)
                     _notify(f"[CH2] Signal held (ABOVE trigger):\n"
                             f"{sig.symbol} {int(sig.strike)} {sig.option_type} ABOVE {sig.trigger_price}\n"
-                            f"SL: {sig.stop_loss} | TGT: {sig.targets[0]}\n"
+                            f"SL: {sig.stop_loss} | TGT: {sig.targets[0] if sig.targets else 0}\n"
                             f"Waiting for Active...")
                     return
 
@@ -3199,7 +3218,7 @@ async def start_listener() -> None:
                          sig.symbol, int(sig.strike), sig.option_type, sig.trigger_price)
                 _notify(f"[CH2] Signal detected:\n"
                         f"{sig.symbol} {int(sig.strike)} {sig.option_type} @ {sig.trigger_price}\n"
-                        f"SL: {sig.stop_loss} | TGT: {sig.targets[0]}")
+                        f"SL: {sig.stop_loss} | TGT: {sig.targets[0] if sig.targets else 0}")
                 return
 
             # --- Non-CH2: execute immediately ---
