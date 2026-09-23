@@ -84,6 +84,7 @@ CREATE TABLE IF NOT EXISTS strategy_live (
     pe_sl       REAL,
     trail_best  REAL DEFAULT 0,
     trail_active INTEGER DEFAULT 0,
+    peak_pnl    REAL DEFAULT 0,
     ce_inst_key TEXT,
     pe_inst_key TEXT,
     premium_source TEXT DEFAULT 'bs',
@@ -97,7 +98,8 @@ CREATE INDEX IF NOT EXISTS idx_sl_status ON strategy_live(status);
 def init_live_db():
     with db.get_conn() as conn:
         conn.executescript(LIVE_SCHEMA)
-        for col in ("ce_inst_key TEXT", "pe_inst_key TEXT", "premium_source TEXT DEFAULT 'bs'"):
+        for col in ("ce_inst_key TEXT", "pe_inst_key TEXT",
+                    "premium_source TEXT DEFAULT 'bs'", "peak_pnl REAL DEFAULT 0"):
             try:
                 conn.execute(f"ALTER TABLE strategy_live ADD COLUMN {col}")
             except Exception:
@@ -343,6 +345,33 @@ def monitor_tick(ref_date: date):
             with db.get_conn() as conn:
                 conn.execute("UPDATE strategy_live SET trail_best=?, trail_active=? WHERE id=?",
                              (round(trail_best, 2), trail_active, pos["id"]))
+
+        # Profit floor (stepped) — same logic as channel trades
+        if exit_reason is None:
+            ce_pnl_live = (ce_entry - ce_now) * lot_size
+            pe_pnl_live = (pe_entry - pe_now) * lot_size
+            est_chg = calc_charges(ce_entry, ce_now, lot_size) + \
+                      calc_charges(pe_entry, pe_now, lot_size)
+            live_net = ce_pnl_live + pe_pnl_live - est_chg
+
+            prev_peak = pos.get("peak_pnl") or 0
+            peak = max(prev_peak, live_net)
+            floor_step = params.get("floor_step", 1500)
+            stepped_floor = int(peak // floor_step) * floor_step if peak >= floor_step else 0
+
+            if stepped_floor > 0 and live_net <= stepped_floor:
+                exit_reason = "profit_floor"
+                ce_exit, pe_exit = ce_now, pe_now
+                log.info("  FLOOR %s/%s: peak=%.0f floor=%d current=%.0f",
+                         strategy_name, idx_name, peak, stepped_floor, live_net)
+                _notify(
+                    f"🔒 *[STRATEGY] Profit floor* — {strategy_name}/{idx_name}\n"
+                    f"Peak: ₹{peak:+,.0f} | Floor: ₹{stepped_floor:,} | Now: ₹{live_net:+,.0f}"
+                )
+            elif peak != prev_peak:
+                with db.get_conn() as conn:
+                    conn.execute("UPDATE strategy_live SET peak_pnl=? WHERE id=?",
+                                 (round(peak, 2), pos["id"]))
 
         # Time exit at 15:10
         cur = now_ist()
