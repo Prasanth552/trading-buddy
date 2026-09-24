@@ -135,13 +135,41 @@ OEL_BLOCKLIST: set[str] = set()
 # ---------------------------------------------------------------------------
 ORB_ENABLED = True
 ORB_RUN_TIME = "09:25"          # IST — 5 min after first candle closes (9:20)
-ORB_MAX_TRADES = 10
+ORB_CAPITAL = 150000             # ₹1.5 lakh capital pool — no trade limit, capital-gated
 ORB_SL_PCT = 0.30
 ORB_MAX_SL_RS = 5000
 ORB_FLOOR_LEVELS = [500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5500, 6000]
 ORB_MIN_RANGE_PCT = 0.3         # opening range must be >= 0.3% of open
 ORB_MAX_RANGE_PCT = 3.0         # skip if range is too wide
 ORB_BLOCKLIST = {"GODREJCP", "GRASIM"}
+
+# ORB capital tracking — in-memory, resets on restart
+_orb_capital_avail: float = 0.0       # available capital (set at scan start)
+_orb_capital_locked: dict[int, float] = {}  # trade_id → capital locked (entry*qty)
+
+def _orb_init_capital():
+    """Initialize ORB capital pool at start of day."""
+    global _orb_capital_avail
+    _orb_capital_avail = ORB_CAPITAL
+    _orb_capital_locked.clear()
+
+def _orb_allocate(trade_id: int, amount: float) -> bool:
+    """Try to allocate capital for an ORB trade. Returns False if insufficient."""
+    global _orb_capital_avail
+    if amount > _orb_capital_avail:
+        return False
+    _orb_capital_avail -= amount
+    _orb_capital_locked[trade_id] = amount
+    return True
+
+def _orb_free(trade_id: int, pnl: float):
+    """Free capital when an ORB trade closes. Adds back locked amount + P&L."""
+    global _orb_capital_avail
+    locked = _orb_capital_locked.pop(trade_id, 0)
+    if locked > 0:
+        _orb_capital_avail += locked + pnl
+        log.info("[ORB-CAP] Freed ₹%.0f + PnL ₹%.0f = avail ₹%.0f (locked: %d)",
+                 locked, pnl, _orb_capital_avail, len(_orb_capital_locked))
 
 # ---------------------------------------------------------------------------
 # EOD Report — sent to Telegram at market close
@@ -615,10 +643,11 @@ def execute_signal(sig: ParsedSignal, *, channel: str = "ch1", max_lots: int | N
     except Exception as exc:  # noqa: BLE001
         return {"placed": False, "reason": f"Order failed: {exc}"}
 
-    db.insert_trade(trade_row)
+    trade_id = db.insert_trade(trade_row)
 
     return {
         "placed": True,
+        "trade_id": trade_id,
         "order_id": order_id,
         "symbol": trade_row["symbol"],
         "qty": qty,
@@ -655,6 +684,11 @@ def _close_trade_by_id(trade_id: int, exit_price: float, reason: str) -> None:
                 "UPDATE trades SET status = ?, exit_price = ?, pnl = ?, charges = ? WHERE id = ?",
                 (status, exit_price, net_pnl, charges["total"], row["id"]),
             )
+
+            # Free ORB capital if this was an ORB trade
+            if row["id"] in _orb_capital_locked:
+                _orb_free(row["id"], net_pnl)
+
             log.info(
                 "AUTO-CLOSE (id=%d) %s: entry=%.2f exit=%.2f gross=%.2f "
                 "charges=%.2f net=%.2f reason=%s",
@@ -1860,47 +1894,62 @@ async def _run_orb_scan():
         _notify(f"[ORB] No breakouts found (scanned {scanned} stocks)")
         return
 
-    # Sort by range_pct descending (strongest ranges first), take top N
+    # Sort by range_pct descending (strongest ranges first)
     candidates.sort(key=lambda x: x["range_pct"], reverse=True)
-    top = candidates[:ORB_MAX_TRADES]
+
+    # Initialize capital pool (only on first scan of the day, not rescans)
+    if _orb_capital_avail <= 0 and not _orb_capital_locked:
+        _orb_init_capital()
 
     summary_lines = []
     executed = 0
+    skipped_capital = 0
 
-    for c in top:
+    for c in candidates:
         sym = c["symbol"]
         opt_type = "CE" if c["direction"] == "bullish" else "PE"
 
         parsed = _resolve_atm_strike(sym, opt_type)
         if parsed is None:
-            summary_lines.append(f"SKIP {sym} {opt_type} — could not resolve ATM")
             continue
 
         parsed.stop_loss = round(parsed.trigger_price * (1 - ORB_SL_PCT), 2)
         parsed.targets = []
 
+        # Check capital before executing
+        trade_capital = parsed.trigger_price * (lot_sizes.get(sym, 1) * 2)
+        if trade_capital > _orb_capital_avail:
+            skipped_capital += 1
+            continue
+
         result = execute_signal(parsed, channel="orb", max_lots=2)
         if result["placed"]:
+            # Allocate capital using actual entry price and qty
+            actual_capital = result["entry"] * result["qty"]
+            _orb_allocate(result["trade_id"], actual_capital)
             executed += 1
             dir_tag = "▲" if c["direction"] == "bullish" else "▼"
             summary_lines.append(
                 f"BUY {result['symbol']} x{result['qty']} @ {result['entry']:.2f} "
-                f"({dir_tag} rng={c['range_pct']:.1f}%)"
+                f"({dir_tag} rng={c['range_pct']:.1f}%) [cap: ₹{_orb_capital_avail:,.0f}]"
             )
             _notify(
-                f"*[ORB] Trade placed (2 lots)*\n"
+                f"*[ORB] Trade #{executed}*\n"
                 f"{dir_tag} {result['symbol']} x{result['qty']}\n"
                 f"Entry: {result['entry']} | SL: {result['sl']} | Floors: ₹500→₹1000→₹1500...\n"
-                f"Breakout: {sym} {c['direction']} (range {c['range_pct']:.1f}%)"
+                f"Capital: ₹{actual_capital:,.0f} locked | ₹{_orb_capital_avail:,.0f} available"
             )
         else:
             summary_lines.append(f"FAIL {sym} {opt_type} — {result['reason']}")
 
-    summary = "\n".join(summary_lines)
-    log.info("[ORB] Scan done: %d/%d executed\n%s", executed, len(top), summary)
+    summary = "\n".join(summary_lines[:20])  # limit summary to 20 lines
+    log.info("[ORB] Scan done: %d executed, %d skipped (capital)\n%s",
+             executed, skipped_capital, summary)
     _notify(
-        f"*[ORB] Scan complete: {executed}/{len(top)} trades placed*\n"
-        f"Breakouts found: {len(candidates)} | Scanned: {scanned}\n{summary}"
+        f"*[ORB] Scan complete*\n"
+        f"Executed: {executed} | Skipped (capital): {skipped_capital}\n"
+        f"Breakouts: {len(candidates)} | Capital remaining: ₹{_orb_capital_avail:,.0f}\n"
+        f"{''.join(summary_lines[:10])}"
     )
 
 
@@ -2797,13 +2846,16 @@ async def start_listener() -> None:
     asyncio.get_event_loop().create_task(_oel_list_scheduler())
     log.info("OEL early list scheduler started — runs daily at %s IST", OEL_LIST_TIME)
 
-    # --- ORB Scanner: run once daily at ORB_RUN_TIME ---
+    # --- ORB Scanner: runs at 09:25 (initial) + 09:45 (rescan with recycled capital) ---
+    ORB_RESCAN_TIME = "09:45"
+
     async def _orb_scheduler():
         from zoneinfo import ZoneInfo
         from datetime import datetime, timedelta
         IST = ZoneInfo(config.TIMEZONE)
 
         h, m = map(int, ORB_RUN_TIME.split(":"))
+        h2, m2 = map(int, ORB_RESCAN_TIME.split(":"))
         first_run = True
 
         while True:
@@ -2822,6 +2874,14 @@ async def start_listener() -> None:
                         await _run_orb_scan()
                     except Exception as exc:
                         log.error("[ORB] Catch-up scan failed: %s", exc, exc_info=True)
+                    # Also do rescan if past rescan time
+                    rescan_t = now.replace(hour=h2, minute=m2, second=0, microsecond=0)
+                    if now > rescan_t:
+                        log.info("[ORB] Also missed rescan at %s — running now", ORB_RESCAN_TIME)
+                        try:
+                            await _run_orb_scan()
+                        except Exception as exc:
+                            log.error("[ORB] Catch-up rescan failed: %s", exc, exc_info=True)
                     continue
             first_run = False
 
@@ -2843,8 +2903,22 @@ async def start_listener() -> None:
             except Exception as exc:
                 log.error("[ORB] Scheduler scan failed: %s", exc, exc_info=True)
 
+            # Rescan at 09:45 with recycled capital from floor exits
+            rescan_wait = (m2 - m) * 60
+            log.info("[ORB] Rescan in %d min at %s (recycled capital)", rescan_wait // 60, ORB_RESCAN_TIME)
+            await asyncio.sleep(rescan_wait)
+            if _orb_capital_avail > 5000:
+                log.info("[ORB] Rescan starting — ₹%.0f available", _orb_capital_avail)
+                try:
+                    await _run_orb_scan()
+                except Exception as exc:
+                    log.error("[ORB] Rescan failed: %s", exc, exc_info=True)
+            else:
+                log.info("[ORB] Rescan skipped — only ₹%.0f available", _orb_capital_avail)
+
     asyncio.get_event_loop().create_task(_orb_scheduler())
-    log.info("ORB scanner started — runs daily at %s IST", ORB_RUN_TIME)
+    log.info("ORB scanner started — runs at %s + %s IST (capital: ₹%,.0f)",
+             ORB_RUN_TIME, ORB_RESCAN_TIME, ORB_CAPITAL)
 
     # --- Stock Credit Spread Runner: run once daily at 09:45 IST ---
     STOCK_RUN_TIME = "09:45"
