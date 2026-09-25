@@ -102,6 +102,12 @@ SCANNER_SL_PCT = 0.30            # 30% of premium as stop-loss
 SCANNER_TARGET_MULT = 2.0        # target = 2x entry premium
 
 # ---------------------------------------------------------------------------
+# Realistic paper trading — slippage + liquidity filter
+# ---------------------------------------------------------------------------
+SLIPPAGE_PCT = 0.005             # 0.5% — entry bumped up, exit bumped down
+MIN_OPTION_PREMIUM = 2.0         # skip options below ₹2 (illiquid, wide spreads)
+
+# ---------------------------------------------------------------------------
 # OEH Scanner (Open=High) — auto-execute config
 # ---------------------------------------------------------------------------
 OEH_ENABLED = True
@@ -615,6 +621,13 @@ def execute_signal(sig: ParsedSignal, *, channel: str = "ch1", max_lots: int | N
     except Exception as exc:  # noqa: BLE001
         log.warning("LTP fetch failed, using signal price: %s", exc)
 
+    # Liquidity filter: skip very cheap options (wide spreads in live)
+    if entry_price < MIN_OPTION_PREMIUM and channel in ("oeh", "oel", "orb"):
+        return {"placed": False, "reason": f"Premium ₹{entry_price:.2f} < min ₹{MIN_OPTION_PREMIUM}"}
+
+    # Slippage: simulate buying at ask (slightly above LTP)
+    entry_price = round(entry_price * (1 + SLIPPAGE_PCT), 2)
+
     # Sanity check: reject if LTP is wildly different from signal price
     if sig.trigger_price > 0:
         ratio = entry_price / sig.trigger_price
@@ -686,6 +699,9 @@ def execute_signal(sig: ParsedSignal, *, channel: str = "ch1", max_lots: int | N
 def _close_trade_by_id(trade_id: int, exit_price: float, reason: str) -> None:
     """Close a specific trade by its DB id."""
     try:
+        # Slippage: simulate selling at bid (slightly below LTP)
+        exit_price = round(exit_price * (1 - SLIPPAGE_PCT), 2)
+
         from src.storage import db
         db.init_db()
         with db.get_conn() as conn:
