@@ -107,7 +107,7 @@ SCANNER_TARGET_MULT = 2.0        # target = 2x entry premium
 OEH_ENABLED = True
 OEH_RUN_TIME = "09:20"          # IST — check after first 5-min candle
 OEH_LIST_TIME = "09:16"         # IST — early list using 1-min candle
-OEH_MAX_TRADES = 5              # max trades per scan
+OEH_CAPITAL = 150000            # ₹1.5 lakh capital pool — no trade limit, capital-gated
 OEH_SL_PCT = 0.30               # 30% of premium as stop-loss
 OEH_MAX_SL = 5000               # cap max SL at ₹5000
 OEH_FLOOR_STEP = 1500           # legacy — used as fallback; live uses OEH_FLOOR_LEVELS
@@ -143,18 +143,41 @@ ORB_MIN_RANGE_PCT = 0.3         # opening range must be >= 0.3% of open
 ORB_MAX_RANGE_PCT = 3.0         # skip if range is too wide
 ORB_BLOCKLIST = {"GODREJCP", "GRASIM"}
 
+# OEH capital tracking — in-memory, resets on restart
+_oeh_capital_avail: float = 0.0
+_oeh_capital_locked: dict[int, float] = {}
+
+def _oeh_init_capital():
+    global _oeh_capital_avail
+    _oeh_capital_avail = OEH_CAPITAL
+    _oeh_capital_locked.clear()
+
+def _oeh_allocate(trade_id: int, amount: float) -> bool:
+    global _oeh_capital_avail
+    if amount > _oeh_capital_avail:
+        return False
+    _oeh_capital_avail -= amount
+    _oeh_capital_locked[trade_id] = amount
+    return True
+
+def _oeh_free(trade_id: int, pnl: float):
+    global _oeh_capital_avail
+    locked = _oeh_capital_locked.pop(trade_id, 0)
+    if locked > 0:
+        _oeh_capital_avail += locked + pnl
+        log.info("[OEH-CAP] Freed ₹%.0f + PnL ₹%.0f = avail ₹%.0f (locked: %d)",
+                 locked, pnl, _oeh_capital_avail, len(_oeh_capital_locked))
+
 # ORB capital tracking — in-memory, resets on restart
-_orb_capital_avail: float = 0.0       # available capital (set at scan start)
-_orb_capital_locked: dict[int, float] = {}  # trade_id → capital locked (entry*qty)
+_orb_capital_avail: float = 0.0
+_orb_capital_locked: dict[int, float] = {}
 
 def _orb_init_capital():
-    """Initialize ORB capital pool at start of day."""
     global _orb_capital_avail
     _orb_capital_avail = ORB_CAPITAL
     _orb_capital_locked.clear()
 
 def _orb_allocate(trade_id: int, amount: float) -> bool:
-    """Try to allocate capital for an ORB trade. Returns False if insufficient."""
     global _orb_capital_avail
     if amount > _orb_capital_avail:
         return False
@@ -163,7 +186,6 @@ def _orb_allocate(trade_id: int, amount: float) -> bool:
     return True
 
 def _orb_free(trade_id: int, pnl: float):
-    """Free capital when an ORB trade closes. Adds back locked amount + P&L."""
     global _orb_capital_avail
     locked = _orb_capital_locked.pop(trade_id, 0)
     if locked > 0:
@@ -685,7 +707,9 @@ def _close_trade_by_id(trade_id: int, exit_price: float, reason: str) -> None:
                 (status, exit_price, net_pnl, charges["total"], row["id"]),
             )
 
-            # Free ORB capital if this was an ORB trade
+            # Free capital if this was an OEH/ORB trade
+            if row["id"] in _oeh_capital_locked:
+                _oeh_free(row["id"], net_pnl)
             if row["id"] in _orb_capital_locked:
                 _orb_free(row["id"], net_pnl)
 
@@ -1629,11 +1653,20 @@ async def _run_oeh_scan():
         return
 
     eq_keys = {}
+    lot_sizes = {}
     for inst in master:
-        if inst.get("segment") == "NSE_EQ":
+        seg = inst.get("segment")
+        if seg == "NSE_EQ":
             tsym = (inst.get("trading_symbol") or "").upper()
             if tsym:
                 eq_keys[tsym] = inst.get("instrument_key")
+        elif seg == "NSE_FO":
+            import re as _re
+            _base = _re.match(r'^([A-Z&]+)', (inst.get("trading_symbol") or "").upper())
+            if _base:
+                _ls = int(inst.get("lot_size") or 0)
+                if _ls > 0:
+                    lot_sizes[_base.group(1)] = _ls
 
     global OEH_UNIVERSE, OEL_UNIVERSE
     if not OEH_UNIVERSE:
@@ -1724,42 +1757,55 @@ async def _run_oeh_scan():
         return
 
     candidates.sort(key=lambda x: x["drop_pct"], reverse=True)
-    top = candidates[:OEH_MAX_TRADES]
+
+    # Initialize capital pool (only on first scan of the day)
+    if _oeh_capital_avail <= 0 and not _oeh_capital_locked:
+        _oeh_init_capital()
 
     summary_lines = []
     executed = 0
+    skipped_capital = 0
 
-    for c in top:
+    for c in candidates:
         parsed = _resolve_atm_strike(c["symbol"], "PE")
         if parsed is None:
             summary_lines.append(f"SKIP {c['symbol']} PE — could not resolve ATM")
             continue
 
         parsed.stop_loss = round(parsed.trigger_price * (1 - OEH_SL_PCT), 2)
-        parsed.targets = []  # no price-target; ₹1500 stepping floor handles exits
+        parsed.targets = []
+
+        # Check capital before executing
+        trade_capital = parsed.trigger_price * (lot_sizes.get(c["symbol"], 1) * 2)
+        if trade_capital > _oeh_capital_avail:
+            skipped_capital += 1
+            continue
 
         result = execute_signal(parsed, channel="oeh", max_lots=2)
         if result["placed"]:
+            actual_capital = result["entry"] * result["qty"]
+            _oeh_allocate(result["trade_id"], actual_capital)
             executed += 1
             summary_lines.append(
                 f"BUY {result['symbol']} x{result['qty']} @ {result['entry']:.2f} "
-                f"(OEH drop={c['drop_pct']:.1f}%)"
+                f"(OEH drop={c['drop_pct']:.1f}%) [cap: ₹{_oeh_capital_avail:,.0f}]"
             )
             _notify(
-                f"*[OEH] Trade placed (2 lots)*\n"
+                f"*[OEH] Trade #{executed}*\n"
                 f"{result['symbol']} x{result['qty']}\n"
-                f"Entry: {result['entry']} | SL: {result['sl']} | Floors: ₹500→₹1500→₹3000...\n"
-                f"Signal: {c['symbol']} Open={c['open']:.2f} Hi={c['max_high']:.2f} "
-                f"(drop {c['drop_pct']:.1f}% in 15min)"
+                f"Entry: {result['entry']} | SL: {result['sl']} | Floors: ₹500→₹1000→₹1500...\n"
+                f"Capital: ₹{actual_capital:,.0f} locked | ₹{_oeh_capital_avail:,.0f} available"
             )
         else:
             summary_lines.append(f"FAIL {c['symbol']} PE — {result['reason']}")
 
-    summary = "\n".join(summary_lines)
-    log.info("[OEH] Scan done: %d/%d executed\n%s", executed, len(top), summary)
+    summary = "\n".join(summary_lines[:20])
+    log.info("[OEH] Scan done: %d executed, %d skipped (capital)\n%s",
+             executed, skipped_capital, summary)
     _notify(
-        f"*[OEH] Scan complete: {executed}/{len(top)} trades placed*\n"
-        f"Candidates found: {len(candidates)} | Scanned: {scanned}\n{summary}"
+        f"*[OEH] Scan complete: {executed} trades placed*\n"
+        f"Candidates: {len(candidates)} | Skipped (capital): {skipped_capital}\n"
+        f"Capital remaining: ₹{_oeh_capital_avail:,.0f}\n{summary[:500]}"
     )
 
 
