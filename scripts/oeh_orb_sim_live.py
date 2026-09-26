@@ -80,14 +80,17 @@ def build_opt_master(master):
 
 
 def _simulate_trade(ocandles, entry_idx, entry, lot, sl_price,
-                    floor_levels=None, trail_pct=None, trail_activate=1500):
-    """Simulate a trade with either fixed floors or percentage trailing stop.
+                    floor_levels=None, time_sliced=False):
+    """Simulate a trade with fixed floors or time-sliced escalating trail.
 
-    trail_pct: e.g. 0.40 means exit when P&L drops 40% from peak.
-               Only activates after P&L crosses trail_activate (₹).
-    floor_levels: fixed rupee floor steps (used when trail_pct is None).
+    time_sliced: OEH mode — escalating trail that tightens through the day:
+      09:20-09:50  no exit except SL (momentum builds)
+      09:50-10:30  40% trail, activates at ₹3,000 peak
+      10:30-13:00  30% trail, activates at ₹1,500 peak
+      13:00-15:30  20% trail, activates at ₹1,500 peak
+    All trail checks use candle CLOSE (not intra-candle low).
     """
-    if floor_levels is None and trail_pct is None:
+    if not time_sliced and floor_levels is None:
         floor_levels = FLOOR_LEVELS_500
     peak_pnl = 0.0
     active_floor = 0
@@ -96,6 +99,7 @@ def _simulate_trade(ocandles, entry_idx, entry, lot, sl_price,
         high = cn["high"]
         low = cn["low"]
         t = str(cn.get("date", cn.get("timestamp", "")))
+        t_short = t[11:16] if len(t) > 16 else t[:5]
 
         pnl_high = (high - entry) * lot
         pnl_low = (low - entry) * lot
@@ -103,34 +107,35 @@ def _simulate_trade(ocandles, entry_idx, entry, lot, sl_price,
         if pnl_high > peak_pnl:
             peak_pnl = pnl_high
 
-        # SL check first
         if low <= sl_price:
             exit_p = round(sl_price * (1 - SLIPPAGE_PCT), 2)
-            return exit_p, "SL", t[11:16] if len(t) > 16 else t, i, peak_pnl
+            return exit_p, "SL", t_short, i, peak_pnl
 
-        if trail_pct is not None:
-            # Time-gated hybrid: no exit (except SL) until 09:45
-            # After 09:45: max(₹1500, 50% trail from peak), candle-close based
-            t_short = t[11:16] if len(t) > 16 else t[:5]
-            if t_short < "10:00":
+        if time_sliced:
+            if t_short < "09:50":
                 continue
-            pnl_close = (cn["close"] - entry) * lot
-            if peak_pnl >= trail_activate:
-                trail_floor = max(trail_activate, peak_pnl * (1 - trail_pct))
+
+            if t_short < "10:30":
+                trail_pct, activate = 0.40, 3000
+            elif t_short < "13:00":
+                trail_pct, activate = 0.30, 1500
+            else:
+                trail_pct, activate = 0.20, 1500
+
+            if peak_pnl >= activate:
+                pnl_close = (cn["close"] - entry) * lot
+                trail_floor = peak_pnl * (1 - trail_pct)
                 if pnl_close <= trail_floor:
-                    exit_p = cn["close"]
-                    exit_p = round(exit_p * (1 - SLIPPAGE_PCT), 2)
-                    label = f"TRAIL {int(trail_floor)}" if trail_floor > trail_activate else f"FLOOR ₹{int(trail_activate)}"
-                    return exit_p, label, t_short, i, peak_pnl
-        else:
-            # Fixed floor levels only
+                    exit_p = round(cn["close"] * (1 - SLIPPAGE_PCT), 2)
+                    return exit_p, f"TRAIL{int(trail_pct*100)} {int(trail_floor)}", t_short, i, peak_pnl
+        elif floor_levels:
             for fl in floor_levels:
                 if pnl_high >= fl and fl > active_floor:
                     active_floor = fl
             if active_floor > 0 and pnl_low <= active_floor:
                 exit_p = entry + active_floor / lot
                 exit_p = round(exit_p * (1 - SLIPPAGE_PCT), 2)
-                return exit_p, f"FLOOR ₹{active_floor}", t[11:16] if len(t) > 16 else t, i, peak_pnl
+                return exit_p, f"FLOOR ₹{active_floor}", t_short, i, peak_pnl
 
     last = ocandles[-1]
     t = str(last.get("date", last.get("timestamp", "")))
@@ -278,7 +283,7 @@ def run_oeh(ud, ref_date, eq_keys, matched, opt_master, lot_sizes, capital, lot_
         else:
             exit_price, exit_reason, exit_time, _, peak_pnl = _simulate_trade(
                 ocandles, entry_idx, entry, lot, sl_price,
-                trail_pct=0.50, trail_activate=1500
+                time_sliced=True
             )
 
         pnl_rs = (exit_price - entry) * lot
