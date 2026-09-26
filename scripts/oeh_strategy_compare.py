@@ -8,8 +8,9 @@ Usage:
     PYTHONPATH=. .venv/bin/python3 scripts/oeh_strategy_compare.py --date 2026-09-25
 """
 from __future__ import annotations
-import argparse, re, time as _t
+import argparse, hashlib, json, os, re, time as _t
 from datetime import datetime, date, timedelta
+from pathlib import Path
 from zoneinfo import ZoneInfo
 from src.broker.upstox_data import UpstoxData, load_cached_token, _expiry_to_date
 
@@ -23,6 +24,28 @@ MAX_SL_RS = 5000
 SLIPPAGE_PCT = 0.005
 MIN_PREMIUM = 0.50
 CAPITAL = 150000
+
+CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "candle_cache"
+
+
+def _cache_key(inst_key, from_dt, to_dt, interval):
+    raw = f"{inst_key}|{from_dt}|{to_dt}|{interval}"
+    return hashlib.md5(raw.encode()).hexdigest()
+
+
+def _cached_fetch(ud, inst_key, from_dt, to_dt, interval):
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    key = _cache_key(inst_key, from_dt, to_dt, interval)
+    path = CACHE_DIR / f"{key}.json"
+    if path.exists():
+        with open(path) as f:
+            return json.load(f)
+    candles = ud.historical_data(inst_key, from_dt, to_dt, interval)
+    _t.sleep(0.15)
+    if candles is not None:
+        with open(path, "w") as f:
+            json.dump(candles, f)
+    return candles
 
 
 def _sim(ocandles, entry_idx, entry, lot, sl_price, strategy):
@@ -140,8 +163,7 @@ def run_day(ud, ref_date, eq_keys, matched, opt_master, lot_sizes, lot_mult, ver
         if not inst_key:
             continue
         try:
-            candles = ud.historical_data(inst_key, from_dt, to_dt_scan, "5minute")
-            _t.sleep(0.15)
+            candles = _cached_fetch(ud, inst_key, from_dt, to_dt_scan, "5minute")
         except Exception:
             continue
         scanned += 1
@@ -189,8 +211,7 @@ def run_day(ud, ref_date, eq_keys, matched, opt_master, lot_sizes, lot_mult, ver
     opt_candles = {}
     for info in opt_info:
         try:
-            ocandles = ud.historical_data(info["opt_key"], from_dt, full_to, "1minute")
-            _t.sleep(0.15)
+            ocandles = _cached_fetch(ud, info["opt_key"], from_dt, full_to, "1minute")
             if ocandles and len(ocandles) >= 5:
                 opt_candles[info["sym"]] = (info, ocandles)
         except Exception:

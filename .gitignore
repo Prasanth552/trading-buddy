@@ -27,3 +27,4 @@ Thumbs.db
 # Keep empty dirs tracked
 !data/.gitkeep
 !logs/.gitkeep
+data/candle_cache/
