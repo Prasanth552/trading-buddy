@@ -79,11 +79,18 @@ def build_opt_master(master):
     return opt_master, lot_sizes
 
 
-def _simulate_trade(ocandles, entry_idx, entry, lot, sl_price, floor_levels=None):
-    if floor_levels is None:
+def _simulate_trade(ocandles, entry_idx, entry, lot, sl_price,
+                    floor_levels=None, trail_pct=None, trail_activate=1500):
+    """Simulate a trade with either fixed floors or percentage trailing stop.
+
+    trail_pct: e.g. 0.40 means exit when P&L drops 40% from peak.
+               Only activates after P&L crosses trail_activate (₹).
+    floor_levels: fixed rupee floor steps (used when trail_pct is None).
+    """
+    if floor_levels is None and trail_pct is None:
         floor_levels = FLOOR_LEVELS_500
-    active_floor = 0
     peak_pnl = 0.0
+    active_floor = 0
 
     for i, cn in enumerate(ocandles[entry_idx + 1:], start=entry_idx + 1):
         high = cn["high"]
@@ -96,20 +103,27 @@ def _simulate_trade(ocandles, entry_idx, entry, lot, sl_price, floor_levels=None
         if pnl_high > peak_pnl:
             peak_pnl = pnl_high
 
-        for fl in floor_levels:
-            if pnl_high >= fl and fl > active_floor:
-                active_floor = fl
-
+        # SL check first
         if low <= sl_price:
-            # Exit at SL with slippage
             exit_p = round(sl_price * (1 - SLIPPAGE_PCT), 2)
             return exit_p, "SL", t[11:16] if len(t) > 16 else t, i, peak_pnl
 
-        if active_floor > 0 and pnl_low <= active_floor:
-            exit_p = entry + active_floor / lot
-            # Apply slippage on exit
-            exit_p = round(exit_p * (1 - SLIPPAGE_PCT), 2)
-            return exit_p, f"FLOOR ₹{active_floor}", t[11:16] if len(t) > 16 else t, i, peak_pnl
+        if trail_pct is not None:
+            # Percentage trailing: once peak crosses activation, trail from peak
+            if peak_pnl >= trail_activate and pnl_low <= peak_pnl * (1 - trail_pct):
+                trail_floor = peak_pnl * (1 - trail_pct)
+                exit_p = entry + trail_floor / lot
+                exit_p = round(exit_p * (1 - SLIPPAGE_PCT), 2)
+                return exit_p, f"TRAIL {int(trail_floor)}", t[11:16] if len(t) > 16 else t, i, peak_pnl
+        else:
+            # Fixed floor levels
+            for fl in floor_levels:
+                if pnl_high >= fl and fl > active_floor:
+                    active_floor = fl
+            if active_floor > 0 and pnl_low <= active_floor:
+                exit_p = entry + active_floor / lot
+                exit_p = round(exit_p * (1 - SLIPPAGE_PCT), 2)
+                return exit_p, f"FLOOR ₹{active_floor}", t[11:16] if len(t) > 16 else t, i, peak_pnl
 
     last = ocandles[-1]
     t = str(last.get("date", last.get("timestamp", "")))
@@ -250,7 +264,8 @@ def run_oeh(ud, ref_date, eq_keys, matched, opt_master, lot_sizes, capital, lot_
         sl_price = round(max(sl_pct_price, sl_cap_price), 2)
 
         exit_price, exit_reason, exit_time, _, peak_pnl = _simulate_trade(
-            ocandles, entry_idx, entry, lot, sl_price, floor_levels=FLOOR_LEVELS_1500
+            ocandles, entry_idx, entry, lot, sl_price,
+            trail_pct=0.40, trail_activate=1500
         )
 
         pnl_rs = (exit_price - entry) * lot
