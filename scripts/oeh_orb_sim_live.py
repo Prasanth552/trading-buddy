@@ -155,7 +155,7 @@ def resolve_option(sym, opt_type, spot, ref_date, opt_master, lot_sizes, lot_mul
     return {"strike": strike, "opt_key": opt_key, "lot": lot}
 
 
-def run_oeh(ud, ref_date, eq_keys, matched, opt_master, lot_sizes, capital, lot_mult):
+def run_oeh(ud, ref_date, eq_keys, matched, opt_master, lot_sizes, capital, lot_mult, no_floor=False):
     print(f"\n{'='*70}")
     print(f"  OEH CAPITAL SIM (LIVE ENV) — {ref_date}")
     print(f"  Capital: ₹{capital:,.0f} | Slippage: {SLIPPAGE_PCT*100}% | Min premium: ₹{MIN_PREMIUM}")
@@ -270,10 +270,16 @@ def run_oeh(ud, ref_date, eq_keys, matched, opt_master, lot_sizes, capital, lot_
         sl_cap_price = entry - (MAX_SL_RS / lot)
         sl_price = round(max(sl_pct_price, sl_cap_price), 2)
 
-        exit_price, exit_reason, exit_time, _, peak_pnl = _simulate_trade(
-            ocandles, entry_idx, entry, lot, sl_price,
-            trail_pct=0.50, trail_activate=1500
-        )
+        if no_floor:
+            exit_price, exit_reason, exit_time, _, peak_pnl = _simulate_trade(
+                ocandles, entry_idx, entry, lot, sl_price,
+                floor_levels=[]
+            )
+        else:
+            exit_price, exit_reason, exit_time, _, peak_pnl = _simulate_trade(
+                ocandles, entry_idx, entry, lot, sl_price,
+                trail_pct=0.50, trail_activate=1500
+            )
 
         pnl_rs = (exit_price - entry) * lot
         won = pnl_rs > 0
@@ -529,6 +535,7 @@ def main():
     parser.add_argument("--capital", type=float, default=150000)
     parser.add_argument("--lots", type=int, default=2)
     parser.add_argument("--profit-cap", type=float, default=25000)
+    parser.add_argument("--no-floor", action="store_true", help="OEH: SL + EOD only, no floor/trail")
     args = parser.parse_args()
 
     global PROFIT_CAP
@@ -552,7 +559,8 @@ def main():
     opt_master, lot_sizes = build_opt_master(master)
 
     oeh_total, oeh_w, oeh_l, oeh_pnl = run_oeh(
-        ud, ref_date, eq_keys, matched, opt_master, lot_sizes, args.capital, args.lots
+        ud, ref_date, eq_keys, matched, opt_master, lot_sizes, args.capital, args.lots,
+        no_floor=args.no_floor
     )
 
     orb_total, orb_w, orb_l, orb_pnl = run_orb(
