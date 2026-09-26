@@ -109,12 +109,13 @@ def _simulate_trade(ocandles, entry_idx, entry, lot, sl_price,
             return exit_p, "SL", t[11:16] if len(t) > 16 else t, i, peak_pnl
 
         if trail_pct is not None:
-            # Pure trailing stop: exit when P&L drops trail_pct from peak
-            # Only activates after peak crosses trail_activate threshold
+            # Trailing stop using candle CLOSE (not intra-candle low)
+            # More realistic — in live you check price, not a limit order
+            pnl_close = (cn["close"] - entry) * lot
             if peak_pnl >= trail_activate:
                 trail_floor = peak_pnl * (1 - trail_pct)
-                if pnl_low <= trail_floor:
-                    exit_p = entry + trail_floor / lot
+                if pnl_close <= trail_floor:
+                    exit_p = cn["close"]
                     exit_p = round(exit_p * (1 - SLIPPAGE_PCT), 2)
                     return exit_p, f"TRAIL {int(trail_floor)}", t[11:16] if len(t) > 16 else t, i, peak_pnl
         else:
