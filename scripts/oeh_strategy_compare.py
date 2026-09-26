@@ -127,49 +127,37 @@ LABELS = {
 
 def run_day(ud, ref_date, eq_keys, matched, opt_master, lot_sizes, lot_mult, verbose=True):
     """Run all strategies for one day. Returns {strategy: [pnl_list]}."""
-    from concurrent.futures import ThreadPoolExecutor, as_completed
     from_dt = datetime.combine(ref_date, datetime.min.time()).replace(hour=9, minute=15)
     to_dt_scan = datetime.combine(ref_date, datetime.min.time()).replace(hour=9, minute=25)
     full_to = datetime.combine(ref_date, datetime.min.time()).replace(hour=15, minute=30)
 
-    import threading
-    _rate_lock = threading.Lock()
-
-    def _fetch_eq(sym):
+    candidates = []
+    scanned = 0
+    for sym in matched:
+        if sym in BLOCKLIST:
+            continue
         inst_key = eq_keys.get(sym)
         if not inst_key:
-            return None
-        with _rate_lock:
-            _t.sleep(0.08)
+            continue
         try:
             candles = ud.historical_data(inst_key, from_dt, to_dt_scan, "5minute")
-            return (sym, candles)
+            _t.sleep(0.15)
         except Exception:
-            return None
-
-    candidates = []
-    scan_syms = [s for s in matched if s not in BLOCKLIST]
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        futures = {pool.submit(_fetch_eq, sym): sym for sym in scan_syms}
-        for fut in as_completed(futures):
-            result = fut.result()
-            if result is None:
-                continue
-            sym, candles = result
-            if not candles:
-                continue
-            op = candles[0]["open"]
-            if op <= 0:
-                continue
-            mh = candles[0]["high"]
-            if mh > op + OEH_TOLERANCE:
-                continue
-            ep = candles[0]["close"]
-            dp = (op - ep) / op * 100
-            if dp < OEH_MIN_DROP_PCT:
-                continue
-            candidates.append({"symbol": sym, "open": op, "close": ep, "drop_pct": dp})
-    scanned = len(scan_syms)
+            continue
+        scanned += 1
+        if not candles:
+            continue
+        op = candles[0]["open"]
+        if op <= 0:
+            continue
+        mh = candles[0]["high"]
+        if mh > op + OEH_TOLERANCE:
+            continue
+        ep = candles[0]["close"]
+        dp = (op - ep) / op * 100
+        if dp < OEH_MIN_DROP_PCT:
+            continue
+        candidates.append({"symbol": sym, "open": op, "close": ep, "drop_pct": dp})
 
     candidates.sort(key=lambda x: x["drop_pct"], reverse=True)
 
@@ -198,23 +186,15 @@ def run_day(ud, ref_date, eq_keys, matched, opt_master, lot_sizes, lot_mult, ver
         lot = lot_sizes.get(sym, 1) * lot_mult
         opt_info.append({"candidate": c, "sym": sym, "strike": strike, "opt_key": opt_key, "lot": lot})
 
-    # Fetch option candles in parallel
-    def _fetch_opt(info):
-        with _rate_lock:
-            _t.sleep(0.08)
+    opt_candles = {}
+    for info in opt_info:
         try:
             ocandles = ud.historical_data(info["opt_key"], from_dt, full_to, "1minute")
-            return (info, ocandles)
-        except Exception:
-            return (info, None)
-
-    opt_candles = {}
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        futures = {pool.submit(_fetch_opt, info): info["sym"] for info in opt_info}
-        for fut in as_completed(futures):
-            info, ocandles = fut.result()
+            _t.sleep(0.15)
             if ocandles and len(ocandles) >= 5:
                 opt_candles[info["sym"]] = (info, ocandles)
+        except Exception:
+            continue
 
     trade_data = []
     for info in opt_info:
