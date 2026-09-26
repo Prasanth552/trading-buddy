@@ -218,6 +218,7 @@ def run_day(ud, ref_date, eq_keys, matched, opt_master, lot_sizes, lot_mult, ver
             continue
 
     trade_data = []
+    capital_used = 0
     for info in opt_info:
         if info["sym"] not in opt_candles:
             continue
@@ -240,12 +241,19 @@ def run_day(ud, ref_date, eq_keys, matched, opt_master, lot_sizes, lot_mult, ver
             continue
 
         entry = round(raw_entry * (1 + SLIPPAGE_PCT), 2)
+        lot = info["lot"]
+        margin = entry * lot
+        if capital_used + margin > CAPITAL:
+            continue
+        capital_used += margin
+
         sl_pct_price = entry * (1 - SL_PCT)
         sl_cap_price = entry - (MAX_SL_RS / lot)
         sl_price = round(max(sl_pct_price, sl_cap_price), 2)
+        strike = info["strike"]
 
         trade_data.append({
-            "sym": sym, "strike": strike, "lot": lot,
+            "sym": info["sym"], "strike": strike, "lot": lot,
             "entry": entry, "sl_price": sl_price,
             "ocandles": ocandles, "entry_idx": entry_idx,
         })
