@@ -44,7 +44,7 @@ def _cached_fetch(ud, inst_key, from_dt, to_dt, interval):
         with open(path) as f:
             return json.load(f)
     candles = ud.historical_data(inst_key, from_dt, to_dt, interval)
-    _t.sleep(0.15)
+    _t.sleep(0.1)
     if candles is not None:
         with open(path, "w") as f:
             json.dump(candles, f)
@@ -121,6 +121,10 @@ def run_day(ud, ref_date, eq_keys, matched, opt_master, lot_sizes, lot_mult, ver
             continue
         pdh_pdl[sym] = (pdh, pdl)
 
+    for sym in pdh_pdl:
+        inst_key = eq_keys.get(sym)
+        if not inst_key:
+            continue
         try:
             tcandles = _cached_fetch(ud, inst_key, today_from, today_to, "5minute")
         except Exception:
