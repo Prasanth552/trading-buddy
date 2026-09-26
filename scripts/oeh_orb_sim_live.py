@@ -27,10 +27,11 @@ INDEX_NAMES = {"NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY", "NIFTY 
 
 # Live-realistic settings
 SLIPPAGE_PCT = 0.005      # 0.5%
-MIN_PREMIUM = 2.0         # skip options below ₹2
+MIN_PREMIUM = 0.5         # skip options below ₹0.50
 SL_PCT = 0.30
 MAX_SL_RS = 5000
-FLOOR_LEVELS = [500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5500, 6000]
+FLOOR_LEVELS_500 = [500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5500, 6000]
+FLOOR_LEVELS_1500 = [1500, 3000, 4500, 6000, 7500, 9000, 10500, 12000]
 OEH_TOLERANCE = 0.05
 OEH_MIN_DROP_PCT = 0.3
 ORB_MIN_RANGE_PCT = 0.3
@@ -78,7 +79,9 @@ def build_opt_master(master):
     return opt_master, lot_sizes
 
 
-def _simulate_trade(ocandles, entry_idx, entry, lot, sl_price):
+def _simulate_trade(ocandles, entry_idx, entry, lot, sl_price, floor_levels=None):
+    if floor_levels is None:
+        floor_levels = FLOOR_LEVELS_500
     active_floor = 0
     peak_pnl = 0.0
 
@@ -93,7 +96,7 @@ def _simulate_trade(ocandles, entry_idx, entry, lot, sl_price):
         if pnl_high > peak_pnl:
             peak_pnl = pnl_high
 
-        for fl in FLOOR_LEVELS:
+        for fl in floor_levels:
             if pnl_high >= fl and fl > active_floor:
                 active_floor = fl
 
@@ -247,7 +250,7 @@ def run_oeh(ud, ref_date, eq_keys, matched, opt_master, lot_sizes, capital, lot_
         sl_price = round(max(sl_pct_price, sl_cap_price), 2)
 
         exit_price, exit_reason, exit_time, _, peak_pnl = _simulate_trade(
-            ocandles, entry_idx, entry, lot, sl_price
+            ocandles, entry_idx, entry, lot, sl_price, floor_levels=FLOOR_LEVELS_1500
         )
 
         pnl_rs = (exit_price - entry) * lot
