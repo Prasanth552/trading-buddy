@@ -112,7 +112,7 @@ def _simulate_trade(ocandles, entry_idx, entry, lot, sl_price,
             # Time-gated hybrid: no exit (except SL) until 09:45
             # After 09:45: max(₹1500, 50% trail from peak), candle-close based
             t_short = t[11:16] if len(t) > 16 else t[:5]
-            if t_short < "09:45":
+            if t_short < "10:00":
                 continue
             pnl_close = (cn["close"] - entry) * lot
             if peak_pnl >= trail_activate:
