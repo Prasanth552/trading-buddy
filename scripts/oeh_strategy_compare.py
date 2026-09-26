@@ -132,10 +132,15 @@ def run_day(ud, ref_date, eq_keys, matched, opt_master, lot_sizes, lot_mult, ver
     to_dt_scan = datetime.combine(ref_date, datetime.min.time()).replace(hour=9, minute=25)
     full_to = datetime.combine(ref_date, datetime.min.time()).replace(hour=15, minute=30)
 
+    import threading
+    _rate_lock = threading.Lock()
+
     def _fetch_eq(sym):
         inst_key = eq_keys.get(sym)
         if not inst_key:
             return None
+        with _rate_lock:
+            _t.sleep(0.08)
         try:
             candles = ud.historical_data(inst_key, from_dt, to_dt_scan, "5minute")
             return (sym, candles)
@@ -144,7 +149,7 @@ def run_day(ud, ref_date, eq_keys, matched, opt_master, lot_sizes, lot_mult, ver
 
     candidates = []
     scan_syms = [s for s in matched if s not in BLOCKLIST]
-    with ThreadPoolExecutor(max_workers=10) as pool:
+    with ThreadPoolExecutor(max_workers=3) as pool:
         futures = {pool.submit(_fetch_eq, sym): sym for sym in scan_syms}
         for fut in as_completed(futures):
             result = fut.result()
@@ -195,6 +200,8 @@ def run_day(ud, ref_date, eq_keys, matched, opt_master, lot_sizes, lot_mult, ver
 
     # Fetch option candles in parallel
     def _fetch_opt(info):
+        with _rate_lock:
+            _t.sleep(0.08)
         try:
             ocandles = ud.historical_data(info["opt_key"], from_dt, full_to, "1minute")
             return (info, ocandles)
@@ -202,7 +209,7 @@ def run_day(ud, ref_date, eq_keys, matched, opt_master, lot_sizes, lot_mult, ver
             return (info, None)
 
     opt_candles = {}
-    with ThreadPoolExecutor(max_workers=10) as pool:
+    with ThreadPoolExecutor(max_workers=3) as pool:
         futures = {pool.submit(_fetch_opt, info): info["sym"] for info in opt_info}
         for fut in as_completed(futures):
             info, ocandles = fut.result()
