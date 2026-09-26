@@ -109,23 +109,14 @@ def _simulate_trade(ocandles, entry_idx, entry, lot, sl_price,
             return exit_p, "SL", t[11:16] if len(t) > 16 else t, i, peak_pnl
 
         if trail_pct is not None:
-            # Hybrid: ₹1500 safety floor + trailing % for bigger winners
-            # 1. Base safety floor at ₹1500
-            if peak_pnl >= 1500 and active_floor < 1500:
-                active_floor = 1500
-
-            # 2. Once past activation, trail % from peak (overrides base floor)
+            # Pure trailing stop: exit when P&L drops trail_pct from peak
+            # Only activates after peak crosses trail_activate threshold
             if peak_pnl >= trail_activate:
                 trail_floor = peak_pnl * (1 - trail_pct)
-                effective_floor = max(active_floor, trail_floor)
-            else:
-                effective_floor = active_floor
-
-            if effective_floor > 0 and pnl_low <= effective_floor:
-                exit_p = entry + effective_floor / lot
-                exit_p = round(exit_p * (1 - SLIPPAGE_PCT), 2)
-                label = f"TRAIL {int(effective_floor)}" if effective_floor > 1500 else "FLOOR ₹1500"
-                return exit_p, label, t[11:16] if len(t) > 16 else t, i, peak_pnl
+                if pnl_low <= trail_floor:
+                    exit_p = entry + trail_floor / lot
+                    exit_p = round(exit_p * (1 - SLIPPAGE_PCT), 2)
+                    return exit_p, f"TRAIL {int(trail_floor)}", t[11:16] if len(t) > 16 else t, i, peak_pnl
         else:
             # Fixed floor levels only
             for fl in floor_levels:
@@ -276,7 +267,7 @@ def run_oeh(ud, ref_date, eq_keys, matched, opt_master, lot_sizes, capital, lot_
 
         exit_price, exit_reason, exit_time, _, peak_pnl = _simulate_trade(
             ocandles, entry_idx, entry, lot, sl_price,
-            trail_pct=0.50, trail_activate=3000
+            trail_pct=0.50, trail_activate=1500
         )
 
         pnl_rs = (exit_price - entry) * lot
