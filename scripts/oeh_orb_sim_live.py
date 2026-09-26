@@ -109,15 +109,16 @@ def _simulate_trade(ocandles, entry_idx, entry, lot, sl_price,
             return exit_p, "SL", t[11:16] if len(t) > 16 else t, i, peak_pnl
 
         if trail_pct is not None:
-            # Trailing stop using candle CLOSE (not intra-candle low)
-            # More realistic — in live you check price, not a limit order
+            # Hybrid: ₹1500 minimum floor + 50% trail for bigger winners
+            # Uses candle CLOSE (not intra-candle low) — more realistic
             pnl_close = (cn["close"] - entry) * lot
             if peak_pnl >= trail_activate:
-                trail_floor = peak_pnl * (1 - trail_pct)
+                trail_floor = max(trail_activate, peak_pnl * (1 - trail_pct))
                 if pnl_close <= trail_floor:
                     exit_p = cn["close"]
                     exit_p = round(exit_p * (1 - SLIPPAGE_PCT), 2)
-                    return exit_p, f"TRAIL {int(trail_floor)}", t[11:16] if len(t) > 16 else t, i, peak_pnl
+                    label = f"TRAIL {int(trail_floor)}" if trail_floor > trail_activate else f"FLOOR ₹{int(trail_activate)}"
+                    return exit_p, label, t[11:16] if len(t) > 16 else t, i, peak_pnl
         else:
             # Fixed floor levels only
             for fl in floor_levels:
