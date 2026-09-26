@@ -265,7 +265,7 @@ def run_oeh(ud, ref_date, eq_keys, matched, opt_master, lot_sizes, capital, lot_
 
         exit_price, exit_reason, exit_time, _, peak_pnl = _simulate_trade(
             ocandles, entry_idx, entry, lot, sl_price,
-            trail_pct=0.40, trail_activate=1500
+            trail_pct=0.50, trail_activate=3000
         )
 
         pnl_rs = (exit_price - entry) * lot
