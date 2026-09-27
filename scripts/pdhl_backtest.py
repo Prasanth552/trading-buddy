@@ -95,9 +95,8 @@ def _prev_trading_day(d):
     return p
 
 
-def run_day(ud, ref_date, eq_keys, matched, opt_master, lot_sizes, lot_mult,
-            verbose=True, profit_cap=PROFIT_CAP,
-            confirm_pct=0.0, time_cutoff=BREAKOUT_WINDOW_END, max_range_pct=999):
+def _load_day_data(ud, ref_date, eq_keys, matched, opt_master, lot_sizes, lot_mult):
+    """Load and cache all data for a day. Returns (pdh_pdl, today_candles, all_breakouts_raw, prefetched, scanned)."""
     prev_date = _prev_trading_day(ref_date)
     prev_from = datetime.combine(prev_date, datetime.min.time()).replace(hour=9, minute=15)
     prev_to = datetime.combine(prev_date, datetime.min.time()).replace(hour=15, minute=30)
@@ -114,7 +113,6 @@ def run_day(ud, ref_date, eq_keys, matched, opt_master, lot_sizes, lot_mult,
         inst_key = eq_keys.get(sym)
         if not inst_key:
             continue
-
         try:
             prev_candles = _cached_fetch(ud, inst_key, prev_from, prev_to, "day")
         except Exception:
@@ -140,49 +138,40 @@ def run_day(ud, ref_date, eq_keys, matched, opt_master, lot_sizes, lot_mult,
             continue
         today_candles[sym] = tcandles
 
-    breakouts = []
+    # Build ALL possible breakouts (no filters) with full metadata
+    all_breakouts = []
     for sym, tcandles in today_candles.items():
         pdh, pdl = pdh_pdl[sym]
         range_pct = (pdh - pdl) / pdl * 100
-        if range_pct > max_range_pct:
-            continue
         for cn in tcandles:
             t = str(cn.get("date", cn.get("timestamp", "")))
             t_short = t[11:16] if len(t) > 16 else t[:5]
-            if t_short >= time_cutoff:
+            if t_short >= "14:00":
                 break
             if cn["high"] > pdh:
-                margin = (cn["close"] - pdh) / pdh * 100
-                if margin < confirm_pct:
-                    continue
-                breakouts.append({
+                confirm_margin = (cn["close"] - pdh) / pdh * 100
+                all_breakouts.append({
                     "symbol": sym, "direction": "bullish",
                     "breakout_price": cn["close"], "breakout_time": t_short,
                     "pdh": pdh, "pdl": pdl, "range_pct": range_pct,
+                    "confirm_margin": confirm_margin,
                 })
                 break
             elif cn["low"] < pdl:
-                margin = (pdl - cn["close"]) / pdl * 100
-                if margin < confirm_pct:
-                    continue
-                breakouts.append({
+                confirm_margin = (pdl - cn["close"]) / pdl * 100
+                all_breakouts.append({
                     "symbol": sym, "direction": "bearish",
                     "breakout_price": cn["close"], "breakout_time": t_short,
                     "pdh": pdh, "pdl": pdl, "range_pct": range_pct,
+                    "confirm_margin": confirm_margin,
                 })
                 break
 
-    breakouts.sort(key=lambda x: x["breakout_time"])
+    all_breakouts.sort(key=lambda x: x["breakout_time"])
 
-    if verbose:
-        print(f"\n  --- {ref_date} | Scanned: {scanned} | Breakouts: {len(breakouts)} ---")
-
-    if not breakouts:
-        return [], 0
-
-    # Prefetch all option candles upfront
+    # Prefetch all option candles
     prefetched = {}
-    for b in breakouts:
+    for b in all_breakouts:
         sym = b["symbol"]
         opt_type = "CE" if b["direction"] == "bullish" else "PE"
         spot = b["breakout_price"]
@@ -209,6 +198,36 @@ def run_day(ud, ref_date, eq_keys, matched, opt_master, lot_sizes, lot_mult,
         b["_strike"] = strike
         b["_lot"] = lot
         b["_opt_type"] = opt_type
+
+    return pdh_pdl, today_candles, all_breakouts, prefetched, scanned
+
+
+def run_day(ud, ref_date, eq_keys, matched, opt_master, lot_sizes, lot_mult,
+            verbose=True, profit_cap=PROFIT_CAP,
+            confirm_pct=0.0, time_cutoff=BREAKOUT_WINDOW_END, max_range_pct=999,
+            day_data=None):
+    if day_data:
+        _, _, all_breakouts, prefetched, scanned = day_data
+    else:
+        _, _, all_breakouts, prefetched, scanned = _load_day_data(
+            ud, ref_date, eq_keys, matched, opt_master, lot_sizes, lot_mult)
+
+    # Apply filters
+    breakouts = []
+    for b in all_breakouts:
+        if b["breakout_time"] >= time_cutoff:
+            continue
+        if b["range_pct"] > max_range_pct:
+            continue
+        if b.get("confirm_margin", 0) < confirm_pct:
+            continue
+        breakouts.append(b)
+
+    if verbose:
+        print(f"\n  --- {ref_date} | Scanned: {scanned} | Breakouts: {len(breakouts)} ---")
+
+    if not breakouts:
+        return [], 0
 
     avail = CAPITAL
     total_pnl = 0.0
@@ -381,6 +400,14 @@ def main():
         print(f"  Capital: ₹{CAPITAL:,.0f} | Loss cap: ₹{LOSS_CAP:,} | Profit cap: ₹{PROFIT_CAP:,}")
         print(f"{'='*110}")
 
+        # Preload data once per day
+        print(f"  Loading data for {len(dates)} days...", flush=True)
+        day_cache = {}
+        for di, ref_date in enumerate(dates):
+            print(f"\r  Loading day {di+1}/{len(dates)}: {ref_date}   ", end="", flush=True)
+            day_cache[ref_date] = _load_day_data(ud, ref_date, eq_keys, matched, opt_master, lot_sizes, lot_mult)
+        print(f"\r  Loaded {len(dates)} days. Running {len(COMBOS)} strategies...{' '*20}")
+
         summary = []
         for label, params in COMBOS:
             all_r = []
@@ -388,7 +415,7 @@ def main():
             n_trades = 0
             for ref_date in dates:
                 results, n = run_day(ud, ref_date, eq_keys, matched, opt_master, lot_sizes, lot_mult,
-                                     verbose=False, profit_cap=PROFIT_CAP, **params)
+                                     verbose=False, profit_cap=PROFIT_CAP, day_data=day_cache[ref_date], **params)
                 n_trades += n
                 dp = sum(r["pnl"] for r in results)
                 all_r.extend(results)
