@@ -149,6 +149,17 @@ ORB_MIN_RANGE_PCT = 0.3         # opening range must be >= 0.3% of open
 ORB_MAX_RANGE_PCT = 3.0         # skip if range is too wide
 ORB_BLOCKLIST = {"GODREJCP", "GRASIM"}
 
+# PDH/PDL Breakout config
+PDHL_ENABLED = True
+PDHL_RUN_TIME = "09:25"          # IST — same window as ORB
+PDHL_CAPITAL = 150000
+PDHL_SL_PCT = 0.30
+PDHL_MAX_SL_RS = 5000
+PDHL_FLOOR_LEVELS = [500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5500, 6000]
+PDHL_BLOCKLIST = {"GODREJCP", "GRASIM"}
+PDHL_LOSS_CAP = 10000
+PDHL_PROFIT_CAP = 25000
+
 # OEH capital tracking — in-memory, resets on restart
 _oeh_capital_avail: float = 0.0
 _oeh_capital_locked: dict[int, float] = {}
@@ -199,6 +210,59 @@ def _orb_free(trade_id: int, pnl: float):
         log.info("[ORB-CAP] Freed ₹%.0f + PnL ₹%.0f = avail ₹%.0f (locked: %d)",
                  locked, pnl, _orb_capital_avail, len(_orb_capital_locked))
 
+# PDHL capital tracking — in-memory, resets on restart
+_pdhl_capital_avail: float = 0.0
+_pdhl_capital_locked: dict[int, float] = {}
+
+def _pdhl_init_capital():
+    global _pdhl_capital_avail
+    _pdhl_capital_avail = PDHL_CAPITAL
+    _pdhl_capital_locked.clear()
+
+def _pdhl_allocate(trade_id: int, amount: float) -> bool:
+    global _pdhl_capital_avail
+    if amount > _pdhl_capital_avail:
+        return False
+    _pdhl_capital_avail -= amount
+    _pdhl_capital_locked[trade_id] = amount
+    return True
+
+def _pdhl_free(trade_id: int, pnl: float):
+    global _pdhl_capital_avail
+    locked = _pdhl_capital_locked.pop(trade_id, 0)
+    if locked > 0:
+        _pdhl_capital_avail += locked + pnl
+        log.info("[PDHL-CAP] Freed ₹%.0f + PnL ₹%.0f = avail ₹%.0f (locked: %d)",
+                 locked, pnl, _pdhl_capital_avail, len(_pdhl_capital_locked))
+
+_pdhl_daily_pnl: float = 0.0
+_pdhl_daily_date: str = ""
+
+def _pdhl_record_pnl(pnl: float):
+    global _pdhl_daily_pnl, _pdhl_daily_date
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    today = datetime.now(ZoneInfo(config.TIMEZONE)).strftime("%Y-%m-%d")
+    if _pdhl_daily_date != today:
+        _pdhl_daily_pnl = 0.0
+        _pdhl_daily_date = today
+    _pdhl_daily_pnl += pnl
+
+def _pdhl_daily_cap_hit() -> bool:
+    global _pdhl_daily_pnl, _pdhl_daily_date
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    today = datetime.now(ZoneInfo(config.TIMEZONE)).strftime("%Y-%m-%d")
+    if _pdhl_daily_date != today:
+        _pdhl_daily_pnl = 0.0
+        _pdhl_daily_date = today
+        return False
+    if _pdhl_daily_pnl >= PDHL_PROFIT_CAP:
+        return True
+    if _pdhl_daily_pnl <= -PDHL_LOSS_CAP:
+        return True
+    return False
+
 # ---------------------------------------------------------------------------
 # EOD Report — sent to Telegram at market close
 # ---------------------------------------------------------------------------
@@ -206,6 +270,7 @@ EOD_REPORT_TIME = "15:35"  # IST — 5 min after market close
 OEH_UNIVERSE: list[str] = []  # populated at scan time from F&O master
 OEL_UNIVERSE: list[str] = []
 ORB_UNIVERSE: list[str] = []
+PDHL_UNIVERSE: list[str] = []
 
 
 def _build_fno_universe(master: list[dict]) -> list[str]:
@@ -728,6 +793,9 @@ def _close_trade_by_id(trade_id: int, exit_price: float, reason: str) -> None:
                 _oeh_free(row["id"], net_pnl)
             if row["id"] in _orb_capital_locked:
                 _orb_free(row["id"], net_pnl)
+            if row["id"] in _pdhl_capital_locked:
+                _pdhl_free(row["id"], net_pnl)
+                _pdhl_record_pnl(net_pnl)
 
             log.info(
                 "AUTO-CLOSE (id=%d) %s: entry=%.2f exit=%.2f gross=%.2f "
@@ -984,7 +1052,7 @@ def _loss_cap_for_channel(ch: str) -> float:
         return CH2F_MAX_LOSS
     if ch == "ch2":
         return CH2_MAX_LOSS
-    if ch in ("oeh", "oel", "orb"):
+    if ch in ("oeh", "oel", "orb", "pdhl"):
         return OEH_MAX_SL
     return MAX_LOSS_PER_TRADE
 
@@ -992,7 +1060,7 @@ def _loss_cap_for_channel(ch: str) -> float:
 def _floor_for_channel(ch: str) -> float:
     if ch == "ch2f":
         return CH2F_PROFIT_FLOOR
-    if ch in ("oeh", "oel", "orb"):
+    if ch in ("oeh", "oel", "orb", "pdhl"):
         return OEH_FLOOR_STEP
     return PROFIT_TARGET
 
@@ -1005,6 +1073,8 @@ def _floor_levels_for_channel(ch: str) -> list[float] | None:
         return OEL_FLOOR_LEVELS
     if ch == "orb":
         return ORB_FLOOR_LEVELS
+    if ch == "pdhl":
+        return PDHL_FLOOR_LEVELS
     return None
 
 
@@ -2016,6 +2086,204 @@ async def _run_orb_scan():
 
 
 # ---------------------------------------------------------------------------
+# PDH/PDL Breakout scanner
+# ---------------------------------------------------------------------------
+async def _run_pdhl_scan():
+    """Scan F&O universe for previous-day high/low breakouts."""
+    import time as _t
+    import re
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    from src.broker.upstox_data import UpstoxData, load_cached_token, _expiry_to_date
+
+    IST = ZoneInfo(config.TIMEZONE)
+    log.info("[PDHL] Scanner starting...")
+
+    if _pdhl_daily_cap_hit():
+        log.info("[PDHL] Daily cap already hit (pnl=₹%.0f), skipping scan", _pdhl_daily_pnl)
+        _notify(f"*[PDHL] Scan skipped* — daily cap hit (PnL: ₹{_pdhl_daily_pnl:,.0f})")
+        return
+
+    token = load_cached_token()
+    if not token:
+        log.error("[PDHL] No valid Upstox token")
+        _notify("*[PDHL] Scanner SKIPPED* — No Upstox token.")
+        return
+
+    _notify("*[PDHL] Scanning for Previous Day High/Low Breakouts...*")
+
+    try:
+        ud = UpstoxData(access_token=token)
+        master = ud._load_master()
+    except Exception as exc:
+        log.error("[PDHL] Failed to load instrument master: %s", exc)
+        _notify(f"[PDHL] Scanner error: {exc}")
+        return
+
+    eq_keys = {}
+    for inst in master:
+        if inst.get("segment") == "NSE_EQ":
+            tsym = (inst.get("trading_symbol") or "").upper()
+            if tsym:
+                eq_keys[tsym] = inst.get("instrument_key")
+
+    global PDHL_UNIVERSE
+    if not PDHL_UNIVERSE:
+        PDHL_UNIVERSE = _build_fno_universe(master)
+        log.info("[PDHL] Built F&O universe: %d stocks", len(PDHL_UNIVERSE))
+
+    lot_sizes = {}
+    for inst in master:
+        if inst.get("segment") != "NSE_FO":
+            continue
+        itype = (inst.get("instrument_type") or "").upper()
+        if itype not in ("CE", "PE"):
+            continue
+        tsym = (inst.get("trading_symbol") or "").upper()
+        base = re.match(r'^([A-Z&]+)', tsym)
+        if not base:
+            continue
+        ls = int(inst.get("lot_size") or 0)
+        if ls > 0:
+            lot_sizes[base.group(1)] = ls
+
+    today = datetime.now(IST).date()
+    prev_day = today - timedelta(days=1)
+    while prev_day.weekday() >= 5:
+        prev_day -= timedelta(days=1)
+
+    prev_from = datetime.combine(prev_day, datetime.min.time()).replace(hour=9, minute=15)
+    prev_to = datetime.combine(prev_day, datetime.min.time()).replace(hour=15, minute=30)
+    today_from = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=15)
+    today_to = datetime.combine(today, datetime.min.time()).replace(hour=15, minute=30)
+
+    candidates = []
+    scanned = 0
+
+    for sym in PDHL_UNIVERSE:
+        if sym in PDHL_BLOCKLIST:
+            continue
+        inst_key = eq_keys.get(sym)
+        if not inst_key:
+            continue
+
+        try:
+            prev_candles = ud.historical_data(inst_key, prev_from, prev_to, "day")
+            _t.sleep(0.12)
+        except Exception as exc:
+            err = str(exc)
+            if "429" in err or "rate" in err.lower():
+                _t.sleep(2)
+                try:
+                    prev_candles = ud.historical_data(inst_key, prev_from, prev_to, "day")
+                except Exception:
+                    continue
+            else:
+                continue
+
+        if not prev_candles:
+            continue
+
+        pdh = prev_candles[0]["high"]
+        pdl = prev_candles[0]["low"]
+
+        try:
+            today_candles = ud.historical_data(inst_key, today_from, today_to, "5minute")
+            _t.sleep(0.12)
+        except Exception as exc:
+            err = str(exc)
+            if "429" in err or "rate" in err.lower():
+                _t.sleep(2)
+                try:
+                    today_candles = ud.historical_data(inst_key, today_from, today_to, "5minute")
+                except Exception:
+                    continue
+            else:
+                continue
+
+        scanned += 1
+        if not today_candles:
+            continue
+
+        for dc in today_candles:
+            if dc["close"] > pdh:
+                candidates.append({
+                    "symbol": sym, "direction": "bullish",
+                    "pdh": pdh, "pdl": pdl,
+                    "breakout_price": dc["close"],
+                })
+                break
+            elif dc["close"] < pdl:
+                candidates.append({
+                    "symbol": sym, "direction": "bearish",
+                    "pdh": pdh, "pdl": pdl,
+                    "breakout_price": dc["close"],
+                })
+                break
+
+    log.info("[PDHL] Scanned %d stocks, found %d breakouts", scanned, len(candidates))
+
+    if not candidates:
+        _notify(f"[PDHL] No breakouts found (scanned {scanned} stocks)")
+        return
+
+    if _pdhl_capital_avail <= 0 and not _pdhl_capital_locked:
+        _pdhl_init_capital()
+
+    summary_lines = []
+    executed = 0
+    skipped_capital = 0
+
+    for c in candidates:
+        if _pdhl_daily_cap_hit():
+            log.info("[PDHL] Daily cap hit mid-scan (pnl=₹%.0f), stopping", _pdhl_daily_pnl)
+            break
+
+        sym = c["symbol"]
+        opt_type = "CE" if c["direction"] == "bullish" else "PE"
+
+        parsed = _resolve_atm_strike(sym, opt_type)
+        if parsed is None:
+            continue
+
+        parsed.stop_loss = round(parsed.trigger_price * (1 - PDHL_SL_PCT), 2)
+        parsed.targets = []
+
+        trade_capital = parsed.trigger_price * (lot_sizes.get(sym, 1) * 2)
+        if trade_capital > _pdhl_capital_avail:
+            skipped_capital += 1
+            continue
+
+        result = execute_signal(parsed, channel="pdhl", max_lots=2)
+        if result["placed"]:
+            actual_capital = result["entry"] * result["qty"]
+            _pdhl_allocate(result["trade_id"], actual_capital)
+            executed += 1
+            dir_tag = "▲" if c["direction"] == "bullish" else "▼"
+            summary_lines.append(
+                f"BUY {result['symbol']} x{result['qty']} @ {result['entry']:.2f} "
+                f"({dir_tag} PDH={c['pdh']:.0f} PDL={c['pdl']:.0f}) [cap: ₹{_pdhl_capital_avail:,.0f}]"
+            )
+            _notify(
+                f"*[PDHL] Trade #{executed}*\n"
+                f"{dir_tag} {result['symbol']} x{result['qty']}\n"
+                f"Entry: {result['entry']} | SL: {result['sl']} | Floors: ₹500→₹1000→₹1500...\n"
+                f"PDH: {c['pdh']:.2f} | PDL: {c['pdl']:.2f}\n"
+                f"Capital: ₹{actual_capital:,.0f} locked | ₹{_pdhl_capital_avail:,.0f} available"
+            )
+        else:
+            summary_lines.append(f"FAIL {sym} {opt_type} — {result['reason']}")
+
+    log.info("[PDHL] Scan done: %d executed, %d skipped (capital)", executed, skipped_capital)
+    _notify(
+        f"*[PDHL] Scan complete*\n"
+        f"Executed: {executed} | Skipped (capital): {skipped_capital}\n"
+        f"Breakouts: {len(candidates)} | Capital remaining: ₹{_pdhl_capital_avail:,.0f}\n"
+        f"Daily PnL: ₹{_pdhl_daily_pnl:,.0f}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # OEL Early List — 1-min candle scan at 09:16, list only (no trades)
 # ---------------------------------------------------------------------------
 async def _run_oel_list():
@@ -2981,6 +3249,78 @@ async def start_listener() -> None:
     asyncio.get_event_loop().create_task(_orb_scheduler())
     log.info("ORB scanner started — runs at %s + %s IST (capital: ₹%,.0f)",
              ORB_RUN_TIME, ORB_RESCAN_TIME, ORB_CAPITAL)
+
+    # --- PDHL Scanner: runs at 09:25 (initial) + 09:45 (rescan) ---
+    PDHL_RESCAN_TIME = "09:45"
+
+    async def _pdhl_scheduler():
+        from zoneinfo import ZoneInfo
+        from datetime import datetime, timedelta
+        IST = ZoneInfo(config.TIMEZONE)
+
+        h, m = map(int, PDHL_RUN_TIME.split(":"))
+        h2, m2 = map(int, PDHL_RESCAN_TIME.split(":"))
+        first_run = True
+
+        while True:
+            if not PDHL_ENABLED:
+                await asyncio.sleep(60)
+                continue
+
+            now = datetime.now(IST)
+
+            if first_run and mc.is_trading_day():
+                first_run = False
+                scheduled = now.replace(hour=h, minute=m, second=0, microsecond=0)
+                if now > scheduled:
+                    log.info("[PDHL] Missed scheduled %s run — catching up now", PDHL_RUN_TIME)
+                    try:
+                        await _run_pdhl_scan()
+                    except Exception as exc:
+                        log.error("[PDHL] Catch-up scan failed: %s", exc, exc_info=True)
+                    rescan_t = now.replace(hour=h2, minute=m2, second=0, microsecond=0)
+                    if now > rescan_t:
+                        log.info("[PDHL] Also missed rescan at %s — running now", PDHL_RESCAN_TIME)
+                        try:
+                            await _run_pdhl_scan()
+                        except Exception as exc:
+                            log.error("[PDHL] Catch-up rescan failed: %s", exc, exc_info=True)
+                    continue
+            first_run = False
+
+            target = now.replace(hour=h, minute=m, second=0, microsecond=0)
+            if now >= target:
+                target += timedelta(days=1)
+
+            wait_secs = (target - now).total_seconds()
+            log.info("[PDHL] Next scan at %s IST (in %.0f min)",
+                     target.strftime("%Y-%m-%d %H:%M"), wait_secs / 60)
+            await asyncio.sleep(wait_secs)
+
+            if not mc.is_trading_day():
+                log.info("[PDHL] Not a trading day, skipping scan")
+                continue
+
+            try:
+                await _run_pdhl_scan()
+            except Exception as exc:
+                log.error("[PDHL] Scheduler scan failed: %s", exc, exc_info=True)
+
+            rescan_wait = (m2 - m) * 60
+            log.info("[PDHL] Rescan in %d min at %s (recycled capital)", rescan_wait // 60, PDHL_RESCAN_TIME)
+            await asyncio.sleep(rescan_wait)
+            if _pdhl_capital_avail > 5000:
+                log.info("[PDHL] Rescan starting — ₹%.0f available", _pdhl_capital_avail)
+                try:
+                    await _run_pdhl_scan()
+                except Exception as exc:
+                    log.error("[PDHL] Rescan failed: %s", exc, exc_info=True)
+            else:
+                log.info("[PDHL] Rescan skipped — only ₹%.0f available", _pdhl_capital_avail)
+
+    asyncio.get_event_loop().create_task(_pdhl_scheduler())
+    log.info("PDHL scanner started — runs at %s + %s IST (capital: ₹%,.0f)",
+             PDHL_RUN_TIME, PDHL_RESCAN_TIME, PDHL_CAPITAL)
 
     # --- Stock Credit Spread Runner: run once daily at 09:45 IST ---
     STOCK_RUN_TIME = "09:45"
