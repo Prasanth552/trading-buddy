@@ -91,7 +91,7 @@ def _prev_trading_day(d):
     return p
 
 
-def run_day(ud, ref_date, eq_keys, matched, opt_master, lot_sizes, lot_mult, verbose=True):
+def run_day(ud, ref_date, eq_keys, matched, opt_master, lot_sizes, lot_mult, verbose=True, profit_cap=PROFIT_CAP):
     prev_date = _prev_trading_day(ref_date)
     prev_from = datetime.combine(prev_date, datetime.min.time()).replace(hour=9, minute=15)
     prev_to = datetime.combine(prev_date, datetime.min.time()).replace(hour=15, minute=30)
@@ -178,7 +178,7 @@ def run_day(ud, ref_date, eq_keys, matched, opt_master, lot_sizes, lot_mult, ver
         print(f"  {'-'*85}")
 
     for b in breakouts:
-        if total_pnl >= PROFIT_CAP:
+        if profit_cap and total_pnl >= profit_cap:
             break
 
         sym = b["symbol"]
@@ -263,6 +263,7 @@ def main():
     parser.add_argument("--from", dest="from_date", default=None)
     parser.add_argument("--to", dest="to_date", default=None)
     parser.add_argument("--lots", type=int, default=2)
+    parser.add_argument("--no-cap", action="store_true", help="Disable ₹25K profit cap")
     args = parser.parse_args()
 
     if args.date:
@@ -350,7 +351,8 @@ def main():
             print(f"\r  Day {di+1}/{len(dates)}: {ref_date}   ", end="", flush=True)
 
         verbose = bool(args.date)
-        results, n = run_day(ud, ref_date, eq_keys, matched, opt_master, lot_sizes, lot_mult, verbose=verbose)
+        cap = None if args.no_cap else PROFIT_CAP
+        results, n = run_day(ud, ref_date, eq_keys, matched, opt_master, lot_sizes, lot_mult, verbose=verbose, profit_cap=cap)
         total_trades += n
         day_pnl = sum(r["pnl"] for r in results)
         all_results.extend(results)
