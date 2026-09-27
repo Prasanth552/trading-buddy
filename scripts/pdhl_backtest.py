@@ -27,6 +27,9 @@ FLOOR_STEPS = [500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5500, 
 CAPITAL = 150000
 PROFIT_CAP = 25000
 BREAKOUT_WINDOW_END = "14:00"
+MAX_TRADES_PER_DAY = 5
+BROKERAGE_PER_ORDER = 20
+STT_PCT = 0.000625
 
 CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "candle_cache"
 
@@ -56,11 +59,12 @@ def _simulate_trade(ocandles, entry_idx, entry, lot, sl_price):
     active_floor = 0
 
     for i, cn in enumerate(ocandles[entry_idx + 1:], start=entry_idx + 1):
-        high, low = cn["high"], cn["low"]
+        high, low, close = cn["high"], cn["low"], cn["close"]
         t = str(cn.get("date", cn.get("timestamp", "")))
         t_short = t[11:16] if len(t) > 16 else t[:5]
 
         pnl_high = (high - entry) * lot
+        pnl_close = (close - entry) * lot
         pnl_low = (low - entry) * lot
 
         if pnl_high > peak_pnl:
@@ -71,11 +75,10 @@ def _simulate_trade(ocandles, entry_idx, entry, lot, sl_price):
             return ep, "SL", t_short, peak_pnl
 
         for fl in FLOOR_STEPS:
-            if pnl_high >= fl and fl > active_floor:
+            if pnl_close >= fl and fl > active_floor:
                 active_floor = fl
-        if active_floor > 0 and pnl_low <= active_floor:
-            ep = entry + active_floor / lot
-            ep = round(ep * (1 - SLIPPAGE_PCT), 2)
+        if active_floor > 0 and pnl_close <= active_floor:
+            ep = round(close * (1 - SLIPPAGE_PCT), 2)
             return ep, f"FLOOR ₹{active_floor}", t_short, peak_pnl
 
     last = ocandles[-1]
@@ -206,8 +209,11 @@ def run_day(ud, ref_date, eq_keys, matched, opt_master, lot_sizes, lot_mult, ver
               f" {'P&L':>9s} {'Peak':>8s} {'Reason':<12s} {'Time':>5s}")
         print(f"  {'-'*85}")
 
+    trades_taken = 0
     for b in breakouts:
         if profit_cap and total_pnl >= profit_cap:
+            break
+        if trades_taken >= MAX_TRADES_PER_DAY:
             break
         opt_key = b.get("_opt_key")
         if not opt_key or opt_key not in prefetched:
@@ -250,10 +256,13 @@ def run_day(ud, ref_date, eq_keys, matched, opt_master, lot_sizes, lot_mult, ver
         )
 
         pnl = (exit_price - entry) * lot
+        charges = (BROKERAGE_PER_ORDER * 2) + (exit_price * lot * STT_PCT)
+        pnl -= charges
         total_pnl += pnl
         avail += margin + pnl
+        trades_taken += 1
 
-        results.append({"sym": sym, "pnl": pnl, "reason": exit_reason, "peak": peak_pnl})
+        results.append({"sym": sym, "pnl": pnl, "reason": exit_reason, "peak": peak_pnl, "charges": charges})
 
         if verbose:
             d_tag = "▲" if b["direction"] == "bullish" else "▼"
@@ -343,7 +352,7 @@ def main():
     print(f"\n{'='*90}")
     print(f"  PDH/PDL BREAKOUT BACKTEST — {dates[0]} to {dates[-1]} ({len(dates)} days)")
     print(f"  Capital: ₹{CAPITAL:,.0f} | Slippage: {SLIPPAGE_PCT*100}% | Floors: ₹500 steps")
-    print(f"  SL: {SL_PCT*100:.0f}% / ₹{MAX_SL_RS:,} cap | Lots: {lot_mult} | Profit cap: ₹{PROFIT_CAP:,}")
+    print(f"  SL: {SL_PCT*100:.0f}% / ₹{MAX_SL_RS:,} cap | Lots: {lot_mult} | Max trades/day: {MAX_TRADES_PER_DAY}")
     print(f"  Breakout window: 09:15 – {BREAKOUT_WINDOW_END}")
     print(f"{'='*90}")
 
