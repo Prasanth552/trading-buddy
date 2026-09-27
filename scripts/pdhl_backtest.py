@@ -44,7 +44,7 @@ def _cached_fetch(ud, inst_key, from_dt, to_dt, interval):
         with open(path) as f:
             return json.load(f)
     candles = ud.historical_data(inst_key, from_dt, to_dt, interval)
-    _t.sleep(0.1)
+    _t.sleep(0.05)
     if candles is not None:
         with open(path, "w") as f:
             json.dump(candles, f)
@@ -167,24 +167,12 @@ def run_day(ud, ref_date, eq_keys, matched, opt_master, lot_sizes, lot_mult, ver
     if not breakouts:
         return [], 0
 
-    avail = CAPITAL
-    total_pnl = 0.0
-    results = []
-    active_trades = []
-
-    if verbose:
-        print(f"  {'Symbol':<14s} {'Str':>6s} {'D':>1s} {'Entry':>7s} {'Exit':>7s}"
-              f" {'P&L':>9s} {'Peak':>8s} {'Reason':<12s} {'Time':>5s}")
-        print(f"  {'-'*85}")
-
+    # Prefetch all option candles upfront
+    prefetched = {}
     for b in breakouts:
-        if profit_cap and total_pnl >= profit_cap:
-            break
-
         sym = b["symbol"]
         opt_type = "CE" if b["direction"] == "bullish" else "PE"
         spot = b["breakout_price"]
-
         sym_opts = {k: v for k, v in opt_master.items() if k[0] == sym and k[3] == opt_type}
         if not sym_opts:
             continue
@@ -197,13 +185,38 @@ def run_day(ud, ref_date, eq_keys, matched, opt_master, lot_sizes, lot_mult, ver
         if not opt_key:
             continue
         lot = lot_sizes.get(sym, 1) * lot_mult
+        if opt_key not in prefetched:
+            try:
+                ocandles = _cached_fetch(ud, opt_key, today_from, today_to, "1minute")
+                if ocandles and len(ocandles) >= 5:
+                    prefetched[opt_key] = ocandles
+            except Exception:
+                pass
+        b["_opt_key"] = opt_key
+        b["_strike"] = strike
+        b["_lot"] = lot
+        b["_opt_type"] = opt_type
 
-        try:
-            ocandles = _cached_fetch(ud, opt_key, today_from, today_to, "1minute")
-        except Exception:
+    avail = CAPITAL
+    total_pnl = 0.0
+    results = []
+
+    if verbose:
+        print(f"  {'Symbol':<14s} {'Str':>6s} {'D':>1s} {'Entry':>7s} {'Exit':>7s}"
+              f" {'P&L':>9s} {'Peak':>8s} {'Reason':<12s} {'Time':>5s}")
+        print(f"  {'-'*85}")
+
+    for b in breakouts:
+        if profit_cap and total_pnl >= profit_cap:
+            break
+        opt_key = b.get("_opt_key")
+        if not opt_key or opt_key not in prefetched:
             continue
-        if not ocandles or len(ocandles) < 5:
-            continue
+        ocandles = prefetched[opt_key]
+        strike = b["_strike"]
+        lot = b["_lot"]
+        opt_type = b["_opt_type"]
+        sym = b["symbol"]
 
         bt_short = b["breakout_time"]
         entry_candle = None
@@ -243,7 +256,6 @@ def run_day(ud, ref_date, eq_keys, matched, opt_master, lot_sizes, lot_mult, ver
         results.append({"sym": sym, "pnl": pnl, "reason": exit_reason, "peak": peak_pnl})
 
         if verbose:
-            icon = "+" if pnl > 0 else ""
             d_tag = "▲" if b["direction"] == "bullish" else "▼"
             print(f"  {d_tag} {sym:<12s} {strike:>6.0f}{opt_type} {entry:>7.1f} → {exit_price:>6.1f}"
                   f"  ₹{pnl:>+8,.0f}  ₹{peak_pnl:>+7,.0f} {exit_reason:<12s} {exit_time:>5s}")
