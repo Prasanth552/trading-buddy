@@ -26,7 +26,7 @@ MAX_SL_RS = 5000
 FLOOR_STEPS = [500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5500, 6000]
 CAPITAL = 150000
 PROFIT_CAP = 25000
-LOSS_CAP = 20000
+LOSS_CAP = 10000
 BREAKOUT_WINDOW_END = "14:00"
 MAX_TRADES_PER_DAY = 999
 BROKERAGE_PER_ORDER = 20
@@ -95,7 +95,9 @@ def _prev_trading_day(d):
     return p
 
 
-def run_day(ud, ref_date, eq_keys, matched, opt_master, lot_sizes, lot_mult, verbose=True, profit_cap=PROFIT_CAP):
+def run_day(ud, ref_date, eq_keys, matched, opt_master, lot_sizes, lot_mult,
+            verbose=True, profit_cap=PROFIT_CAP,
+            confirm_pct=0.0, time_cutoff=BREAKOUT_WINDOW_END, max_range_pct=999):
     prev_date = _prev_trading_day(ref_date)
     prev_from = datetime.combine(prev_date, datetime.min.time()).replace(hour=9, minute=15)
     prev_to = datetime.combine(prev_date, datetime.min.time()).replace(hour=15, minute=30)
@@ -141,25 +143,32 @@ def run_day(ud, ref_date, eq_keys, matched, opt_master, lot_sizes, lot_mult, ver
     breakouts = []
     for sym, tcandles in today_candles.items():
         pdh, pdl = pdh_pdl[sym]
+        range_pct = (pdh - pdl) / pdl * 100
+        if range_pct > max_range_pct:
+            continue
         for cn in tcandles:
             t = str(cn.get("date", cn.get("timestamp", "")))
             t_short = t[11:16] if len(t) > 16 else t[:5]
-            if t_short >= BREAKOUT_WINDOW_END:
+            if t_short >= time_cutoff:
                 break
             if cn["high"] > pdh:
+                margin = (cn["close"] - pdh) / pdh * 100
+                if margin < confirm_pct:
+                    continue
                 breakouts.append({
                     "symbol": sym, "direction": "bullish",
                     "breakout_price": cn["close"], "breakout_time": t_short,
-                    "pdh": pdh, "pdl": pdl,
-                    "range_pct": (pdh - pdl) / pdl * 100,
+                    "pdh": pdh, "pdl": pdl, "range_pct": range_pct,
                 })
                 break
             elif cn["low"] < pdl:
+                margin = (pdl - cn["close"]) / pdl * 100
+                if margin < confirm_pct:
+                    continue
                 breakouts.append({
                     "symbol": sym, "direction": "bearish",
                     "breakout_price": cn["close"], "breakout_time": t_short,
-                    "pdh": pdh, "pdl": pdl,
-                    "range_pct": (pdh - pdl) / pdl * 100,
+                    "pdh": pdh, "pdl": pdl, "range_pct": range_pct,
                 })
                 break
 
@@ -288,6 +297,7 @@ def main():
     parser.add_argument("--to", dest="to_date", default=None)
     parser.add_argument("--lots", type=int, default=2)
     parser.add_argument("--no-cap", action="store_true", help="Disable ₹25K profit cap")
+    parser.add_argument("--compare", action="store_true", help="Compare filter combos")
     args = parser.parse_args()
 
     if args.date:
@@ -351,6 +361,54 @@ def main():
                 lot_sizes[sym_name] = ls
 
     matched = sorted(s for s in universe if s in eq_keys)
+
+    if args.compare:
+        COMBOS = [
+            ("Baseline",             {"confirm_pct": 0,   "time_cutoff": "14:00", "max_range_pct": 999}),
+            ("Confirm 0.3%",         {"confirm_pct": 0.3, "time_cutoff": "14:00", "max_range_pct": 999}),
+            ("Confirm 0.5%",         {"confirm_pct": 0.5, "time_cutoff": "14:00", "max_range_pct": 999}),
+            ("Early only (09:45)",   {"confirm_pct": 0,   "time_cutoff": "09:45", "max_range_pct": 999}),
+            ("Early only (10:00)",   {"confirm_pct": 0,   "time_cutoff": "10:00", "max_range_pct": 999}),
+            ("Narrow range <2%",     {"confirm_pct": 0,   "time_cutoff": "14:00", "max_range_pct": 2.0}),
+            ("Narrow range <3%",     {"confirm_pct": 0,   "time_cutoff": "14:00", "max_range_pct": 3.0}),
+            ("Confirm+Early",        {"confirm_pct": 0.3, "time_cutoff": "09:45", "max_range_pct": 999}),
+            ("Confirm+Narrow",       {"confirm_pct": 0.3, "time_cutoff": "14:00", "max_range_pct": 2.0}),
+            ("All 3 filters",        {"confirm_pct": 0.3, "time_cutoff": "09:45", "max_range_pct": 2.0}),
+        ]
+
+        print(f"\n{'='*110}")
+        print(f"  PDH/PDL FILTER COMPARISON — {dates[0]} to {dates[-1]} ({len(dates)} days)")
+        print(f"  Capital: ₹{CAPITAL:,.0f} | Loss cap: ₹{LOSS_CAP:,} | Profit cap: ₹{PROFIT_CAP:,}")
+        print(f"{'='*110}")
+
+        summary = []
+        for label, params in COMBOS:
+            all_r = []
+            day_p = []
+            n_trades = 0
+            for ref_date in dates:
+                results, n = run_day(ud, ref_date, eq_keys, matched, opt_master, lot_sizes, lot_mult,
+                                     verbose=False, profit_cap=PROFIT_CAP, **params)
+                n_trades += n
+                dp = sum(r["pnl"] for r in results)
+                all_r.extend(results)
+                day_p.append(dp)
+
+            total_pnl = sum(r["pnl"] for r in all_r)
+            wins = sum(1 for r in all_r if r["pnl"] > 0)
+            wr = wins / len(all_r) * 100 if all_r else 0
+            w_days = sum(1 for d in day_p if d > 0)
+            l_days = sum(1 for d in day_p if d < 0)
+            avg_day = total_pnl / len(dates)
+            summary.append((label, total_pnl, n_trades, wr, w_days, l_days, avg_day))
+
+        print(f"\n  {'Strategy':<22s} {'Total P&L':>12s} {'Avg/Day':>10s} {'Trades':>7s} {'WR%':>5s} {'W/L Days':>8s}")
+        print(f"  {'-'*68}")
+        for label, total, trades, wr, wd, ld, avg in sorted(summary, key=lambda x: -x[1]):
+            print(f"  {label:<22s} ₹{total:>+10,.0f} ₹{avg:>+9,.0f} {trades:>7d} {wr:>4.0f}% {wd:>3d}/{ld}")
+
+        print(f"\n  {'='*110}\n")
+        return
 
     print(f"\n{'='*90}")
     print(f"  PDH/PDL BREAKOUT BACKTEST — {dates[0]} to {dates[-1]} ({len(dates)} days)")
