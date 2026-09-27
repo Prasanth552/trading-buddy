@@ -26,6 +26,7 @@ MAX_SL_RS = 5000
 FLOOR_STEPS = [500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5500, 6000]
 CAPITAL = 150000
 PROFIT_CAP = 25000
+LOSS_CAP = 10000
 BREAKOUT_WINDOW_END = "14:00"
 MAX_TRADES_PER_DAY = 999
 BROKERAGE_PER_ORDER = 20
@@ -212,6 +213,8 @@ def run_day(ud, ref_date, eq_keys, matched, opt_master, lot_sizes, lot_mult, ver
     trades_taken = 0
     for b in breakouts:
         if profit_cap and total_pnl >= profit_cap:
+            break
+        if total_pnl <= -LOSS_CAP:
             break
         if trades_taken >= MAX_TRADES_PER_DAY:
             break
