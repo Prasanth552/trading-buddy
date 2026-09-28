@@ -1720,6 +1720,9 @@ async def _run_oeh_scan():
     from src.broker.upstox_data import UpstoxData, load_cached_token
 
     IST = ZoneInfo(config.TIMEZONE)
+    if not mc.is_market_open():
+        log.info("[OEH] Market not open, skipping scan")
+        return
     log.info("[OEH] Scanner starting...")
 
     token = load_cached_token()
@@ -1907,6 +1910,9 @@ async def _run_orb_scan():
     from src.broker.upstox_data import UpstoxData, load_cached_token, _expiry_to_date
 
     IST = ZoneInfo(config.TIMEZONE)
+    if not mc.is_market_open():
+        log.info("[ORB] Market not open, skipping scan")
+        return
     log.info("[ORB] Scanner starting...")
 
     token = load_cached_token()
@@ -2097,6 +2103,9 @@ async def _run_pdhl_scan():
     from src.broker.upstox_data import UpstoxData, load_cached_token, _expiry_to_date
 
     IST = ZoneInfo(config.TIMEZONE)
+    if not mc.is_market_open():
+        log.info("[PDHL] Market not open, skipping scan")
+        return
     log.info("[PDHL] Scanner starting...")
 
     if _pdhl_daily_cap_hit():
