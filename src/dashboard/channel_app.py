@@ -1077,8 +1077,6 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
   <button class="tab active" onclick="switchCh('oeh')" id="tab-oeh"><span class=ico>O</span> OEH</button>
   <button class="tab" onclick="switchCh('orb')" id="tab-orb"><span class=ico>R</span> ORB</button>
   <button class="tab" onclick="switchCh('pdhl')" id="tab-pdhl"><span class=ico>P</span> PDHL</button>
-  <button class="tab" onclick="switchCh('strat')" id="tab-strat"><span class=ico>S</span> Strategy</button>
-  <button class="tab" onclick="switchCh('stocks')" id="tab-stocks"><span class=ico>$</span> Stocks</button>
 </div>
 
 <div class=wrap>
