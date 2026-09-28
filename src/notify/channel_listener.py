@@ -151,7 +151,7 @@ ORB_BLOCKLIST = {"GODREJCP", "GRASIM"}
 
 # PDH/PDL Breakout config
 PDHL_ENABLED = True
-PDHL_RUN_TIME = "09:25"          # IST — same window as ORB
+PDHL_RUN_TIME = "09:20"          # IST — right after first 5-min candle closes
 PDHL_CAPITAL = 150000
 PDHL_SL_PCT = 0.30
 PDHL_MAX_SL_RS = 5000
