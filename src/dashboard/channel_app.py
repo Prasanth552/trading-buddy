@@ -70,7 +70,7 @@ async def _ws_push_loop():
             _ensure_db()
             today_iso = mc.now_ist().date().isoformat()
             payload: dict[str, dict] = {}
-            for ch in ("ch1", "ch2", "ch3", "oeh", "orb", "pdhl"):
+            for ch in ("ch3", "oeh", "orb", "pdhl"):
                 cf = _ch_filter(ch)
                 with db.get_conn() as conn:
                     row = conn.execute(f"""SELECT
@@ -1074,9 +1074,7 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
 </div>
 
 <div class=tabs id=tabbar>
-  <button class="tab active" onclick="switchCh('ch1')" id="tab-ch1"><span class=ico>1</span> Paid</button>
-  <button class="tab" onclick="switchCh('ch2')" id="tab-ch2"><span class=ico>2</span> G Prime</button>
-  <button class="tab" onclick="switchCh('oeh')" id="tab-oeh"><span class=ico>O</span> OEH</button>
+  <button class="tab active" onclick="switchCh('oeh')" id="tab-oeh"><span class=ico>O</span> OEH</button>
   <button class="tab" onclick="switchCh('orb')" id="tab-orb"><span class=ico>R</span> ORB</button>
   <button class="tab" onclick="switchCh('pdhl')" id="tab-pdhl"><span class=ico>P</span> PDHL</button>
   <button class="tab" onclick="switchCh('strat')" id="tab-strat"><span class=ico>S</span> Strategy</button>
@@ -1221,7 +1219,7 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
 
 <script>
 const $=id=>document.getElementById(id);
-let AT=[],CF='all',LTP={},CH='ch1',VIEW='trades';
+let AT=[],CF='all',LTP={},CH='oeh',VIEW='trades';
 let _loading=false,_abortCtrl=null,_scanCache=null,_scanCacheTs=0,_refreshTimer=null;
 let _stratCache=null,_stratCacheTs=0,_stratFocus='kitchen_sink';
 let _stocksCache=null,_stocksCacheTs=0,_stocksFocus='ema20_rsi50';
