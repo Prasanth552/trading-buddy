@@ -656,7 +656,7 @@ def execute_signal(sig: ParsedSignal, *, channel: str = "ch1", max_lots: int | N
     lot_size = config.LOT_SIZES.get(lot_key, master_lot_size)
 
     is_index = lot_key in ("NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY")
-    if channel in ("oeh", "oel") and max_lots is not None:
+    if channel in ("oeh", "oel", "orb", "pdhl") and max_lots is not None:
         lots = max_lots
     elif channel in ("ch2", "ch2f", "ch3"):
         lots = 3 if is_index else 2
@@ -664,7 +664,7 @@ def execute_signal(sig: ParsedSignal, *, channel: str = "ch1", max_lots: int | N
         lots = 2
     else:
         lots = 1
-    if max_lots is not None and channel not in ("oeh", "oel"):
+    if max_lots is not None and channel not in ("oeh", "oel", "orb", "pdhl"):
         lots = min(lots, max_lots)
     qty = lots * lot_size
 
