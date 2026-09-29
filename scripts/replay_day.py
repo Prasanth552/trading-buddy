@@ -153,24 +153,14 @@ def _resolve_option(sym, spot, opt_type, ref_date, opt_master, lot_sizes):
 
 
 def _exec_trades(candidates, ref_date, ud, opt_master, lot_sizes, loss_cap, profit_cap, label, verbose):
+    """Simulate trades with concurrent capital tracking — capital is locked
+    until the trade actually exits (minute-by-minute sim)."""
     from_dt = datetime.combine(ref_date, datetime.min.time()).replace(hour=9, minute=15)
     full_to = datetime.combine(ref_date, datetime.min.time()).replace(hour=15, minute=30)
 
-    avail = CAPITAL
-    total_pnl = 0.0
-    results = []
-
-    if verbose:
-        print(f"\n  {'Symbol':<14s} {'Str':>6s} {'D':>1s} {'Entry':>7s} {'Exit':>7s}"
-              f" {'P&L':>9s} {'Peak':>8s} {'Reason':<12s} {'Time':>5s}")
-        print(f"  {'-'*85}")
-
+    # Phase 1: resolve all candidates and prefetch option candles
+    prepared = []
     for c in candidates:
-        if total_pnl >= profit_cap:
-            break
-        if total_pnl <= -loss_cap:
-            break
-
         sym = c["symbol"]
         opt_type = c.get("opt_type", "PE")
         spot = c["breakout_price"]
@@ -204,10 +194,6 @@ def _exec_trades(candidates, ref_date, ud, opt_master, lot_sizes, loss_cap, prof
             continue
 
         entry = round(raw_entry * (1 + SLIPPAGE_PCT), 2)
-        margin = entry * lot
-        if margin > avail:
-            continue
-        avail -= margin
 
         sl_pct_price = entry * (1 - SL_PCT)
         sl_cap_price = entry - (MAX_SL_RS / lot)
@@ -220,21 +206,66 @@ def _exec_trades(candidates, ref_date, ud, opt_master, lot_sizes, loss_cap, prof
         pnl = (exit_price - entry) * lot
         charges = (BROKERAGE_PER_ORDER * 2) + (exit_price * lot * STT_PCT)
         pnl -= charges
-        total_pnl += pnl
-        avail += margin + pnl
 
-        results.append({"sym": sym, "pnl": pnl, "reason": exit_reason, "peak": peak_pnl})
+        prepared.append({
+            "candidate": c, "sym": sym, "opt_type": opt_type, "strike": strike,
+            "lot": lot, "entry": entry, "margin": entry * lot,
+            "entry_time": bt, "exit_time": exit_time,
+            "exit_price": exit_price, "exit_reason": exit_reason,
+            "pnl": pnl, "peak": peak_pnl,
+        })
+
+    # Phase 2: simulate capital-gated concurrent execution
+    # Sort by entry time so we process in order
+    prepared.sort(key=lambda x: x["entry_time"])
+
+    avail = CAPITAL
+    locked = {}  # trade_idx -> margin
+    total_pnl = 0.0
+    results = []
+    skipped = 0
+
+    if verbose:
+        print(f"\n  {'Symbol':<14s} {'Str':>6s} {'D':>1s} {'Entry':>7s} {'Exit':>7s}"
+              f" {'P&L':>9s} {'Peak':>8s} {'Reason':<12s} {'ETime':>5s} {'XTime':>5s}")
+        print(f"  {'-'*95}")
+
+    for idx, t in enumerate(prepared):
+        if total_pnl >= profit_cap:
+            break
+        if total_pnl <= -loss_cap:
+            break
+
+        # Free capital from trades that exited before this entry
+        freed_ids = []
+        for locked_idx, locked_margin in locked.items():
+            if prepared[locked_idx]["exit_time"] <= t["entry_time"]:
+                avail += locked_margin + prepared[locked_idx]["pnl"]
+                freed_ids.append(locked_idx)
+        for fid in freed_ids:
+            del locked[fid]
+
+        if t["margin"] > avail:
+            skipped += 1
+            continue
+
+        avail -= t["margin"]
+        locked[idx] = t["margin"]
+        total_pnl += t["pnl"]
+
+        results.append({"sym": t["sym"], "pnl": t["pnl"], "reason": t["exit_reason"], "peak": t["peak"]})
 
         if verbose:
+            c = t["candidate"]
             d_tag = "▲" if c.get("direction", "bearish") == "bullish" else "▼"
-            print(f"  {d_tag} {sym:<12s} {strike:>6.0f}{opt_type} {entry:>7.1f} → {exit_price:>6.1f}"
-                  f"  ₹{pnl:>+8,.0f}  ₹{peak_pnl:>+7,.0f} {exit_reason:<12s} {exit_time:>5s}")
+            print(f"  {d_tag} {t['sym']:<12s} {t['strike']:>6.0f}{t['opt_type']} {t['entry']:>7.1f} → {t['exit_price']:>6.1f}"
+                  f"  ₹{t['pnl']:>+8,.0f}  ₹{t['peak']:>+7,.0f} {t['exit_reason']:<12s} {t['entry_time']:>5s} {t['exit_time']:>5s}")
 
     if results:
         day_pnl = sum(r["pnl"] for r in results)
         wins = sum(1 for r in results if r["pnl"] > 0)
         losses = len(results) - wins
-        print(f"  {label} TOTAL: {len(results)} trades | {wins}W/{losses}L | ₹{day_pnl:>+,.0f}")
+        print(f"  {label} TOTAL: {len(results)} trades | {wins}W/{losses}L | Skipped(cap): {skipped} | ₹{day_pnl:>+,.0f}")
     else:
         print(f"  {label}: No trades")
 
