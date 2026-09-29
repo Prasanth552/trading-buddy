@@ -24,6 +24,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import config
+from src.utils import market_calendar as mc
 from src.utils.logging import get_logger
 
 log = get_logger("channel_listener")
