@@ -3085,6 +3085,21 @@ async def start_listener() -> None:
             except Exception as exc:
                 log.error("[OEH] Scheduler scan failed: %s", exc, exc_info=True)
 
+            # Rescan every 5 min until market close, whenever capital is freed
+            while True:
+                await asyncio.sleep(300)
+                if not mc.is_market_open():
+                    log.info("[OEH] Market closed, stopping rescans")
+                    break
+                if _oeh_capital_avail > 5000:
+                    log.info("[OEH] Rescan starting — ₹%.0f available", _oeh_capital_avail)
+                    try:
+                        await _run_oeh_scan()
+                    except Exception as exc:
+                        log.error("[OEH] Rescan failed: %s", exc, exc_info=True)
+                else:
+                    log.debug("[OEH] Rescan skipped — only ₹%.0f available", _oeh_capital_avail)
+
     asyncio.get_event_loop().create_task(_oeh_scheduler())
     log.info("OEH scanner started — runs daily at %s IST", OEH_RUN_TIME)
 
@@ -3250,18 +3265,20 @@ async def start_listener() -> None:
             except Exception as exc:
                 log.error("[ORB] Scheduler scan failed: %s", exc, exc_info=True)
 
-            # Rescan at 09:45 with recycled capital from floor exits
-            rescan_wait = (m2 - m) * 60
-            log.info("[ORB] Rescan in %d min at %s (recycled capital)", rescan_wait // 60, ORB_RESCAN_TIME)
-            await asyncio.sleep(rescan_wait)
-            if _orb_capital_avail > 5000:
-                log.info("[ORB] Rescan starting — ₹%.0f available", _orb_capital_avail)
-                try:
-                    await _run_orb_scan()
-                except Exception as exc:
-                    log.error("[ORB] Rescan failed: %s", exc, exc_info=True)
-            else:
-                log.info("[ORB] Rescan skipped — only ₹%.0f available", _orb_capital_avail)
+            # Rescan every 5 min until market close, whenever capital is freed
+            while True:
+                await asyncio.sleep(300)
+                if not mc.is_market_open():
+                    log.info("[ORB] Market closed, stopping rescans")
+                    break
+                if _orb_capital_avail > 5000:
+                    log.info("[ORB] Rescan starting — ₹%.0f available", _orb_capital_avail)
+                    try:
+                        await _run_orb_scan()
+                    except Exception as exc:
+                        log.error("[ORB] Rescan failed: %s", exc, exc_info=True)
+                else:
+                    log.debug("[ORB] Rescan skipped — only ₹%.0f available", _orb_capital_avail)
 
     asyncio.get_event_loop().create_task(_orb_scheduler())
     log.info("ORB scanner started — runs at %s + %s IST (capital: ₹%.0f)",
@@ -3323,17 +3340,23 @@ async def start_listener() -> None:
             except Exception as exc:
                 log.error("[PDHL] Scheduler scan failed: %s", exc, exc_info=True)
 
-            rescan_wait = (m2 - m) * 60
-            log.info("[PDHL] Rescan in %d min at %s (recycled capital)", rescan_wait // 60, PDHL_RESCAN_TIME)
-            await asyncio.sleep(rescan_wait)
-            if _pdhl_capital_avail > 5000:
-                log.info("[PDHL] Rescan starting — ₹%.0f available", _pdhl_capital_avail)
-                try:
-                    await _run_pdhl_scan()
-                except Exception as exc:
-                    log.error("[PDHL] Rescan failed: %s", exc, exc_info=True)
-            else:
-                log.info("[PDHL] Rescan skipped — only ₹%.0f available", _pdhl_capital_avail)
+            # Rescan every 5 min until market close, whenever capital is freed
+            while True:
+                await asyncio.sleep(300)
+                if not mc.is_market_open():
+                    log.info("[PDHL] Market closed, stopping rescans")
+                    break
+                if _pdhl_daily_cap_hit():
+                    log.info("[PDHL] Daily cap hit, stopping rescans")
+                    break
+                if _pdhl_capital_avail > 5000:
+                    log.info("[PDHL] Rescan starting — ₹%.0f available", _pdhl_capital_avail)
+                    try:
+                        await _run_pdhl_scan()
+                    except Exception as exc:
+                        log.error("[PDHL] Rescan failed: %s", exc, exc_info=True)
+                else:
+                    log.debug("[PDHL] Rescan skipped — only ₹%.0f available", _pdhl_capital_avail)
 
     asyncio.get_event_loop().create_task(_pdhl_scheduler())
     log.info("PDHL scanner started — runs at %s + %s IST (capital: ₹%.0f)",
