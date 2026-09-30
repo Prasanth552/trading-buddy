@@ -3264,7 +3264,7 @@ async def start_listener() -> None:
                 log.info("[ORB] Rescan skipped — only ₹%.0f available", _orb_capital_avail)
 
     asyncio.get_event_loop().create_task(_orb_scheduler())
-    log.info("ORB scanner started — runs at %s + %s IST (capital: ₹%,.0f)",
+    log.info("ORB scanner started — runs at %s + %s IST (capital: ₹%.0f)",
              ORB_RUN_TIME, ORB_RESCAN_TIME, ORB_CAPITAL)
 
     # --- PDHL Scanner: runs at 09:25 (initial) + 09:45 (rescan) ---
@@ -3336,7 +3336,7 @@ async def start_listener() -> None:
                 log.info("[PDHL] Rescan skipped — only ₹%.0f available", _pdhl_capital_avail)
 
     asyncio.get_event_loop().create_task(_pdhl_scheduler())
-    log.info("PDHL scanner started — runs at %s + %s IST (capital: ₹%,.0f)",
+    log.info("PDHL scanner started — runs at %s + %s IST (capital: ₹%.0f)",
              PDHL_RUN_TIME, PDHL_RESCAN_TIME, PDHL_CAPITAL)
 
     # --- Stock Credit Spread Runner: run once daily at 09:45 IST ---
