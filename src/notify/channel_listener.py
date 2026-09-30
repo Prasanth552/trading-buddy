@@ -1598,11 +1598,46 @@ async def _run_scanner_once():
 
 
 # ---------------------------------------------------------------------------
+# Parallel candle fetch helper
+# ---------------------------------------------------------------------------
+async def _parallel_fetch_candles(ud, sym_key_pairs, from_dt, to_dt, interval,
+                                  batch_size=20, label=""):
+    """Fetch candles for many symbols in parallel using thread pool.
+    Returns dict {symbol: candles_list}."""
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+
+    results = {}
+
+    def _fetch_one(sym, inst_key):
+        try:
+            candles = ud.historical_data(inst_key, from_dt, to_dt, interval)
+            return sym, candles
+        except Exception:
+            return sym, None
+
+    loop = asyncio.get_event_loop()
+    for i in range(0, len(sym_key_pairs), batch_size):
+        batch = sym_key_pairs[i:i + batch_size]
+        with ThreadPoolExecutor(max_workers=batch_size) as pool:
+            futures = [
+                loop.run_in_executor(pool, _fetch_one, sym, key)
+                for sym, key in batch
+            ]
+            batch_results = await asyncio.gather(*futures)
+        for sym, candles in batch_results:
+            if candles is not None:
+                results[sym] = candles
+    if label:
+        log.info("[%s] Parallel fetch done: %d/%d succeeded", label, len(results), len(sym_key_pairs))
+    return results
+
+
+# ---------------------------------------------------------------------------
 # OEH Early List — 1-min candle scan at 09:16, list only (no trades)
 # ---------------------------------------------------------------------------
 async def _run_oeh_list():
     """Scan OEH universe at 9:16 using the first 1-min candle, send list only."""
-    import time as _t
     from datetime import datetime
     from zoneinfo import ZoneInfo
     from src.broker.upstox_data import UpstoxData, load_cached_token
@@ -1641,52 +1676,33 @@ async def _run_oeh_list():
     from_dt = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=15)
     to_dt = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=16)
 
+    sym_key_pairs = [
+        (sym, eq_keys[sym]) for sym in OEH_UNIVERSE
+        if sym not in OEH_BLOCKLIST and sym in eq_keys
+    ]
+
+    all_candles = await _parallel_fetch_candles(ud, sym_key_pairs, from_dt, to_dt, "1minute",
+                                                batch_size=20, label="OEH-LIST")
+
     candidates = []
-    scanned = 0
+    scanned = len(all_candles)
 
-    for sym in OEH_UNIVERSE:
-        if sym in OEH_BLOCKLIST:
-            continue
-        inst_key = eq_keys.get(sym)
-        if not inst_key:
-            continue
-        try:
-            candles = ud.historical_data(inst_key, from_dt, to_dt, "1minute")
-            _t.sleep(0.15)
-        except Exception as exc:
-            err = str(exc)
-            if "429" in err or "rate" in err.lower():
-                _t.sleep(2)
-                try:
-                    candles = ud.historical_data(inst_key, from_dt, to_dt, "1minute")
-                except Exception:
-                    continue
-            else:
-                continue
-
-        scanned += 1
+    for sym, candles in all_candles.items():
         if not candles or len(candles) < 1:
             continue
-
         open_price = candles[0]["open"]
         if open_price <= 0:
             continue
-
         max_high = candles[0]["high"]
         if max_high > open_price + OEH_TOLERANCE:
             continue
-
         entry_price = candles[0]["close"]
         drop_pct = (open_price - entry_price) / open_price * 100
         if drop_pct < OEH_MIN_DROP_PCT:
             continue
-
         candidates.append({
-            "symbol": sym,
-            "open": open_price,
-            "close": entry_price,
-            "high": max_high,
-            "drop_pct": drop_pct,
+            "symbol": sym, "open": open_price, "close": entry_price,
+            "high": max_high, "drop_pct": drop_pct,
         })
 
     candidates.sort(key=lambda x: x["drop_pct"], reverse=True)
@@ -1715,7 +1731,6 @@ async def _run_oeh_list():
 # ---------------------------------------------------------------------------
 async def _run_oeh_scan():
     """Scan F&O universe at 9:30 AM for OEH (Open=High) stocks, buy PEs."""
-    import time as _t
     from datetime import datetime
     from zoneinfo import ZoneInfo
     from src.broker.upstox_data import UpstoxData, load_cached_token
@@ -1787,56 +1802,33 @@ async def _run_oeh_scan():
         except Exception as exc:
             log.warning("[OEH] Could not fetch NIFTY data, proceeding anyway: %s", exc)
 
+    sym_key_pairs = [
+        (sym, eq_keys[sym]) for sym in OEH_UNIVERSE
+        if sym not in OEH_BLOCKLIST and sym in eq_keys
+    ]
+
+    all_candles = await _parallel_fetch_candles(ud, sym_key_pairs, from_dt, to_dt, "5minute",
+                                                batch_size=20, label="OEH")
+
     candidates = []
-    scanned = 0
+    scanned = len(all_candles)
 
-    for sym in OEH_UNIVERSE:
-        if sym in OEH_BLOCKLIST:
-            continue
-
-        inst_key = eq_keys.get(sym)
-        if not inst_key:
-            continue
-
-        try:
-            candles = ud.historical_data(inst_key, from_dt, to_dt, "5minute")
-            _t.sleep(0.15)
-        except Exception as exc:
-            err = str(exc)
-            if "429" in err or "rate" in err.lower():
-                _t.sleep(2)
-                try:
-                    candles = ud.historical_data(inst_key, from_dt, to_dt, "5minute")
-                except Exception:
-                    continue
-            else:
-                continue
-
-        scanned += 1
+    for sym, candles in all_candles.items():
         if not candles or len(candles) < 1:
             continue
-
         open_price = candles[0]["open"]
         if open_price <= 0:
             continue
-
         max_high = candles[0]["high"]
-
         if max_high > open_price + OEH_TOLERANCE:
             continue
-
         entry_price = candles[0]["close"]
         drop_pct = (open_price - entry_price) / open_price * 100
-
         if drop_pct < OEH_MIN_DROP_PCT:
             continue
-
         candidates.append({
-            "symbol": sym,
-            "open": open_price,
-            "entry": entry_price,
-            "max_high": max_high,
-            "drop_pct": drop_pct,
+            "symbol": sym, "open": open_price, "entry": entry_price,
+            "max_high": max_high, "drop_pct": drop_pct,
         })
 
     log.info("[OEH] Scanned %d stocks, found %d OEH candidates (blocked %d)",
@@ -1906,7 +1898,6 @@ async def _run_oeh_scan():
 # ---------------------------------------------------------------------------
 async def _run_orb_scan():
     """Scan F&O universe for ORB breakouts after first 5-min candle."""
-    import time as _t
     import re
     from datetime import datetime
     from zoneinfo import ZoneInfo
@@ -1972,32 +1963,19 @@ async def _run_orb_scan():
     full_from = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=15)
     full_to = datetime.combine(today, datetime.min.time()).replace(hour=15, minute=30)
 
-    # Phase 1: Fetch 5-min candles, identify opening ranges and breakouts
+    # Phase 1: Fetch 5-min candles in parallel, identify opening ranges and breakouts
+    sym_key_pairs = [
+        (sym, eq_keys[sym]) for sym in ORB_UNIVERSE
+        if sym not in ORB_BLOCKLIST and sym in eq_keys
+    ]
+
+    all_candles = await _parallel_fetch_candles(ud, sym_key_pairs, full_from, full_to, "5minute",
+                                                batch_size=20, label="ORB")
+
     candidates = []
-    scanned = 0
+    scanned = len(all_candles)
 
-    for sym in ORB_UNIVERSE:
-        if sym in ORB_BLOCKLIST:
-            continue
-        inst_key = eq_keys.get(sym)
-        if not inst_key:
-            continue
-
-        try:
-            candles = ud.historical_data(inst_key, full_from, full_to, "5minute")
-            _t.sleep(0.12)
-        except Exception as exc:
-            err = str(exc)
-            if "429" in err or "rate" in err.lower():
-                _t.sleep(2)
-                try:
-                    candles = ud.historical_data(inst_key, full_from, full_to, "5minute")
-                except Exception:
-                    continue
-            else:
-                continue
-
-        scanned += 1
+    for sym, candles in all_candles.items():
         if not candles or len(candles) < 3:
             continue
 
@@ -2011,7 +1989,6 @@ async def _run_orb_scan():
         if range_pct < ORB_MIN_RANGE_PCT or range_pct > ORB_MAX_RANGE_PCT:
             continue
 
-        # Find first breakout in post-range candles
         for dc in candles[1:]:
             t = str(dc.get("date", dc.get("timestamp", "")))
             if dc["high"] > range_high:
@@ -2101,7 +2078,6 @@ async def _run_orb_scan():
 # ---------------------------------------------------------------------------
 async def _run_pdhl_scan():
     """Scan F&O universe for previous-day high/low breakouts."""
-    import time as _t
     import re
     from datetime import datetime, timedelta
     from zoneinfo import ZoneInfo
@@ -2171,67 +2147,52 @@ async def _run_pdhl_scan():
     today_from = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=15)
     today_to = datetime.combine(today, datetime.min.time()).replace(hour=15, minute=30)
 
-    candidates = []
-    scanned = 0
+    sym_key_pairs = [
+        (sym, eq_keys[sym]) for sym in PDHL_UNIVERSE
+        if sym not in PDHL_BLOCKLIST and sym in eq_keys
+    ]
 
-    for sym in PDHL_UNIVERSE:
-        if sym in PDHL_BLOCKLIST:
+    # Fetch prev day candles in parallel
+    prev_candles_all = await _parallel_fetch_candles(ud, sym_key_pairs, prev_from, prev_to, "day",
+                                                     batch_size=20, label="PDHL-prev")
+
+    # Build PDH/PDL map and filter to stocks that have prev day data
+    pdhl_map = {}
+    today_pairs = []
+    for sym, candles in prev_candles_all.items():
+        if not candles:
             continue
+        pdh = candles[0]["high"]
+        pdl = candles[0]["low"]
+        if pdh <= 0 or pdl <= 0 or pdh <= pdl:
+            continue
+        pdhl_map[sym] = (pdh, pdl)
         inst_key = eq_keys.get(sym)
-        if not inst_key:
-            continue
+        if inst_key:
+            today_pairs.append((sym, inst_key))
 
-        try:
-            prev_candles = ud.historical_data(inst_key, prev_from, prev_to, "day")
-            _t.sleep(0.12)
-        except Exception as exc:
-            err = str(exc)
-            if "429" in err or "rate" in err.lower():
-                _t.sleep(2)
-                try:
-                    prev_candles = ud.historical_data(inst_key, prev_from, prev_to, "day")
-                except Exception:
-                    continue
-            else:
-                continue
+    # Fetch today's candles in parallel
+    today_candles_all = await _parallel_fetch_candles(ud, today_pairs, today_from, today_to, "5minute",
+                                                      batch_size=20, label="PDHL-today")
 
-        if not prev_candles:
-            continue
+    candidates = []
+    scanned = len(today_candles_all)
 
-        pdh = prev_candles[0]["high"]
-        pdl = prev_candles[0]["low"]
-
-        try:
-            today_candles = ud.historical_data(inst_key, today_from, today_to, "5minute")
-            _t.sleep(0.12)
-        except Exception as exc:
-            err = str(exc)
-            if "429" in err or "rate" in err.lower():
-                _t.sleep(2)
-                try:
-                    today_candles = ud.historical_data(inst_key, today_from, today_to, "5minute")
-                except Exception:
-                    continue
-            else:
-                continue
-
-        scanned += 1
+    for sym, today_candles in today_candles_all.items():
         if not today_candles:
             continue
-
+        pdh, pdl = pdhl_map[sym]
         for dc in today_candles:
             if dc["close"] > pdh:
                 candidates.append({
                     "symbol": sym, "direction": "bullish",
-                    "pdh": pdh, "pdl": pdl,
-                    "breakout_price": dc["close"],
+                    "pdh": pdh, "pdl": pdl, "breakout_price": dc["close"],
                 })
                 break
             elif dc["close"] < pdl:
                 candidates.append({
                     "symbol": sym, "direction": "bearish",
-                    "pdh": pdh, "pdl": pdl,
-                    "breakout_price": dc["close"],
+                    "pdh": pdh, "pdl": pdl, "breakout_price": dc["close"],
                 })
                 break
 
@@ -2305,7 +2266,6 @@ async def _run_pdhl_scan():
 # ---------------------------------------------------------------------------
 async def _run_oel_list():
     """Scan OEL universe at 9:16 using the first 1-min candle, send list only."""
-    import time as _t
     from datetime import datetime
     from zoneinfo import ZoneInfo
     from src.broker.upstox_data import UpstoxData, load_cached_token
@@ -2344,52 +2304,33 @@ async def _run_oel_list():
     from_dt = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=15)
     to_dt = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=16)
 
+    sym_key_pairs = [
+        (sym, eq_keys[sym]) for sym in OEL_UNIVERSE
+        if sym not in OEL_BLOCKLIST and sym in eq_keys
+    ]
+
+    all_candles = await _parallel_fetch_candles(ud, sym_key_pairs, from_dt, to_dt, "1minute",
+                                                batch_size=20, label="OEL-LIST")
+
     candidates = []
-    scanned = 0
+    scanned = len(all_candles)
 
-    for sym in OEL_UNIVERSE:
-        if sym in OEL_BLOCKLIST:
-            continue
-        inst_key = eq_keys.get(sym)
-        if not inst_key:
-            continue
-        try:
-            candles = ud.historical_data(inst_key, from_dt, to_dt, "1minute")
-            _t.sleep(0.15)
-        except Exception as exc:
-            err = str(exc)
-            if "429" in err or "rate" in err.lower():
-                _t.sleep(2)
-                try:
-                    candles = ud.historical_data(inst_key, from_dt, to_dt, "1minute")
-                except Exception:
-                    continue
-            else:
-                continue
-
-        scanned += 1
+    for sym, candles in all_candles.items():
         if not candles or len(candles) < 1:
             continue
-
         open_price = candles[0]["open"]
         if open_price <= 0:
             continue
-
         min_low = candles[0]["low"]
         if min_low < open_price - OEL_TOLERANCE:
             continue
-
         entry_price = candles[0]["close"]
         rise_pct = (entry_price - open_price) / open_price * 100
         if rise_pct < OEL_MIN_RISE_PCT:
             continue
-
         candidates.append({
-            "symbol": sym,
-            "open": open_price,
-            "close": entry_price,
-            "low": min_low,
-            "rise_pct": rise_pct,
+            "symbol": sym, "open": open_price, "close": entry_price,
+            "low": min_low, "rise_pct": rise_pct,
         })
 
     candidates.sort(key=lambda x: x["rise_pct"], reverse=True)
@@ -2418,7 +2359,6 @@ async def _run_oel_list():
 # ---------------------------------------------------------------------------
 async def _run_oel_scan():
     """Scan F&O universe at 9:20 AM for OEL (Open=Low) stocks, buy CEs."""
-    import time as _t
     from datetime import datetime
     from zoneinfo import ZoneInfo
     from src.broker.upstox_data import UpstoxData, load_cached_token
@@ -2478,54 +2418,33 @@ async def _run_oel_scan():
         except Exception as exc:
             log.warning("[OEL] Could not fetch NIFTY data, proceeding anyway: %s", exc)
 
+    sym_key_pairs = [
+        (sym, eq_keys[sym]) for sym in OEL_UNIVERSE
+        if sym not in OEL_BLOCKLIST and sym in eq_keys
+    ]
+
+    all_candles = await _parallel_fetch_candles(ud, sym_key_pairs, from_dt, to_dt, "5minute",
+                                                batch_size=20, label="OEL")
+
     candidates = []
-    scanned = 0
+    scanned = len(all_candles)
 
-    for sym in OEL_UNIVERSE:
-        if sym in OEL_BLOCKLIST:
-            continue
-
-        inst_key = eq_keys.get(sym)
-        if not inst_key:
-            continue
-
-        try:
-            candles = ud.historical_data(inst_key, from_dt, to_dt, "5minute")
-            _t.sleep(0.15)
-        except Exception as exc:
-            err = str(exc)
-            if "429" in err or "rate" in err.lower():
-                _t.sleep(2)
-                try:
-                    candles = ud.historical_data(inst_key, from_dt, to_dt, "5minute")
-                except Exception:
-                    continue
-            else:
-                continue
-
-        scanned += 1
+    for sym, candles in all_candles.items():
         if not candles or len(candles) < 1:
             continue
-
         open_price = candles[0]["open"]
         if open_price <= 0:
             continue
-
         min_low = candles[0]["low"]
         if min_low < open_price - OEL_TOLERANCE:
             continue
-
         entry_price = candles[0]["close"]
         rise_pct = (entry_price - open_price) / open_price * 100
         if rise_pct < OEL_MIN_RISE_PCT:
             continue
-
         candidates.append({
-            "symbol": sym,
-            "open": open_price,
-            "entry": entry_price,
-            "min_low": min_low,
-            "rise_pct": rise_pct,
+            "symbol": sym, "open": open_price, "entry": entry_price,
+            "min_low": min_low, "rise_pct": rise_pct,
         })
 
     log.info("[OEL] Scanned %d stocks, found %d OEL candidates", scanned, len(candidates))
