@@ -1862,11 +1862,13 @@ async def _run_oeh_scan():
             summary_lines.append(f"SKIP {c['symbol']} PE — could not resolve ATM")
             continue
 
-        parsed.stop_loss = round(parsed.trigger_price * (1 - OEH_SL_PCT), 2)
+        oeh_lot = lot_sizes.get(c["symbol"], 1) * 2
+        sl_pct_price = parsed.trigger_price * (1 - OEH_SL_PCT)
+        sl_cap_price = parsed.trigger_price - (OEH_MAX_SL / oeh_lot)
+        parsed.stop_loss = round(max(sl_pct_price, sl_cap_price), 2)
         parsed.targets = []
 
-        # Check capital before executing
-        trade_capital = parsed.trigger_price * (lot_sizes.get(c["symbol"], 1) * 2)
+        trade_capital = parsed.trigger_price * oeh_lot
         if trade_capital > _oeh_capital_avail:
             skipped_capital += 1
             continue
@@ -2052,11 +2054,13 @@ async def _run_orb_scan():
         if parsed is None:
             continue
 
-        parsed.stop_loss = round(parsed.trigger_price * (1 - ORB_SL_PCT), 2)
+        orb_lot = lot_sizes.get(sym, 1) * 2
+        sl_pct_price = parsed.trigger_price * (1 - ORB_SL_PCT)
+        sl_cap_price = parsed.trigger_price - (ORB_MAX_SL_RS / orb_lot)
+        parsed.stop_loss = round(max(sl_pct_price, sl_cap_price), 2)
         parsed.targets = []
 
-        # Check capital before executing
-        trade_capital = parsed.trigger_price * (lot_sizes.get(sym, 1) * 2)
+        trade_capital = parsed.trigger_price * orb_lot
         if trade_capital > _orb_capital_avail:
             skipped_capital += 1
             continue
@@ -2256,10 +2260,13 @@ async def _run_pdhl_scan():
         if parsed is None:
             continue
 
-        parsed.stop_loss = round(parsed.trigger_price * (1 - PDHL_SL_PCT), 2)
+        lot = lot_sizes.get(sym, 1) * 2
+        sl_pct_price = parsed.trigger_price * (1 - PDHL_SL_PCT)
+        sl_cap_price = parsed.trigger_price - (PDHL_MAX_SL_RS / lot)
+        parsed.stop_loss = round(max(sl_pct_price, sl_cap_price), 2)
         parsed.targets = []
 
-        trade_capital = parsed.trigger_price * (lot_sizes.get(sym, 1) * 2)
+        trade_capital = parsed.trigger_price * lot
         if trade_capital > _pdhl_capital_avail:
             skipped_capital += 1
             continue
