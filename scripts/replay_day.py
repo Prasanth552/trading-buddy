@@ -215,14 +215,15 @@ def _exec_trades(candidates, ref_date, ud, opt_master, lot_sizes, loss_cap, prof
             "pnl": pnl, "peak": peak_pnl,
         })
 
-    # Phase 2: simulate capital-gated concurrent execution
-    # Sort by entry time so we process in order
+    # Phase 2: event-driven capital simulation with rescans
+    # Sort by entry time; when capital runs out, fast-forward to next exit and retry skipped
     prepared.sort(key=lambda x: x["entry_time"])
 
     avail = CAPITAL
-    locked = {}  # trade_idx -> margin
+    active = []  # list of (exit_time, margin, pnl)
     total_pnl = 0.0
     results = []
+    executed_syms = set()
     skipped = 0
 
     if verbose:
@@ -230,36 +231,64 @@ def _exec_trades(candidates, ref_date, ud, opt_master, lot_sizes, loss_cap, prof
               f" {'P&L':>9s} {'Peak':>8s} {'Reason':<12s} {'ETime':>5s} {'XTime':>5s}")
         print(f"  {'-'*95}")
 
-    for idx, t in enumerate(prepared):
-        if total_pnl >= profit_cap:
+    pending = list(range(len(prepared)))
+
+    while pending:
+        placed_any = False
+        still_pending = []
+
+        for idx in pending:
+            t = prepared[idx]
+
+            if total_pnl >= profit_cap or total_pnl <= -loss_cap:
+                break
+
+            # Free capital from trades that exited before this entry
+            new_active = []
+            for ext, margin, pnl in active:
+                if ext <= t["entry_time"]:
+                    avail += margin + pnl
+                else:
+                    new_active.append((ext, margin, pnl))
+            active = new_active
+
+            if t["sym"] in executed_syms:
+                continue
+
+            if t["margin"] > avail:
+                still_pending.append(idx)
+                continue
+
+            avail -= t["margin"]
+            active.append((t["exit_time"], t["margin"], t["pnl"]))
+            total_pnl += t["pnl"]
+            executed_syms.add(t["sym"])
+            placed_any = True
+
+            results.append({"sym": t["sym"], "pnl": t["pnl"], "reason": t["exit_reason"], "peak": t["peak"]})
+
+            if verbose:
+                c = t["candidate"]
+                d_tag = "▲" if c.get("direction", "bearish") == "bullish" else "▼"
+                print(f"  {d_tag} {t['sym']:<12s} {t['strike']:>6.0f}{t['opt_type']} {t['entry']:>7.1f} → {t['exit_price']:>6.1f}"
+                      f"  ₹{t['pnl']:>+8,.0f}  ₹{t['peak']:>+7,.0f} {t['exit_reason']:<12s} {t['entry_time']:>5s} {t['exit_time']:>5s}")
+
+        if not placed_any or not still_pending:
+            skipped += len(still_pending)
             break
-        if total_pnl <= -loss_cap:
+
+        # Fast-forward: free the earliest exiting trade, then retry pending
+        if active and still_pending:
+            active.sort(key=lambda x: x[0])
+            ext, margin, pnl = active.pop(0)
+            avail += margin + pnl
+            # Filter pending to only candidates with entry_time >= this exit
+            pending = [i for i in still_pending if prepared[i]["entry_time"] >= ext]
+            if not pending:
+                # Also try candidates that entered earlier but were skipped
+                pending = still_pending
+        else:
             break
-
-        # Free capital from trades that exited before this entry
-        freed_ids = []
-        for locked_idx, locked_margin in locked.items():
-            if prepared[locked_idx]["exit_time"] <= t["entry_time"]:
-                avail += locked_margin + prepared[locked_idx]["pnl"]
-                freed_ids.append(locked_idx)
-        for fid in freed_ids:
-            del locked[fid]
-
-        if t["margin"] > avail:
-            skipped += 1
-            continue
-
-        avail -= t["margin"]
-        locked[idx] = t["margin"]
-        total_pnl += t["pnl"]
-
-        results.append({"sym": t["sym"], "pnl": t["pnl"], "reason": t["exit_reason"], "peak": t["peak"]})
-
-        if verbose:
-            c = t["candidate"]
-            d_tag = "▲" if c.get("direction", "bearish") == "bullish" else "▼"
-            print(f"  {d_tag} {t['sym']:<12s} {t['strike']:>6.0f}{t['opt_type']} {t['entry']:>7.1f} → {t['exit_price']:>6.1f}"
-                  f"  ₹{t['pnl']:>+8,.0f}  ₹{t['peak']:>+7,.0f} {t['exit_reason']:<12s} {t['entry_time']:>5s} {t['exit_time']:>5s}")
 
     if results:
         day_pnl = sum(r["pnl"] for r in results)
