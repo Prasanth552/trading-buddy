@@ -1862,6 +1862,10 @@ async def _run_oeh_scan():
     skipped_capital = 0
 
     for c in candidates:
+        if _oeh_capital_avail < 5000:
+            skipped_capital += len(candidates) - candidates.index(c)
+            break
+
         parsed = _resolve_atm_strike(c["symbol"], "PE")
         if parsed is None:
             summary_lines.append(f"SKIP {c['symbol']} PE — could not resolve ATM")
@@ -2037,6 +2041,10 @@ async def _run_orb_scan():
     skipped_capital = 0
 
     for c in candidates:
+        if _orb_capital_avail < 5000:
+            skipped_capital += len(candidates) - candidates.index(c)
+            break
+
         sym = c["symbol"]
         opt_type = "CE" if c["direction"] == "bullish" else "PE"
 
@@ -2225,6 +2233,9 @@ async def _run_pdhl_scan():
     for c in candidates:
         if _pdhl_daily_cap_hit():
             log.info("[PDHL] Daily cap hit mid-scan (pnl=₹%.0f), stopping", _pdhl_daily_pnl)
+            break
+        if _pdhl_capital_avail < 5000:
+            skipped_capital += len(candidates) - candidates.index(c)
             break
 
         sym = c["symbol"]
