@@ -216,54 +216,39 @@ def _exec_trades(candidates, ref_date, ud, opt_master, lot_sizes, loss_cap, prof
         })
 
     # Phase 2: event-driven capital simulation with rescans
-    # Sort by entry time; when capital runs out, fast-forward to next exit and retry skipped
+    # Sort by entry time; when capital runs out, fast-forward to next exit and retry
     prepared.sort(key=lambda x: x["entry_time"])
 
     avail = CAPITAL
-    active = []  # list of (exit_time, margin, pnl)
+    active = []  # list of (exit_time, margin, pnl, idx)
     total_pnl = 0.0
     results = []
-    executed_syms = set()
-    skipped = 0
+    traded_indices = set()
 
     if verbose:
         print(f"\n  {'Symbol':<14s} {'Str':>6s} {'D':>1s} {'Entry':>7s} {'Exit':>7s}"
               f" {'P&L':>9s} {'Peak':>8s} {'Reason':<12s} {'ETime':>5s} {'XTime':>5s}")
         print(f"  {'-'*95}")
 
-    pending = list(range(len(prepared)))
-
-    while pending:
-        placed_any = False
+    def _try_place(candidates_idx_list, cursor_time=None):
+        nonlocal avail, total_pnl
+        placed = 0
         still_pending = []
-
-        for idx in pending:
-            t = prepared[idx]
-
+        for idx in candidates_idx_list:
+            if idx in traded_indices:
+                continue
             if total_pnl >= profit_cap or total_pnl <= -loss_cap:
                 break
-
-            # Free capital from trades that exited before this entry
-            new_active = []
-            for ext, margin, pnl in active:
-                if ext <= t["entry_time"]:
-                    avail += margin + pnl
-                else:
-                    new_active.append((ext, margin, pnl))
-            active = new_active
-
-            if t["sym"] in executed_syms:
-                continue
-
+            t = prepared[idx]
             if t["margin"] > avail:
                 still_pending.append(idx)
                 continue
 
             avail -= t["margin"]
-            active.append((t["exit_time"], t["margin"], t["pnl"]))
+            active.append((t["exit_time"], t["margin"], t["pnl"], idx))
             total_pnl += t["pnl"]
-            executed_syms.add(t["sym"])
-            placed_any = True
+            traded_indices.add(idx)
+            placed += 1
 
             results.append({"sym": t["sym"], "pnl": t["pnl"], "reason": t["exit_reason"], "peak": t["peak"]})
 
@@ -272,24 +257,39 @@ def _exec_trades(candidates, ref_date, ud, opt_master, lot_sizes, loss_cap, prof
                 d_tag = "▲" if c.get("direction", "bearish") == "bullish" else "▼"
                 print(f"  {d_tag} {t['sym']:<12s} {t['strike']:>6.0f}{t['opt_type']} {t['entry']:>7.1f} → {t['exit_price']:>6.1f}"
                       f"  ₹{t['pnl']:>+8,.0f}  ₹{t['peak']:>+7,.0f} {t['exit_reason']:<12s} {t['entry_time']:>5s} {t['exit_time']:>5s}")
+        return placed, still_pending
 
-        if not placed_any or not still_pending:
-            skipped += len(still_pending)
+    # First pass: process all candidates in order
+    all_indices = list(range(len(prepared)))
+    _, pending = _try_place(all_indices)
+
+    # Rescan loop: free earliest exit, retry pending candidates
+    while pending and active:
+        if total_pnl >= profit_cap or total_pnl <= -loss_cap:
             break
 
-        # Fast-forward: free the earliest exiting trade, then retry pending
-        if active and still_pending:
-            active.sort(key=lambda x: x[0])
-            ext, margin, pnl = active.pop(0)
-            avail += margin + pnl
-            # Filter pending to only candidates with entry_time >= this exit
-            pending = [i for i in still_pending if prepared[i]["entry_time"] >= ext]
-            if not pending:
-                # Also try candidates that entered earlier but were skipped
-                pending = still_pending
-        else:
+        # Free the earliest exiting trade
+        active.sort(key=lambda x: x[0])
+        ext, margin, pnl, tidx = active.pop(0)
+        avail += margin + pnl
+
+        # Also free any others that exit at the same time or earlier
+        new_active = []
+        for a in active:
+            if a[0] <= ext:
+                avail += a[1] + a[2]
+            else:
+                new_active.append(a)
+        active = new_active
+
+        if avail < 5000:
+            continue
+
+        placed, pending = _try_place(pending)
+        if placed == 0 and not active:
             break
 
+    skipped = len(pending)
     if results:
         day_pnl = sum(r["pnl"] for r in results)
         wins = sum(1 for r in results if r["pnl"] > 0)
