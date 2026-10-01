@@ -215,78 +215,96 @@ def _exec_trades(candidates, ref_date, ud, opt_master, lot_sizes, loss_cap, prof
             "pnl": pnl, "peak": peak_pnl,
         })
 
-    # Phase 2: event-driven capital simulation with rescans
-    # Sort by entry time; when capital runs out, fast-forward to next exit and retry
+    # Phase 2: time-ordered simulation matching live bot behavior
+    # - Capital locked at entry, freed at exit (margin + realized PnL)
+    # - Loss/profit caps checked against REALIZED PnL only (closed trades)
+    # - Pending candidates retried when capital frees up
     prepared.sort(key=lambda x: x["entry_time"])
 
     avail = CAPITAL
-    active = []  # list of (exit_time, margin, pnl, idx)
-    total_pnl = 0.0
+    active = []  # list of (exit_time, entry_time, margin, pnl, idx)
+    realized_pnl = 0.0
     results = []
     traded_indices = set()
+    cap_stopped = False
 
     if verbose:
         print(f"\n  {'Symbol':<14s} {'Str':>6s} {'D':>1s} {'Entry':>7s} {'Exit':>7s}"
               f" {'P&L':>9s} {'Peak':>8s} {'Reason':<12s} {'ETime':>5s} {'XTime':>5s}")
         print(f"  {'-'*95}")
 
-    def _try_place(candidates_idx_list, cursor_time=None):
-        nonlocal avail, total_pnl
-        placed = 0
-        still_pending = []
-        for idx in candidates_idx_list:
-            if idx in traded_indices:
-                continue
-            if total_pnl >= profit_cap or total_pnl <= -loss_cap:
-                break
-            t = prepared[idx]
-            if t["margin"] > avail:
-                still_pending.append(idx)
-                continue
+    def _print_trade(idx):
+        t = prepared[idx]
+        c = t["candidate"]
+        d_tag = "▲" if c.get("direction", "bearish") == "bullish" else "▼"
+        print(f"  {d_tag} {t['sym']:<12s} {t['strike']:>6.0f}{t['opt_type']} {t['entry']:>7.1f} → {t['exit_price']:>6.1f}"
+              f"  ₹{t['pnl']:>+8,.0f}  ₹{t['peak']:>+7,.0f} {t['exit_reason']:<12s} {t['entry_time']:>5s} {t['exit_time']:>5s}")
 
-            avail -= t["margin"]
-            active.append((t["exit_time"], t["margin"], t["pnl"], idx))
-            total_pnl += t["pnl"]
-            traded_indices.add(idx)
-            placed += 1
+    def _do_place(idx):
+        nonlocal avail
+        t = prepared[idx]
+        avail -= t["margin"]
+        active.append((t["exit_time"], t["entry_time"], t["margin"], t["pnl"], idx))
+        traded_indices.add(idx)
+        results.append({"sym": t["sym"], "pnl": t["pnl"], "reason": t["exit_reason"], "peak": t["peak"]})
+        if verbose:
+            _print_trade(idx)
 
-            results.append({"sym": t["sym"], "pnl": t["pnl"], "reason": t["exit_reason"], "peak": t["peak"]})
-
-            if verbose:
-                c = t["candidate"]
-                d_tag = "▲" if c.get("direction", "bearish") == "bullish" else "▼"
-                print(f"  {d_tag} {t['sym']:<12s} {t['strike']:>6.0f}{t['opt_type']} {t['entry']:>7.1f} → {t['exit_price']:>6.1f}"
-                      f"  ₹{t['pnl']:>+8,.0f}  ₹{t['peak']:>+7,.0f} {t['exit_reason']:<12s} {t['entry_time']:>5s} {t['exit_time']:>5s}")
-        return placed, still_pending
-
-    # First pass: process all candidates in order
+    # First pass: place all candidates we can afford (no cap check — bot doesn't know future PnL)
     all_indices = list(range(len(prepared)))
-    _, pending = _try_place(all_indices)
+    pending = []
+    for idx in all_indices:
+        if idx in traded_indices:
+            continue
+        t = prepared[idx]
+        if t["margin"] > avail:
+            pending.append(idx)
+            continue
+        _do_place(idx)
 
-    # Rescan loop: free earliest exit, retry pending candidates
+    # Rescan loop: free earliest exit, check realized PnL cap, retry pending
     while pending and active:
-        if total_pnl >= profit_cap or total_pnl <= -loss_cap:
-            break
-
-        # Free the earliest exiting trade
         active.sort(key=lambda x: x[0])
-        ext, margin, pnl, tidx = active.pop(0)
+        ext, _et, margin, pnl, tidx = active.pop(0)
         avail += margin + pnl
+        realized_pnl += pnl
 
-        # Also free any others that exit at the same time or earlier
+        # Also free others that exit at same time or earlier
         new_active = []
         for a in active:
             if a[0] <= ext:
-                avail += a[1] + a[2]
+                avail += a[2] + a[3]
+                realized_pnl += a[3]
             else:
                 new_active.append(a)
         active = new_active
 
+        # Check caps against realized PnL (matching live bot)
+        if realized_pnl >= profit_cap or realized_pnl <= -loss_cap:
+            cap_stopped = True
+            break
+
         if avail < 5000:
             continue
 
-        placed, pending = _try_place(pending)
-        if placed == 0 and not active:
+        # Only retry candidates whose entry_time <= current clock (exit time of freed trade)
+        retryable = [i for i in pending if prepared[i]["entry_time"] <= ext]
+        later = [i for i in pending if prepared[i]["entry_time"] > ext]
+
+        placed_now = 0
+        still_pending = []
+        for idx in retryable:
+            if idx in traded_indices:
+                continue
+            t = prepared[idx]
+            if t["margin"] > avail:
+                still_pending.append(idx)
+                continue
+            _do_place(idx)
+            placed_now += 1
+
+        pending = still_pending + later
+        if placed_now == 0 and not active:
             break
 
     skipped = len(pending)
@@ -294,7 +312,10 @@ def _exec_trades(candidates, ref_date, ud, opt_master, lot_sizes, loss_cap, prof
         day_pnl = sum(r["pnl"] for r in results)
         wins = sum(1 for r in results if r["pnl"] > 0)
         losses = len(results) - wins
-        print(f"  {label} TOTAL: {len(results)} trades | {wins}W/{losses}L | Skipped(cap): {skipped} | ₹{day_pnl:>+,.0f}")
+        extra = ""
+        if cap_stopped:
+            extra = f" | CAP HIT (realized ₹{realized_pnl:>+,.0f})"
+        print(f"  {label} TOTAL: {len(results)} trades | {wins}W/{losses}L | Skipped(cap): {skipped}{extra} | ₹{day_pnl:>+,.0f}")
     else:
         print(f"  {label}: No trades")
 
