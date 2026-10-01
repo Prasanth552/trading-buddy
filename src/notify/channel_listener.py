@@ -1601,20 +1601,28 @@ async def _run_scanner_once():
 # Parallel candle fetch helper
 # ---------------------------------------------------------------------------
 async def _parallel_fetch_candles(ud, sym_key_pairs, from_dt, to_dt, interval,
-                                  batch_size=20, label=""):
+                                  batch_size=10, label=""):
     """Fetch candles for many symbols in parallel using thread pool.
-    Returns dict {symbol: candles_list}."""
+    Returns dict {symbol: candles_list (non-empty only)}."""
     import asyncio
+    import time as _pt
     from concurrent.futures import ThreadPoolExecutor
 
     results = {}
+    empty_count = 0
 
     def _fetch_one(sym, inst_key):
-        try:
-            candles = ud.historical_data(inst_key, from_dt, to_dt, interval)
-            return sym, candles
-        except Exception:
-            return sym, None
+        for attempt in range(2):
+            try:
+                candles = ud.historical_data(inst_key, from_dt, to_dt, interval)
+                if candles:
+                    return sym, candles
+                if attempt == 0:
+                    _pt.sleep(0.3)
+            except Exception:
+                if attempt == 0:
+                    _pt.sleep(0.5)
+        return sym, None
 
     loop = asyncio.get_event_loop()
     for i in range(0, len(sym_key_pairs), batch_size):
@@ -1626,10 +1634,15 @@ async def _parallel_fetch_candles(ud, sym_key_pairs, from_dt, to_dt, interval,
             ]
             batch_results = await asyncio.gather(*futures)
         for sym, candles in batch_results:
-            if candles is not None:
+            if candles:
                 results[sym] = candles
+            else:
+                empty_count += 1
+        if i + batch_size < len(sym_key_pairs):
+            await asyncio.sleep(0.2)
     if label:
-        log.info("[%s] Parallel fetch done: %d/%d succeeded", label, len(results), len(sym_key_pairs))
+        log.info("[%s] Parallel fetch done: %d/%d ok, %d empty",
+                 label, len(results), len(sym_key_pairs), empty_count)
     return results
 
 
