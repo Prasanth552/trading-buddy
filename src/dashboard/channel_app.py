@@ -1280,11 +1280,11 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
     <div style="font-size:28px;font-weight:800;font-family:var(--mn)" id=fx-pnl>—</div>
     <div style="font-size:12px;color:var(--mt);font-family:var(--mn)" id=fx-sub></div>
   </div>
-  <div style="position:relative;width:100px;height:100px">
-    <canvas id=fx-ring width=100 height=100></canvas>
+  <div style="position:relative;width:80px;height:80px;flex-shrink:0">
+    <canvas id=fx-ring width=80 height=80 style="width:80px;height:80px"></canvas>
     <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center">
-      <div style="font-size:20px;font-weight:800;font-family:var(--mn)" id=fx-wr>—</div>
-      <div style="font-size:9px;text-transform:uppercase;letter-spacing:.8px;color:var(--mt)">Win Rate</div>
+      <div style="font-size:16px;font-weight:800;font-family:var(--mn)" id=fx-wr>—</div>
+      <div style="font-size:8px;text-transform:uppercase;letter-spacing:.8px;color:var(--mt)">Win Rate</div>
     </div>
   </div>
 </div>
@@ -2175,10 +2175,10 @@ const fxCap=v=>'₹'+Math.round(v).toLocaleString('en-IN');
 
 function fxRing(wr){
   const c=$('fx-ring'),ctx=c.getContext('2d'),dp=devicePixelRatio||1;
-  c.width=100*dp;c.height=100*dp;ctx.scale(dp,dp);
+  c.width=80*dp;c.height=80*dp;ctx.scale(dp,dp);
   const cs=getComputedStyle(document.documentElement);
   const gn=cs.getPropertyValue('--gn').trim(),rd=cs.getPropertyValue('--rd').trim(),bd=cs.getPropertyValue('--bd').trim();
-  const cx=50,cy=50,r=40,lw=8;
+  const cx=40,cy=40,r=30,lw=6;
   ctx.beginPath();ctx.arc(cx,cy,r,0,Math.PI*2);ctx.strokeStyle=bd;ctx.lineWidth=lw;ctx.stroke();
   if(wr>0){ctx.beginPath();ctx.arc(cx,cy,r,-Math.PI/2,-Math.PI/2+Math.PI*2*wr/100);
     ctx.strokeStyle=wr>=55?gn:rd;ctx.lineWidth=lw;ctx.lineCap='round';ctx.stroke()}
