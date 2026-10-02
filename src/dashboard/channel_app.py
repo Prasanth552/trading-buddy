@@ -766,6 +766,53 @@ def api_close_trade(trade_id: int) -> JSONResponse:
                          "exit_price": exit_price, "pnl": round(net_pnl, 2)})
 
 
+# --------------------------------------------------------------------------
+# Forex Paper Trading endpoints (proxied from forex_app)
+# --------------------------------------------------------------------------
+from src.dashboard.forex_app import (
+    api_status as _fx_status, api_trades as _fx_trades,
+    api_daily as _fx_daily, api_equity as _fx_equity,
+    api_start as _fx_start, api_stop as _fx_stop, api_reset as _fx_reset,
+)
+from src.dashboard import forex_app as _fxmod
+import asyncio as _aio
+
+
+@app.on_event("startup")
+async def _forex_init():
+    _fxmod._loop = _aio.get_event_loop()
+    _fxmod._load_state()
+
+
+@app.get("/api/forex/status")
+def fx_status():
+    return _fx_status()
+
+@app.get("/api/forex/trades")
+def fx_trades(limit: int = 50):
+    return _fx_trades(limit)
+
+@app.get("/api/forex/daily")
+def fx_daily():
+    return _fx_daily()
+
+@app.get("/api/forex/equity")
+def fx_equity():
+    return _fx_equity()
+
+@app.post("/api/forex/start")
+def fx_start():
+    return _fx_start()
+
+@app.post("/api/forex/stop")
+def fx_stop():
+    return _fx_stop()
+
+@app.post("/api/forex/reset")
+def fx_reset():
+    return _fx_reset()
+
+
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
     return _PAGE
@@ -1208,10 +1255,80 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
 
 </div>
 
+<!-- Forex Paper Trading View -->
+<div class=wrap id=forexView style="display:none">
+
+<!-- Forex ticker -->
+<div style="display:flex;align-items:center;gap:10px;background:var(--sf);border:1px solid var(--bd);border-radius:10px;padding:12px 14px;margin-bottom:12px">
+  <span style="font-size:13px;font-weight:700;color:var(--cy)">EUR/GBP</span>
+  <span style="font-size:22px;font-weight:800;font-family:var(--mn);font-variant-numeric:tabular-nums" id=fx-price>—</span>
+  <span style="font-size:10px;color:var(--mt);margin-left:auto;font-family:var(--mn)" id=fx-time></span>
+  <span style="font-size:10px;padding:3px 8px;border-radius:6px;font-weight:600" id=fx-status>OFF</span>
+</div>
+
+<!-- Forex controls -->
+<div style="display:flex;gap:8px;margin-bottom:12px">
+  <button onclick="fxCtl('start')" id=fx-bstart style="flex:1;padding:10px;border:none;border-radius:10px;font-size:13px;font-weight:600;cursor:pointer;background:var(--gn);color:#fff">▶ Start</button>
+  <button onclick="fxCtl('stop')" id=fx-bstop style="flex:1;padding:10px;border:none;border-radius:10px;font-size:13px;font-weight:600;cursor:pointer;background:var(--rd);color:#fff" disabled>⏸ Stop</button>
+  <button onclick="if(confirm('Reset all paper trades?'))fxCtl('reset')" style="flex:1;padding:10px;border:none;border-radius:10px;font-size:13px;font-weight:600;cursor:pointer;background:var(--el);color:var(--mt);border:1px solid var(--bd)">↺ Reset</button>
+</div>
+
+<!-- Forex hero -->
+<div style="display:flex;justify-content:space-between;align-items:center;padding:12px 0">
+  <div>
+    <div style="font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:var(--mt)">Net P&L</div>
+    <div style="font-size:28px;font-weight:800;font-family:var(--mn)" id=fx-pnl>—</div>
+    <div style="font-size:12px;color:var(--mt);font-family:var(--mn)" id=fx-sub></div>
+  </div>
+  <div style="position:relative;width:100px;height:100px">
+    <canvas id=fx-ring width=100 height=100></canvas>
+    <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center">
+      <div style="font-size:20px;font-weight:800;font-family:var(--mn)" id=fx-wr>—</div>
+      <div style="font-size:9px;text-transform:uppercase;letter-spacing:.8px;color:var(--mt)">Win Rate</div>
+    </div>
+  </div>
+</div>
+
+<!-- Forex chips -->
+<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:14px" id=fx-chips></div>
+
+<!-- Forex config -->
+<div class=sec>
+  <div class=sec-h>Config</div>
+  <div style="padding:0 14px 10px;font-size:12px;color:var(--mt);font-family:var(--mn)" id=fx-cfg></div>
+</div>
+
+<!-- Forex equity -->
+<div class=sec>
+  <div class=sec-h>Equity Curve</div>
+  <div style="padding:8px 14px 14px"><canvas id=fx-cv style="width:100%;height:140px"></canvas></div>
+</div>
+
+<!-- Forex today trades -->
+<div class=sec>
+  <div class=sec-h>Today's Trades <span class=badge id=fx-tc>0</span></div>
+  <div id=fx-today></div>
+</div>
+
+<!-- Forex daily -->
+<div class=sec>
+  <div class=sec-h>Daily P&L <span class=badge id=fx-dc>0</span></div>
+  <div id=fx-daily></div>
+</div>
+
+<!-- Forex all trades -->
+<div class=sec>
+  <div class=sec-h>All Trades <span class=badge id=fx-ac>0</span></div>
+  <div id=fx-all></div>
+</div>
+
+</div>
+
 <!-- Bottom nav -->
 <div class=bnav>
   <button class=active id=nav-trades onclick="switchView('trades')"><span class=nav-ico>&#9776;</span>Trades</button>
   <button id=nav-scan onclick="switchView('scan')"><span class=nav-ico>&#9881;</span>Scanner</button>
+  <button id=nav-forex onclick="switchView('forex')"><span class=nav-ico>&#128177;</span>Forex</button>
   <button id=nav-refresh onclick="_stratCacheTs=0;_scanCacheTs=0;_stocksCacheTs=0;load()"><span class=nav-ico>&#8635;</span>Refresh</button>
 </div>
 
@@ -1281,7 +1398,21 @@ function switchView(v){
   VIEW=v;
   document.querySelectorAll('.bnav button').forEach(b=>b.classList.remove('active'));
   $('nav-'+v).classList.add('active');
+  if(v==='forex'){
+    document.querySelector('.wrap:not(#stratView):not(#stocksView):not(#forexView)').style.display='none';
+    document.querySelector('.hero').style.display='none';
+    document.querySelector('.chips').style.display='none';
+    document.querySelector('.tabs').style.display='none';
+    $('stratView').style.display='none';
+    $('stocksView').style.display='none';
+    $('forexView').style.display='';
+    loadForex();
+    return;
+  }
+  $('forexView').style.display='none';
+  document.querySelector('.tabs').style.display='';
   if(v==='scan'){switchCh('ch5')}
+  else{switchCh(CH)}
 }
 
 function rHero(s){
@@ -1442,11 +1573,12 @@ function switchCh(ch){
 
   const isStrat=ch==='strat',isStocks=ch==='stocks';
   const isSpecial=isStrat||isStocks;
-  document.querySelector('.wrap:not(#stratView):not(#stocksView)').style.display=isSpecial?'none':'';
+  document.querySelector('.wrap:not(#stratView):not(#stocksView):not(#forexView)').style.display=isSpecial?'none':'';
   document.querySelector('.hero').style.display=isSpecial?'none':'';
   document.querySelector('.chips').style.display=isSpecial?'none':'';
   $('stratView').style.display=isStrat?'':'none';
   $('stocksView').style.display=isStocks?'':'none';
+  $('forexView').style.display='none';
 
   if(isStrat){loadStrat();return}
   if(isStocks){loadStocks();return}
@@ -2035,6 +2167,121 @@ document.addEventListener('visibilitychange',()=>{
 });
 
 load();startRefresh();
+
+// ── Forex Paper Trading ──────────────────────────────────────────────
+let _fxTimer=null;
+const fxInr=v=>{if(v==null)return'—';return(v>=0?'+':'')+'₹'+Math.round(v).toLocaleString('en-IN')};
+const fxCap=v=>'₹'+Math.round(v).toLocaleString('en-IN');
+
+function fxRing(wr){
+  const c=$('fx-ring'),ctx=c.getContext('2d'),dp=devicePixelRatio||1;
+  c.width=100*dp;c.height=100*dp;ctx.scale(dp,dp);
+  const cs=getComputedStyle(document.documentElement);
+  const gn=cs.getPropertyValue('--gn').trim(),rd=cs.getPropertyValue('--rd').trim(),bd=cs.getPropertyValue('--bd').trim();
+  const cx=50,cy=50,r=40,lw=8;
+  ctx.beginPath();ctx.arc(cx,cy,r,0,Math.PI*2);ctx.strokeStyle=bd;ctx.lineWidth=lw;ctx.stroke();
+  if(wr>0){ctx.beginPath();ctx.arc(cx,cy,r,-Math.PI/2,-Math.PI/2+Math.PI*2*wr/100);
+    ctx.strokeStyle=wr>=55?gn:rd;ctx.lineWidth=lw;ctx.lineCap='round';ctx.stroke()}
+}
+
+function fxEquity(data){
+  const c=$('fx-cv'),ctx=c.getContext('2d'),dp=devicePixelRatio||1;
+  c.width=c.offsetWidth*dp;c.height=140*dp;ctx.scale(dp,dp);
+  const W=c.offsetWidth,H=140;
+  if(!data.length){ctx.fillStyle=getComputedStyle(document.documentElement).getPropertyValue('--mt');
+    ctx.font='12px sans-serif';ctx.fillText('No data yet',W/2-30,H/2);return}
+  const vals=data.map(d=>d.capital);
+  const mn=Math.min(...vals)*0.998,mx=Math.max(...vals)*1.002;
+  const x=i=>i/(data.length-1)*W,y=v=>(1-(v-mn)/(mx-mn||1))*(H-24)+12;
+  const cs=getComputedStyle(document.documentElement);
+  ctx.strokeStyle=cs.getPropertyValue('--bd');ctx.lineWidth=.5;
+  for(let g=0;g<4;g++){const gy=12+(H-24)/3*g;ctx.beginPath();ctx.moveTo(0,gy);ctx.lineTo(W,gy);ctx.stroke()}
+  const last=vals[vals.length-1],ok=last>=150000;
+  ctx.beginPath();data.forEach((d,i)=>{i?ctx.lineTo(x(i),y(d.capital)):ctx.moveTo(x(i),y(d.capital))});
+  ctx.strokeStyle=ok?cs.getPropertyValue('--gn'):cs.getPropertyValue('--rd');ctx.lineWidth=2;ctx.stroke();
+  ctx.lineTo(x(data.length-1),H);ctx.lineTo(0,H);ctx.closePath();
+  ctx.fillStyle=ok?'rgba(34,197,94,.08)':'rgba(239,68,68,.08)';ctx.fill();
+  ctx.beginPath();ctx.arc(x(data.length-1),y(last),4,0,Math.PI*2);
+  ctx.fillStyle=ok?cs.getPropertyValue('--gn'):cs.getPropertyValue('--rd');ctx.fill();
+}
+
+function fxTrades(trades,el){
+  if(!trades.length){el.innerHTML='<div style="color:var(--mt);font-size:13px;padding:16px 14px;text-align:center">No trades yet</div>';return}
+  el.innerHTML=trades.map(t=>{
+    const dc=t.direction==='CALL'?'background:var(--gd);color:var(--gn)':'background:var(--rdd);color:var(--rd)';
+    const rc=t.result==='WIN'?'color:var(--gn)':t.result==='LOSS'?'color:var(--rd)':'color:var(--mt)';
+    const rv=t.result==='WIN'?'+₹'+t.pnl.toLocaleString('en-IN'):t.result==='LOSS'?'-₹'+Math.abs(t.pnl).toLocaleString('en-IN'):'DRAW';
+    return '<div style="display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--bd)">'+
+      '<span style="font-size:10px;font-weight:700;padding:3px 8px;border-radius:6px;letter-spacing:.3px;'+dc+'">'+t.direction+'</span>'+
+      '<div style="flex:1;min-width:0"><div style="font-size:12px;font-weight:600">'+t.strategy+'</div>'+
+      '<div style="font-size:10px;color:var(--mt);font-family:var(--mn)">'+t.ts+' · '+t.entry+' → '+t.expiry+'</div></div>'+
+      '<div style="font-size:13px;font-weight:700;font-family:var(--mn);'+rc+'">'+rv+'</div></div>'
+  }).join('');
+}
+
+function fxDaily(days){
+  if(!days.length){$('fx-daily').innerHTML='<div style="color:var(--mt);font-size:13px;padding:16px 14px;text-align:center">No data</div>';return}
+  const mx=Math.max(...days.map(d=>Math.abs(d.pnl)),1);
+  $('fx-daily').innerHTML=days.map(d=>{
+    const pct=Math.min(Math.abs(d.pnl)/mx*100,100);
+    const clr=d.pnl>=0?'var(--gn)':'var(--rd)';
+    return '<div style="display:flex;align-items:center;padding:8px 14px;border-bottom:1px solid var(--bd);font-size:12px">'+
+      '<span style="width:70px;font-weight:600;font-family:var(--mn)">'+d.day.slice(5)+'</span>'+
+      '<span style="flex:1;height:6px;border-radius:3px;background:var(--el);overflow:hidden;margin:0 10px">'+
+      '<span style="display:block;height:100%;border-radius:3px;width:'+pct+'%;background:'+clr+'"></span></span>'+
+      '<span style="width:80px;text-align:right;font-weight:700;font-family:var(--mn);'+(d.pnl>=0?'color:var(--gn)':'color:var(--rd)')+'">'+fxInr(d.pnl)+'</span>'+
+      '<span style="width:40px;text-align:right;color:var(--mt);font-family:var(--mn)">'+d.win_rate+'%</span></div>'
+  }).join('');
+}
+
+async function fxCtl(action){await fetch('/api/forex/'+action,{method:'POST'});loadForex()}
+
+async function loadForex(){
+  try{
+    const [s,trades,daily,equity]=await Promise.all([
+      fetch('/api/forex/status').then(r=>r.json()),
+      fetch('/api/forex/trades?limit=50').then(r=>r.json()),
+      fetch('/api/forex/daily').then(r=>r.json()),
+      fetch('/api/forex/equity').then(r=>r.json()),
+    ]);
+    $('fx-status').textContent=s.running?'LIVE':'OFF';
+    $('fx-status').style.background=s.running?'var(--gd)':'var(--rdd)';
+    $('fx-status').style.color=s.running?'var(--gn)':'var(--rd)';
+    if(s.last_price)$('fx-price').textContent=s.last_price.toFixed(5);
+    if(s.last_poll)$('fx-time').textContent=s.last_poll;
+    $('fx-bstart').disabled=s.running;
+    $('fx-bstop').disabled=!s.running;
+    const net=s.net_pnl;
+    $('fx-pnl').textContent=fxInr(net);
+    $('fx-pnl').style.color=net>=0?'var(--gn)':'var(--rd)';
+    $('fx-sub').textContent=fxCap(s.capital)+' capital · '+s.net_pct+'%';
+    $('fx-wr').textContent=s.win_rate+'%';
+    $('fx-wr').style.color=s.win_rate>=55?'var(--gn)':'var(--rd)';
+    fxRing(s.win_rate);
+    $('fx-chips').innerHTML=[
+      ['Today',fxInr(s.today_pnl),s.today_pnl>=0?'var(--gn)':'var(--rd)'],
+      ['Trades',''+s.total_trades,'var(--tx)'],
+      ['Today',''+s.today_trades,'var(--tx)'],
+      ['Green',s.green_days+'/'+s.total_days,'var(--gn)'],
+      ['Max DD',fxCap(s.max_drawdown),'var(--rd)'],
+      ['Streaks',s.max_win_streak+'W/'+s.max_loss_streak+'L','var(--tx)'],
+    ].map(([l,v,c])=>'<div style="background:var(--sf);border:1px solid var(--bd);border-radius:10px;padding:10px;text-align:center">'+
+      '<div style="font-size:16px;font-weight:700;font-family:var(--mn);color:'+c+'">'+v+'</div>'+
+      '<div style="font-size:9px;text-transform:uppercase;letter-spacing:.6px;color:var(--mt);margin-top:2px">'+l+'</div></div>').join('');
+    $('fx-cfg').textContent='₹'+s.trade_amount.toLocaleString('en-IN')+'/trade · '+s.payout_pct*100+'% payout · ₹'+(s.daily_loss_cap/1000)+'K loss cap · '+s.pair
+      +(s.started_at?' · started '+s.started_at:'');
+    const today=s.now?.split(' ')[0];
+    const todayT=trades.filter(t=>t.day===today);
+    $('fx-tc').textContent=todayT.length;
+    fxTrades(todayT,$('fx-today'));
+    $('fx-dc').textContent=daily.length;
+    fxDaily(daily);
+    fxEquity(equity);
+    $('fx-ac').textContent=s.total_trades;
+    fxTrades(trades,$('fx-all'));
+  }catch(e){console.error('forex load',e)}
+}
+
 </script></body></html>"""
 
 
