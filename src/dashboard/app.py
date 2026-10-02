@@ -476,7 +476,7 @@ _PAGE = """<!doctype html><html lang=en><head><meta charset=utf-8>
  .close-btn{padding:6px 12px;border:0;border-radius:8px;background:#3a2a13;color:#ffb454;
    font-size:13px;font-weight:600;cursor:pointer;flex:none;width:auto}
 </style></head><body>
-<h1>📈 Trading Buddy</h1><div class=sub id=sub>loading… · <a href="/chart" style="color:#4c9aff">📊 Chart Analyzer</a> · <a href="/channel" style="color:#4c9aff">📡 Channel Trades</a></div>
+<h1>📈 Trading Buddy</h1><div class=sub id=sub>loading… · <a href="/chart" style="color:#4c9aff">📊 Chart Analyzer</a> · <a href="/channel" style="color:#4c9aff">📡 Channel Trades</a> · <a href="/forex" style="color:#06b6d4">💱 Forex Paper</a></div>
 <div class=grid id=cards></div>
 <div class=btns><button class=pause onclick="ctl('pause')">⏸ Pause</button>
  <button class=resume onclick="ctl('resume')">▶ Resume</button></div>
@@ -792,3 +792,70 @@ def channel_page(_: None = Depends(require_auth)) -> str:
     ).replace(
         "fetch('/api/ltp'", "fetch('/api/channel/ltp'"
     )
+
+
+# --------------------------------------------------------------------------
+# Forex Paper Trading Dashboard (mounted on same port)
+# --------------------------------------------------------------------------
+from src.dashboard.forex_app import (
+    _PAGE as _FOREX_PAGE, app as _forex_app,
+    _state as _forex_state, _load_state as _forex_load, _save_state as _forex_save,
+    _poll_loop as _forex_poll, _stop_event as _forex_stop, _ws_broadcast as _forex_ws_broadcast,
+    api_status as _fx_status, api_trades as _fx_trades, api_daily as _fx_daily,
+    api_equity as _fx_equity, api_start as _fx_start, api_stop as _fx_stop, api_reset as _fx_reset,
+)
+import asyncio as _asyncio
+from src.dashboard import forex_app as _fxmod
+
+
+@app.on_event("startup")
+async def _forex_startup():
+    _fxmod._loop = _asyncio.get_event_loop()
+    _fxmod._load_state()
+
+
+@app.get("/forex", response_class=HTMLResponse)
+def forex_page(_: None = Depends(require_auth)) -> str:
+    return _FOREX_PAGE.replace(
+        "location.host+'/ws'", "location.host+'/forex/ws'"
+    )
+
+
+@app.get("/api/forex/status")
+def forex_status(_: None = Depends(require_auth)) -> JSONResponse:
+    return _fx_status()
+
+@app.get("/api/forex/trades")
+def forex_trades(limit: int = 50, _: None = Depends(require_auth)) -> JSONResponse:
+    return _fx_trades(limit)
+
+@app.get("/api/forex/daily")
+def forex_daily(_: None = Depends(require_auth)) -> JSONResponse:
+    return _fx_daily()
+
+@app.get("/api/forex/equity")
+def forex_equity(_: None = Depends(require_auth)) -> JSONResponse:
+    return _fx_equity()
+
+@app.post("/api/forex/start")
+def forex_start(_: None = Depends(require_auth)) -> JSONResponse:
+    return _fx_start()
+
+@app.post("/api/forex/stop")
+def forex_stop(_: None = Depends(require_auth)) -> JSONResponse:
+    return _fx_stop()
+
+@app.post("/api/forex/reset")
+def forex_reset(_: None = Depends(require_auth)) -> JSONResponse:
+    return _fx_reset()
+
+
+@app.websocket("/forex/ws")
+async def forex_ws(websocket: WebSocket):
+    await websocket.accept()
+    _fxmod._ws_clients.add(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        _fxmod._ws_clients.discard(websocket)
