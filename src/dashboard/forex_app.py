@@ -472,9 +472,17 @@ def api_reset() -> JSONResponse:
 
 @app.on_event("startup")
 async def on_startup():
-    global _loop
+    global _loop, _poll_thread
     _loop = asyncio.get_event_loop()
     _load_state()
+    # Auto-start the bot
+    if not _state["running"]:
+        _state["running"] = True
+        _state["started_at"] = _state["started_at"] or datetime.now(IST).strftime("%Y-%m-%d %H:%M")
+        _stop_event.clear()
+        _poll_thread = threading.Thread(target=_poll_loop, daemon=True)
+        _poll_thread.start()
+        _save_state()
 
 
 # ── HTML Dashboard ──────────────────────────────────────────────────────────

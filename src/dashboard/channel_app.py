@@ -782,6 +782,15 @@ import asyncio as _aio
 async def _forex_init():
     _fxmod._loop = _aio.get_event_loop()
     _fxmod._load_state()
+    # Auto-start forex bot
+    if not _fxmod._state["running"]:
+        import threading
+        _fxmod._state["running"] = True
+        _fxmod._state["started_at"] = _fxmod._state["started_at"] or __import__('datetime').datetime.now(_fxmod.IST).strftime("%Y-%m-%d %H:%M")
+        _fxmod._stop_event.clear()
+        t = threading.Thread(target=_fxmod._poll_loop, daemon=True)
+        t.start()
+        _fxmod._save_state()
 
 
 @app.get("/api/forex/status")
@@ -1268,8 +1277,7 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
 
 <!-- Forex controls -->
 <div style="display:flex;gap:8px;margin-bottom:12px">
-  <button onclick="fxCtl('start')" id=fx-bstart style="flex:1;padding:10px;border:none;border-radius:10px;font-size:13px;font-weight:600;cursor:pointer;background:var(--gn);color:#fff">▶ Start</button>
-  <button onclick="fxCtl('stop')" id=fx-bstop style="flex:1;padding:10px;border:none;border-radius:10px;font-size:13px;font-weight:600;cursor:pointer;background:var(--rd);color:#fff" disabled>⏸ Stop</button>
+  <button onclick="if(confirm('Stop the forex bot?'))fxCtl('stop')" id=fx-bstop style="flex:1;padding:10px;border:none;border-radius:10px;font-size:13px;font-weight:600;cursor:pointer;background:var(--rd);color:#fff">⏸ Stop Bot</button>
   <button onclick="if(confirm('Reset all paper trades?'))fxCtl('reset')" style="flex:1;padding:10px;border:none;border-radius:10px;font-size:13px;font-weight:600;cursor:pointer;background:var(--el);color:var(--mt);border:1px solid var(--bd)">↺ Reset</button>
 </div>
 
@@ -2249,7 +2257,6 @@ async function loadForex(){
     $('fx-status').style.color=s.running?'var(--gn)':'var(--rd)';
     if(s.last_price)$('fx-price').textContent=s.last_price.toFixed(5);
     if(s.last_poll)$('fx-time').textContent=s.last_poll;
-    $('fx-bstart').disabled=s.running;
     $('fx-bstop').disabled=!s.running;
     const net=s.net_pnl;
     $('fx-pnl').textContent=fxInr(net);
