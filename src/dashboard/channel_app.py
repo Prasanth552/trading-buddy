@@ -1268,12 +1268,7 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
 <div class=wrap id=forexView style="display:none">
 
 <!-- Forex ticker -->
-<div style="display:flex;align-items:center;gap:10px;background:var(--sf);border:1px solid var(--bd);border-radius:10px;padding:12px 14px;margin-bottom:12px">
-  <span style="font-size:13px;font-weight:700;color:var(--cy)">EUR/GBP</span>
-  <span style="font-size:22px;font-weight:800;font-family:var(--mn);font-variant-numeric:tabular-nums" id=fx-price>—</span>
-  <span style="font-size:10px;color:var(--mt);margin-left:auto;font-family:var(--mn)" id=fx-time></span>
-  <span style="font-size:10px;padding:3px 8px;border-radius:6px;font-weight:600" id=fx-status>OFF</span>
-</div>
+<div id=fx-tickers style="display:flex;flex-direction:column;gap:6px;margin-bottom:12px"></div>
 
 <!-- Forex controls -->
 <div style="display:flex;gap:8px;margin-bottom:12px">
@@ -2219,9 +2214,10 @@ function fxTrades(trades,el){
     const dc=t.direction==='CALL'?'background:var(--gd);color:var(--gn)':'background:var(--rdd);color:var(--rd)';
     const rc=t.result==='WIN'?'color:var(--gn)':t.result==='LOSS'?'color:var(--rd)':'color:var(--mt)';
     const rv=t.result==='WIN'?'+₹'+t.pnl.toLocaleString('en-IN'):t.result==='LOSS'?'-₹'+Math.abs(t.pnl).toLocaleString('en-IN'):'DRAW';
+    const pair=t.pair||'EUR/GBP';
     return '<div style="display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--bd)">'+
       '<span style="font-size:10px;font-weight:700;padding:3px 8px;border-radius:6px;letter-spacing:.3px;'+dc+'">'+t.direction+'</span>'+
-      '<div style="flex:1;min-width:0"><div style="font-size:12px;font-weight:600">'+t.strategy+'</div>'+
+      '<div style="flex:1;min-width:0"><div style="font-size:12px;font-weight:600">'+pair+' · '+t.strategy+'</div>'+
       '<div style="font-size:10px;color:var(--mt);font-family:var(--mn)">'+t.ts+' · '+t.entry+' → '+t.expiry+'</div></div>'+
       '<div style="font-size:13px;font-weight:700;font-family:var(--mn);'+rc+'">'+rv+'</div></div>'
   }).join('');
@@ -2252,11 +2248,18 @@ async function loadForex(){
       fetch('/api/forex/daily').then(r=>r.json()),
       fetch('/api/forex/equity').then(r=>r.json()),
     ]);
-    $('fx-status').textContent=s.running?'LIVE':'OFF';
-    $('fx-status').style.background=s.running?'var(--gd)':'var(--rdd)';
-    $('fx-status').style.color=s.running?'var(--gn)':'var(--rd)';
-    if(s.last_price)$('fx-price').textContent=s.last_price.toFixed(5);
-    if(s.last_poll)$('fx-time').textContent=s.last_poll;
+    // Tickers for each pair
+    const pairs=s.pairs||['EUR/GBP'];
+    const prices=s.last_price||{};
+    const stCls=s.running?'background:var(--gd);color:var(--gn)':'background:var(--rdd);color:var(--rd)';
+    $('fx-tickers').innerHTML=pairs.map(p=>{
+      const pr=prices[p];
+      return '<div style="display:flex;align-items:center;gap:10px;background:var(--sf);border:1px solid var(--bd);border-radius:10px;padding:10px 14px">'+
+        '<span style="font-size:13px;font-weight:700;color:var(--cy)">'+p+'</span>'+
+        '<span style="font-size:18px;font-weight:800;font-family:var(--mn);font-variant-numeric:tabular-nums">'+(pr?pr.toFixed(5):'—')+'</span>'+
+        '<span style="font-size:10px;color:var(--mt);margin-left:auto;font-family:var(--mn)">'+(s.last_poll||'')+'</span>'+
+        '<span style="font-size:10px;padding:3px 8px;border-radius:6px;font-weight:600;'+stCls+'">'+(s.running?'LIVE':'OFF')+'</span></div>'
+    }).join('');
     $('fx-bstop').disabled=!s.running;
     const net=s.net_pnl;
     $('fx-pnl').textContent=fxInr(net);
@@ -2275,7 +2278,7 @@ async function loadForex(){
     ].map(([l,v,c])=>'<div style="background:var(--sf);border:1px solid var(--bd);border-radius:10px;padding:10px;text-align:center">'+
       '<div style="font-size:16px;font-weight:700;font-family:var(--mn);color:'+c+'">'+v+'</div>'+
       '<div style="font-size:9px;text-transform:uppercase;letter-spacing:.6px;color:var(--mt);margin-top:2px">'+l+'</div></div>').join('');
-    $('fx-cfg').textContent='₹'+s.trade_amount.toLocaleString('en-IN')+'/trade · '+s.payout_pct*100+'% payout · ₹'+(s.daily_loss_cap/1000)+'K loss cap · '+s.pair
+    $('fx-cfg').textContent='₹'+s.trade_amount.toLocaleString('en-IN')+'/trade · '+s.payout_pct*100+'% payout · ₹'+(s.daily_loss_cap/1000)+'K loss cap · '+(s.pairs||[]).join(' + ')
       +(s.started_at?' · started '+s.started_at:'');
     const today=s.now?.split(' ')[0];
     const todayT=trades.filter(t=>t.day===today);

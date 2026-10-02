@@ -34,7 +34,7 @@ PAYOUT_PCT = 0.80
 MAX_DAILY_LOSS = 20_000
 MIN_CAPITAL = 20_000
 BEST_HOURS_UTC = {0, 1, 2, 3, 4, 19, 21, 22, 23}
-PAIR = "EURGBP=X"
+PAIRS = {"EUR/GBP": "EURGBP=X", "CAD/CHF": "CADCHF=X"}
 POLL_INTERVAL = 60  # seconds
 
 DATA_FILE = Path(__file__).parent.parent.parent / "data" / "forex_paper_trades.json"
@@ -45,10 +45,10 @@ _state: dict[str, Any] = {
     "peak_capital": STARTING_CAPITAL,
     "trades": [],
     "daily_pnl": {},
-    "candles": [],
+    "candles": {},  # {pair: [candles]}
     "running": False,
     "last_poll": None,
-    "last_price": None,
+    "last_price": {},  # {pair: price}
     "today_trades": 0,
     "today_pnl": 0.0,
     "total_wins": 0,
@@ -232,6 +232,7 @@ def _execute_paper_trade(signal: dict) -> dict | None:
         "id": len(_state["trades"]) + 1,
         "ts": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S"),
         "day": day_key,
+        "pair": signal.get("pair", "EUR/GBP"),
         "strategy": signal["strategy"],
         "direction": direction,
         "entry": round(entry, 5),
@@ -246,10 +247,10 @@ def _execute_paper_trade(signal: dict) -> dict | None:
 
 # ── Price polling ───────────────────────────────────────────────────────────
 
-def _fetch_candles() -> list[dict]:
-    """Fetch recent 1-min EUR/GBP candles via yfinance."""
+def _fetch_candles(symbol: str) -> list[dict]:
+    """Fetch recent 1-min candles via yfinance."""
     import yfinance as yf
-    ticker = yf.Ticker(PAIR)
+    ticker = yf.Ticker(symbol)
     df = ticker.history(period="1d", interval="1m")
     if df.empty:
         df = ticker.history(period="2d", interval="1m")
@@ -269,44 +270,46 @@ def _poll_loop() -> None:
     """Background thread: poll prices, check signals, execute paper trades."""
     global _loop
     while not _stop_event.is_set():
-        try:
-            candles = _fetch_candles()
-            if not candles:
-                _state["errors"].append(f"{datetime.now(IST):%H:%M} no candles")
-                _stop_event.wait(POLL_INTERVAL)
-                continue
+        for pair_name, symbol in PAIRS.items():
+            try:
+                candles = _fetch_candles(symbol)
+                if not candles:
+                    _state["errors"].append(f"{datetime.now(IST):%H:%M} {pair_name} no candles")
+                    continue
 
-            _state["candles"] = candles
-            _state["last_price"] = candles[-1]["close"]
-            _state["last_poll"] = datetime.now(IST).strftime("%H:%M:%S")
+                _state["candles"][pair_name] = candles
+                _state["last_price"][pair_name] = candles[-1]["close"]
+                _state["last_poll"] = datetime.now(IST).strftime("%H:%M:%S")
 
-            # Check if we already traded this candle
-            last_time = candles[-2]["time"] if len(candles) > 1 else 0
-            already = any(t.get("_candle_time") == last_time for t in _state["trades"][-20:])
-            if not already and len(candles) >= 30:
-                signals = _check_signal_on_latest(candles)
-                for sig in signals:
-                    trade = _execute_paper_trade(sig)
-                    if trade:
-                        trade["_candle_time"] = last_time
-                        _save_state()
-                        if _loop:
-                            asyncio.run_coroutine_threadsafe(_ws_broadcast({
-                                "type": "trade", "trade": trade,
-                            }), _loop)
+                # Check if we already traded this candle for this pair
+                last_time = candles[-2]["time"] if len(candles) > 1 else 0
+                candle_key = f"{pair_name}_{last_time}"
+                already = any(t.get("_candle_key") == candle_key for t in _state["trades"][-50:])
+                if not already and len(candles) >= 30:
+                    signals = _check_signal_on_latest(candles)
+                    for sig in signals:
+                        sig["pair"] = pair_name
+                        trade = _execute_paper_trade(sig)
+                        if trade:
+                            trade["_candle_key"] = candle_key
+                            _save_state()
+                            if _loop:
+                                asyncio.run_coroutine_threadsafe(_ws_broadcast({
+                                    "type": "trade", "trade": trade,
+                                }), _loop)
 
-            # Broadcast price update
-            if _loop:
-                asyncio.run_coroutine_threadsafe(_ws_broadcast({
-                    "type": "tick",
-                    "price": _state["last_price"],
-                    "time": _state["last_poll"],
-                    "capital": _state["capital"],
-                }), _loop)
+            except Exception as exc:
+                err = f"{datetime.now(IST):%H:%M} {pair_name}: {exc}"
+                _state["errors"] = (_state["errors"] + [err])[-20:]
 
-        except Exception as exc:
-            err = f"{datetime.now(IST):%H:%M} {exc}"
-            _state["errors"] = (_state["errors"] + [err])[-20:]
+        # Broadcast price update
+        if _loop:
+            asyncio.run_coroutine_threadsafe(_ws_broadcast({
+                "type": "tick",
+                "prices": _state["last_price"],
+                "time": _state["last_poll"],
+                "capital": _state["capital"],
+            }), _loop)
 
         _stop_event.wait(POLL_INTERVAL)
 
@@ -378,7 +381,7 @@ def api_status() -> JSONResponse:
         "trade_amount": TRADE_AMOUNT,
         "payout_pct": PAYOUT_PCT,
         "daily_loss_cap": MAX_DAILY_LOSS,
-        "pair": "EUR/GBP",
+        "pairs": list(PAIRS.keys()),
         "started_at": _state["started_at"],
         "errors": _state["errors"][-5:],
         "now": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
@@ -387,10 +390,9 @@ def api_status() -> JSONResponse:
 
 @app.get("/api/forex/trades")
 def api_trades(limit: int = 50) -> JSONResponse:
-    trades = [t for t in _state["trades"] if not t.get("_candle_time") or True]
     clean = []
-    for t in trades:
-        c = {k: v for k, v in t.items() if k != "_candle_time"}
+    for t in _state["trades"]:
+        c = {k: v for k, v in t.items() if not k.startswith("_")}
         clean.append(c)
     return JSONResponse(clean[-limit:][::-1])
 
