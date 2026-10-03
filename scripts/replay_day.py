@@ -63,8 +63,20 @@ def _cached_fetch(ud, inst_key, from_dt, to_dt, interval):
     return candles
 
 
+def _calc_charges(entry_price, exit_price, qty):
+    buy_turnover = entry_price * qty
+    sell_turnover = exit_price * qty
+    total_turnover = buy_turnover + sell_turnover
+    brokerage = 20.0 * 2
+    stt = sell_turnover * 0.001
+    exchange_txn = total_turnover * 0.000495
+    sebi = total_turnover * 0.000001
+    stamp_duty = buy_turnover * 0.00003
+    gst = (brokerage + exchange_txn) * 0.18
+    return round(brokerage + stt + exchange_txn + sebi + stamp_duty + gst, 2)
+
+
 def _simulate_trade(ocandles, entry_idx, entry, lot, sl_price):
-    charges_est = (BROKERAGE_PER_ORDER * 2) + (entry * lot * STT_PCT)
     peak_net = 0.0
     stepped_floor = 0
 
@@ -73,26 +85,32 @@ def _simulate_trade(ocandles, entry_idx, entry, lot, sl_price):
         t = str(cn.get("date", cn.get("timestamp", "")))
         t_short = t[11:16] if len(t) > 16 else t[:5]
 
-        net_close = (close - entry) * lot - charges_est
-        net_high = (high - entry) * lot - charges_est
+        ltp = close
+        gross_pnl = (ltp - entry) * lot
+        charges = _calc_charges(entry, ltp, lot)
+        net_pnl = gross_pnl - charges
+
+        gross_high = (high - entry) * lot
+        charges_high = _calc_charges(entry, high, lot)
+        net_high = gross_high - charges_high
         if net_high > peak_net:
             peak_net = net_high
 
         if low <= sl_price:
-            ep = round(sl_price * (1 - SLIPPAGE_PCT), 2)
-            return ep, "SL", t_short, peak_net
+            return sl_price, "SL", t_short, peak_net
+
+        if net_pnl <= -MAX_SL_RS:
+            return ltp, "MAX_LOSS", t_short, peak_net
 
         for fl in FLOOR_STEPS:
             if peak_net >= fl:
                 stepped_floor = fl
-        if stepped_floor > 0 and net_close <= stepped_floor:
-            ep = round(close * (1 - SLIPPAGE_PCT), 2)
-            return ep, f"FLOOR ₹{stepped_floor}", t_short, peak_net
+        if stepped_floor > 0 and net_pnl <= stepped_floor:
+            return ltp, f"FLOOR ₹{stepped_floor}", t_short, peak_net
 
     last = ocandles[-1]
     t = str(last.get("date", last.get("timestamp", "")))
-    ep = round(last["close"] * (1 - SLIPPAGE_PCT), 2)
-    return ep, "EOD", t[11:16] if len(t) > 16 else t, peak_net
+    return last["close"], "EOD", t[11:16] if len(t) > 16 else t, peak_net
 
 
 def _prev_trading_day(d):
@@ -193,7 +211,7 @@ def _exec_trades(candidates, ref_date, ud, opt_master, lot_sizes, loss_cap, prof
         if raw_entry <= 0 or raw_entry < MIN_PREMIUM:
             continue
 
-        entry = round(raw_entry * (1 + SLIPPAGE_PCT), 2)
+        entry = raw_entry
 
         sl_pct_price = entry * (1 - SL_PCT)
         sl_cap_price = entry - (MAX_SL_RS / lot)
@@ -204,7 +222,7 @@ def _exec_trades(candidates, ref_date, ud, opt_master, lot_sizes, loss_cap, prof
         )
 
         pnl = (exit_price - entry) * lot
-        charges = (BROKERAGE_PER_ORDER * 2) + (exit_price * lot * STT_PCT)
+        charges = _calc_charges(entry, exit_price, lot)
         pnl -= charges
 
         prepared.append({

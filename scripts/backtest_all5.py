@@ -139,8 +139,21 @@ def _candle_time(cn):
 # ---------------------------------------------------------------------------
 # Trade simulation
 # ---------------------------------------------------------------------------
+def _calc_charges(entry_price, exit_price, qty):
+    """Match live calc_charges exactly."""
+    buy_turnover = entry_price * qty
+    sell_turnover = exit_price * qty
+    total_turnover = buy_turnover + sell_turnover
+    brokerage = 20.0 * 2
+    stt = sell_turnover * 0.001
+    exchange_txn = total_turnover * 0.000495
+    sebi = total_turnover * 0.000001
+    stamp_duty = buy_turnover * 0.00003
+    gst = (brokerage + exchange_txn) * 0.18
+    return round(brokerage + stt + exchange_txn + sebi + stamp_duty + gst, 2)
+
+
 def _simulate_trade(ocandles, entry_idx, entry, lot, sl_price, hard_exit_time=None):
-    charges_est = (BROKERAGE_PER_ORDER * 2) + (entry * lot * STT_PCT)
     peak_net = 0.0
     stepped_floor = 0
 
@@ -149,30 +162,40 @@ def _simulate_trade(ocandles, entry_idx, entry, lot, sl_price, hard_exit_time=No
         t_short = _candle_time(cn)
 
         if hard_exit_time and t_short >= hard_exit_time:
-            ep = round(close * (1 - SLIPPAGE_PCT), 2)
-            return ep, "TIME", t_short, peak_net
+            return close, "TIME", t_short, peak_net
 
-        gross_close = (close - entry) * lot
-        net_close = gross_close - charges_est
+        # --- simulate live monitor checks using CLOSE as "LTP" ---
+        ltp = close
+        gross_pnl = (ltp - entry) * lot
+        charges = _calc_charges(entry, ltp, lot)
+        net_pnl = gross_pnl - charges
+
+        # also check high for peak tracking (price reached high before close)
         gross_high = (high - entry) * lot
-        net_high = gross_high - charges_est
+        charges_high = _calc_charges(entry, high, lot)
+        net_high = gross_high - charges_high
         if net_high > peak_net:
             peak_net = net_high
 
+        # 1) SL check: ltp <= stop_price → exit at ltp
+        #    We use LOW to detect SL hit (price touched SL within candle),
+        #    exit at sl_price (live bot catches it near SL level)
         if low <= sl_price:
-            ep = round(sl_price * (1 - SLIPPAGE_PCT), 2)
-            return ep, "SL", t_short, peak_net
+            return sl_price, "SL", t_short, peak_net
 
+        # 2) Max loss cap per trade: net_pnl <= -MAX_SL_RS → exit at ltp
+        if net_pnl <= -MAX_SL_RS:
+            return ltp, "MAX_LOSS", t_short, peak_net
+
+        # 3) Floor check: peak-based floor, net_pnl exit
         for fl in FLOOR_STEPS:
             if peak_net >= fl:
                 stepped_floor = fl
-        if stepped_floor > 0 and net_close <= stepped_floor:
-            ep = round(close * (1 - SLIPPAGE_PCT), 2)
-            return ep, f"FLOOR ₹{stepped_floor}", t_short, peak_net
+        if stepped_floor > 0 and net_pnl <= stepped_floor:
+            return ltp, f"FLOOR ₹{stepped_floor}", t_short, peak_net
 
     last = ocandles[-1]
-    ep = round(last["close"] * (1 - SLIPPAGE_PCT), 2)
-    return ep, "EOD", _candle_time(last), peak_net
+    return last["close"], "EOD", _candle_time(last), peak_net
 
 
 # ---------------------------------------------------------------------------
@@ -287,7 +310,7 @@ def _exec_trades(candidates, ref_date, ud, opt_master, lot_sizes,
         if raw_entry <= 0 or raw_entry < MIN_PREMIUM:
             continue
 
-        entry = round(raw_entry * (1 + SLIPPAGE_PCT), 2)
+        entry = raw_entry
         sl_pct_price = entry * (1 - SL_PCT)
         sl_cap_price = entry - (MAX_SL_RS / lot)
         sl_price = round(max(sl_pct_price, sl_cap_price), 2)
@@ -297,7 +320,7 @@ def _exec_trades(candidates, ref_date, ud, opt_master, lot_sizes,
         )
 
         pnl = (exit_price - entry) * lot
-        charges = (BROKERAGE_PER_ORDER * 2) + (exit_price * lot * STT_PCT)
+        charges = _calc_charges(entry, exit_price, lot)
         pnl -= charges
 
         prepared.append({
