@@ -351,7 +351,7 @@ def _exec_trades(candidates, ref_date, ud, opt_master, lot_sizes,
         avail -= t["margin"]
         active.append((t["exit_time"], t["entry_time"], t["margin"], t["pnl"], idx))
         traded_indices.add(idx)
-        results.append({"sym": t["sym"], "pnl": t["pnl"], "reason": t["exit_reason"], "peak": t["peak"]})
+        results.append({"sym": t["sym"], "pnl": t["pnl"], "reason": t["exit_reason"], "peak": t["peak"], "date": ref_date})
         if verbose:
             c = t["candidate"]
             d_tag = "▲" if c.get("direction", "bearish") == "bullish" else "▼"
@@ -777,6 +777,7 @@ def main():
     parser.add_argument("--date", help="Single date YYYY-MM-DD")
     parser.add_argument("--month", help="Full month YYYY-MM")
     parser.add_argument("--quiet", action="store_true", help="Only show summaries")
+    parser.add_argument("--report", type=str, help="Write report to file")
     args = parser.parse_args()
 
     if args.date:
@@ -815,22 +816,59 @@ def main():
     print(f"{'='*90}")
 
     grand = 0
+    summary_lines = []
     for label in ["OEH", "ORB", "PDHL", "GAP", "AFT"]:
         r = all_results[label]
         if not r:
-            print(f"  {label:8s}: No trades")
-            continue
-        pnl = sum(x["pnl"] for x in r)
-        wins = sum(1 for x in r if x["pnl"] > 0)
-        losses = len(r) - wins
-        wr = wins / len(r) * 100
-        avg_w = sum(x["pnl"] for x in r if x["pnl"] > 0) / max(wins, 1)
-        avg_l = sum(x["pnl"] for x in r if x["pnl"] <= 0) / max(losses, 1)
-        grand += pnl
-        print(f"  {label:8s}: {len(r):4d} trades | {wins}W/{losses}L ({wr:.0f}%) | "
-              f"Avg W: ₹{avg_w:>+,.0f} | Avg L: ₹{avg_l:>+,.0f} | ₹{pnl:>+,.0f}")
-    print(f"  {'TOTAL':8s}: ₹{grand:>+,.0f}")
+            line = f"  {label:8s}: No trades"
+        else:
+            pnl = sum(x["pnl"] for x in r)
+            wins = sum(1 for x in r if x["pnl"] > 0)
+            losses = len(r) - wins
+            wr = wins / len(r) * 100
+            avg_w = sum(x["pnl"] for x in r if x["pnl"] > 0) / max(wins, 1)
+            avg_l = sum(x["pnl"] for x in r if x["pnl"] <= 0) / max(losses, 1)
+            grand += pnl
+            line = (f"  {label:8s}: {len(r):4d} trades | {wins}W/{losses}L ({wr:.0f}%) | "
+                    f"Avg W: ₹{avg_w:>+,.0f} | Avg L: ₹{avg_l:>+,.0f} | ₹{pnl:>+,.0f}")
+        print(line)
+        summary_lines.append(line)
+    total_line = f"  {'TOTAL':8s}: ₹{grand:>+,.0f}"
+    print(total_line)
+    summary_lines.append(total_line)
     print()
+
+    if args.report:
+        report_path = Path(args.report)
+        with open(report_path, "w") as f:
+            f.write(f"BACKTEST REPORT — {len(dates)} trading days\n")
+            f.write(f"Capital: ₹{CAPITAL:,}/strategy | Lots: {LOT_MULT} | SL: {SL_PCT*100:.0f}% / ₹{MAX_SL_RS:,}\n")
+            f.write(f"{'='*90}\n\n")
+            for ref_date in dates:
+                day_res = {}
+                for label in ["OEH", "ORB", "PDHL", "GAP", "AFT"]:
+                    day_trades = [x for x in all_results[label] if x.get("date") == ref_date]
+                    day_res[label] = day_trades
+                f.write(f"  {ref_date} ({ref_date.strftime('%A')})\n")
+                f.write(f"  {'-'*60}\n")
+                day_grand = 0
+                for label in ["OEH", "ORB", "PDHL", "GAP", "AFT"]:
+                    r = day_res[label]
+                    if not r:
+                        f.write(f"  {label:5s}: --\n")
+                        continue
+                    pnl = sum(x["pnl"] for x in r)
+                    w = sum(1 for x in r if x["pnl"] > 0)
+                    l = len(r) - w
+                    day_grand += pnl
+                    f.write(f"  {label:5s}: {len(r):3d}t {w}W/{l}L ₹{pnl:>+,.0f}\n")
+                f.write(f"  {'DAY':5s}: ₹{day_grand:>+,.0f}\n\n")
+            f.write(f"{'='*90}\n")
+            f.write(f"OVERALL SUMMARY\n")
+            f.write(f"{'='*90}\n")
+            for line in summary_lines:
+                f.write(line + "\n")
+        print(f"  Report saved to: {report_path}")
 
 
 if __name__ == "__main__":
