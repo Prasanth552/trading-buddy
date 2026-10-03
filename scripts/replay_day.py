@@ -26,7 +26,7 @@ STT_PCT = 0.000625
 # OEH specific
 OEH_TOLERANCE = 0.05
 OEH_MIN_DROP_PCT = 0.3
-OEH_LOSS_CAP = 5000
+OEH_LOSS_CAP = 999999
 OEH_PROFIT_CAP = 999999
 
 # ORB specific
@@ -64,35 +64,35 @@ def _cached_fetch(ud, inst_key, from_dt, to_dt, interval):
 
 
 def _simulate_trade(ocandles, entry_idx, entry, lot, sl_price):
-    peak_pnl = 0.0
-    active_floor = 0
+    charges_est = (BROKERAGE_PER_ORDER * 2) + (entry * lot * STT_PCT)
+    peak_net = 0.0
+    stepped_floor = 0
 
     for i, cn in enumerate(ocandles[entry_idx + 1:], start=entry_idx + 1):
         high, low, close = cn["high"], cn["low"], cn["close"]
         t = str(cn.get("date", cn.get("timestamp", "")))
         t_short = t[11:16] if len(t) > 16 else t[:5]
 
-        pnl_high = (high - entry) * lot
-        pnl_close = (close - entry) * lot
+        net_close = (close - entry) * lot - charges_est
+        net_high = (high - entry) * lot - charges_est
+        if net_high > peak_net:
+            peak_net = net_high
 
-        if pnl_high > peak_pnl:
-            peak_pnl = pnl_high
-
-        if low <= sl_price:
-            ep = round(sl_price * (1 - SLIPPAGE_PCT), 2)
-            return ep, "SL", t_short, peak_pnl
+        if close <= sl_price:
+            ep = round(close * (1 - SLIPPAGE_PCT), 2)
+            return ep, "SL", t_short, peak_net
 
         for fl in FLOOR_STEPS:
-            if pnl_close >= fl and fl > active_floor:
-                active_floor = fl
-        if active_floor > 0 and pnl_close <= active_floor:
+            if peak_net >= fl:
+                stepped_floor = fl
+        if stepped_floor > 0 and net_close <= stepped_floor:
             ep = round(close * (1 - SLIPPAGE_PCT), 2)
-            return ep, f"FLOOR ₹{active_floor}", t_short, peak_pnl
+            return ep, f"FLOOR ₹{stepped_floor}", t_short, peak_net
 
     last = ocandles[-1]
     t = str(last.get("date", last.get("timestamp", "")))
     ep = round(last["close"] * (1 - SLIPPAGE_PCT), 2)
-    return ep, "EOD", t[11:16] if len(t) > 16 else t, peak_pnl
+    return ep, "EOD", t[11:16] if len(t) > 16 else t, peak_net
 
 
 def _prev_trading_day(d):
