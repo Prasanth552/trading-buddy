@@ -775,12 +775,23 @@ def _trading_days(year, month):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--date", help="Single date YYYY-MM-DD")
+    parser.add_argument("--from-date", help="Start date YYYY-MM-DD (use with --to-date)")
+    parser.add_argument("--to-date", help="End date YYYY-MM-DD (use with --from-date)")
     parser.add_argument("--month", help="Full month YYYY-MM")
     parser.add_argument("--quiet", action="store_true", help="Only show summaries")
     parser.add_argument("--report", type=str, help="Write report to file")
     args = parser.parse_args()
 
-    if args.date:
+    if args.from_date and args.to_date:
+        start = date.fromisoformat(args.from_date)
+        end = date.fromisoformat(args.to_date)
+        dates = []
+        d = start
+        while d <= end:
+            if d.weekday() < 5:
+                dates.append(d)
+            d += timedelta(days=1)
+    elif args.date:
         dates = [date.fromisoformat(args.date)]
     elif args.month:
         y, m = args.month.split("-")
