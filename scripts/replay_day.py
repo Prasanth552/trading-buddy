@@ -78,8 +78,8 @@ def _simulate_trade(ocandles, entry_idx, entry, lot, sl_price):
         if net_high > peak_net:
             peak_net = net_high
 
-        if close <= sl_price:
-            ep = round(close * (1 - SLIPPAGE_PCT), 2)
+        if low <= sl_price:
+            ep = round(sl_price * (1 - SLIPPAGE_PCT), 2)
             return ep, "SL", t_short, peak_net
 
         for fl in FLOOR_STEPS:
