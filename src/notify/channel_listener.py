@@ -161,6 +161,42 @@ PDHL_BLOCKLIST = {"GODREJCP", "GRASIM"}
 PDHL_LOSS_CAP = 10000
 PDHL_PROFIT_CAP = 25000
 
+# ---------------------------------------------------------------------------
+# ORF (Opening Range Fade) — failed ORB breakouts that snap back
+# ---------------------------------------------------------------------------
+ORF_ENABLED = True
+ORF_RUN_TIME = "09:30"           # IST — needs 10+ candles post-open
+ORF_CAPITAL = 150000
+ORF_SL_PCT = 0.30
+ORF_MAX_SL_RS = 5000
+ORF_FLOOR_LEVELS = [500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5500, 6000]
+ORF_MIN_RANGE_PCT = 0.3
+ORF_MAX_RANGE_PCT = 3.0
+ORF_BREAKOUT_MIN_PCT = 0.3       # minimum breakout beyond range to qualify
+ORF_FADE_WINDOW = 10             # 1-min candles to detect failed breakout
+ORF_TIME_EXIT = "11:30"          # hard exit time
+ORF_LOSS_CAP = 10000
+ORF_PROFIT_CAP = 25000
+ORF_BLOCKLIST = {"GODREJCP", "GRASIM"}
+
+# ---------------------------------------------------------------------------
+# AFT (Afternoon Momentum) — lunchtime range breakout with volume
+# ---------------------------------------------------------------------------
+AFT_ENABLED = True
+AFT_RUN_TIME = "13:35"           # IST — just after lunch range ends
+AFT_CAPITAL = 150000
+AFT_SL_PCT = 0.30
+AFT_MAX_SL_RS = 5000
+AFT_FLOOR_LEVELS = [500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5500, 6000]
+AFT_RANGE_START = "11:30"
+AFT_RANGE_END = "13:30"
+AFT_VOL_MULT = 2.0
+AFT_HARD_EXIT = "15:10"
+AFT_MIN_RANGE_PCT = 0.3
+AFT_LOSS_CAP = 10000
+AFT_PROFIT_CAP = 25000
+AFT_BLOCKLIST = {"GODREJCP", "GRASIM"}
+
 # OEH capital tracking — in-memory, resets on restart
 _oeh_capital_avail: float = 0.0
 _oeh_capital_locked: dict[int, float] = {}
@@ -264,6 +300,112 @@ def _pdhl_daily_cap_hit() -> bool:
         return True
     return False
 
+# ORF capital tracking
+_orf_capital_avail: float = 0.0
+_orf_capital_locked: dict[int, float] = {}
+
+def _orf_init_capital():
+    global _orf_capital_avail
+    _orf_capital_avail = ORF_CAPITAL
+    _orf_capital_locked.clear()
+
+def _orf_allocate(trade_id: int, amount: float) -> bool:
+    global _orf_capital_avail
+    if amount > _orf_capital_avail:
+        return False
+    _orf_capital_avail -= amount
+    _orf_capital_locked[trade_id] = amount
+    return True
+
+def _orf_free(trade_id: int, pnl: float):
+    global _orf_capital_avail
+    locked = _orf_capital_locked.pop(trade_id, 0)
+    if locked > 0:
+        _orf_capital_avail += locked + pnl
+        log.info("[ORF-CAP] Freed ₹%.0f + PnL ₹%.0f = avail ₹%.0f (locked: %d)",
+                 locked, pnl, _orf_capital_avail, len(_orf_capital_locked))
+
+_orf_daily_pnl: float = 0.0
+_orf_daily_date: str = ""
+
+def _orf_record_pnl(pnl: float):
+    global _orf_daily_pnl, _orf_daily_date
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    today = datetime.now(ZoneInfo(config.TIMEZONE)).strftime("%Y-%m-%d")
+    if _orf_daily_date != today:
+        _orf_daily_pnl = 0.0
+        _orf_daily_date = today
+    _orf_daily_pnl += pnl
+
+def _orf_daily_cap_hit() -> bool:
+    global _orf_daily_pnl, _orf_daily_date
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    today = datetime.now(ZoneInfo(config.TIMEZONE)).strftime("%Y-%m-%d")
+    if _orf_daily_date != today:
+        _orf_daily_pnl = 0.0
+        _orf_daily_date = today
+        return False
+    if _orf_daily_pnl >= ORF_PROFIT_CAP:
+        return True
+    if _orf_daily_pnl <= -ORF_LOSS_CAP:
+        return True
+    return False
+
+# AFT capital tracking
+_aft_capital_avail: float = 0.0
+_aft_capital_locked: dict[int, float] = {}
+
+def _aft_init_capital():
+    global _aft_capital_avail
+    _aft_capital_avail = AFT_CAPITAL
+    _aft_capital_locked.clear()
+
+def _aft_allocate(trade_id: int, amount: float) -> bool:
+    global _aft_capital_avail
+    if amount > _aft_capital_avail:
+        return False
+    _aft_capital_avail -= amount
+    _aft_capital_locked[trade_id] = amount
+    return True
+
+def _aft_free(trade_id: int, pnl: float):
+    global _aft_capital_avail
+    locked = _aft_capital_locked.pop(trade_id, 0)
+    if locked > 0:
+        _aft_capital_avail += locked + pnl
+        log.info("[AFT-CAP] Freed ₹%.0f + PnL ₹%.0f = avail ₹%.0f (locked: %d)",
+                 locked, pnl, _aft_capital_avail, len(_aft_capital_locked))
+
+_aft_daily_pnl: float = 0.0
+_aft_daily_date: str = ""
+
+def _aft_record_pnl(pnl: float):
+    global _aft_daily_pnl, _aft_daily_date
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    today = datetime.now(ZoneInfo(config.TIMEZONE)).strftime("%Y-%m-%d")
+    if _aft_daily_date != today:
+        _aft_daily_pnl = 0.0
+        _aft_daily_date = today
+    _aft_daily_pnl += pnl
+
+def _aft_daily_cap_hit() -> bool:
+    global _aft_daily_pnl, _aft_daily_date
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    today = datetime.now(ZoneInfo(config.TIMEZONE)).strftime("%Y-%m-%d")
+    if _aft_daily_date != today:
+        _aft_daily_pnl = 0.0
+        _aft_daily_date = today
+        return False
+    if _aft_daily_pnl >= AFT_PROFIT_CAP:
+        return True
+    if _aft_daily_pnl <= -AFT_LOSS_CAP:
+        return True
+    return False
+
 # ---------------------------------------------------------------------------
 # EOD Report — sent to Telegram at market close
 # ---------------------------------------------------------------------------
@@ -272,6 +414,8 @@ OEH_UNIVERSE: list[str] = []  # populated at scan time from F&O master
 OEL_UNIVERSE: list[str] = []
 ORB_UNIVERSE: list[str] = []
 PDHL_UNIVERSE: list[str] = []
+ORF_UNIVERSE: list[str] = []
+AFT_UNIVERSE: list[str] = []
 
 
 def _build_fno_universe(master: list[dict]) -> list[str]:
@@ -656,7 +800,7 @@ def execute_signal(sig: ParsedSignal, *, channel: str = "ch1", max_lots: int | N
     lot_size = config.LOT_SIZES.get(lot_key, master_lot_size)
 
     is_index = lot_key in ("NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY")
-    if channel in ("oeh", "oel", "orb", "pdhl") and max_lots is not None:
+    if channel in ("oeh", "oel", "orb", "pdhl", "orf", "aft") and max_lots is not None:
         lots = max_lots
     elif channel in ("ch2", "ch2f", "ch3"):
         lots = 3 if is_index else 2
@@ -664,7 +808,7 @@ def execute_signal(sig: ParsedSignal, *, channel: str = "ch1", max_lots: int | N
         lots = 2
     else:
         lots = 1
-    if max_lots is not None and channel not in ("oeh", "oel", "orb", "pdhl"):
+    if max_lots is not None and channel not in ("oeh", "oel", "orb", "pdhl", "orf", "aft"):
         lots = min(lots, max_lots)
     qty = lots * lot_size
 
@@ -797,6 +941,12 @@ def _close_trade_by_id(trade_id: int, exit_price: float, reason: str) -> None:
             if row["id"] in _pdhl_capital_locked:
                 _pdhl_free(row["id"], net_pnl)
                 _pdhl_record_pnl(net_pnl)
+            if row["id"] in _orf_capital_locked:
+                _orf_free(row["id"], net_pnl)
+                _orf_record_pnl(net_pnl)
+            if row["id"] in _aft_capital_locked:
+                _aft_free(row["id"], net_pnl)
+                _aft_record_pnl(net_pnl)
 
             log.info(
                 "AUTO-CLOSE (id=%d) %s: entry=%.2f exit=%.2f gross=%.2f "
@@ -1053,7 +1203,7 @@ def _loss_cap_for_channel(ch: str) -> float:
         return CH2F_MAX_LOSS
     if ch == "ch2":
         return CH2_MAX_LOSS
-    if ch in ("oeh", "oel", "orb", "pdhl"):
+    if ch in ("oeh", "oel", "orb", "pdhl", "orf", "aft"):
         return OEH_MAX_SL
     return MAX_LOSS_PER_TRADE
 
@@ -1061,13 +1211,12 @@ def _loss_cap_for_channel(ch: str) -> float:
 def _floor_for_channel(ch: str) -> float:
     if ch == "ch2f":
         return CH2F_PROFIT_FLOOR
-    if ch in ("oeh", "oel", "orb", "pdhl"):
+    if ch in ("oeh", "oel", "orb", "pdhl", "orf", "aft"):
         return OEH_FLOOR_STEP
     return PROFIT_TARGET
 
 
 def _floor_levels_for_channel(ch: str) -> list[float] | None:
-    """Return progressive floor levels for OEH/OEL/ORB, None for fixed-step channels."""
     if ch == "oeh":
         return OEH_FLOOR_LEVELS
     if ch == "oel":
@@ -1076,6 +1225,10 @@ def _floor_levels_for_channel(ch: str) -> list[float] | None:
         return ORB_FLOOR_LEVELS
     if ch == "pdhl":
         return PDHL_FLOOR_LEVELS
+    if ch == "orf":
+        return ORF_FLOOR_LEVELS
+    if ch == "aft":
+        return AFT_FLOOR_LEVELS
     return None
 
 
@@ -2286,6 +2439,420 @@ async def _run_pdhl_scan():
 
 
 # ---------------------------------------------------------------------------
+# ORF (Opening Range Fade) scanner
+# ---------------------------------------------------------------------------
+async def _run_orf_scan():
+    """Scan F&O universe for failed ORB breakouts that fade back into range."""
+    import re
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from src.broker.upstox_data import UpstoxData, load_cached_token, _expiry_to_date
+
+    IST = ZoneInfo(config.TIMEZONE)
+    if not mc.is_market_open():
+        log.info("[ORF] Market not open, skipping scan")
+        return
+    log.info("[ORF] Scanner starting...")
+
+    if _orf_daily_cap_hit():
+        log.info("[ORF] Daily cap already hit (pnl=₹%.0f), skipping scan", _orf_daily_pnl)
+        _notify(f"*[ORF] Scan skipped* — daily cap hit (PnL: ₹{_orf_daily_pnl:,.0f})")
+        return
+
+    token = load_cached_token()
+    if not token:
+        log.error("[ORF] No valid Upstox token")
+        _notify("*[ORF] Scanner SKIPPED* — No Upstox token.")
+        return
+
+    _notify("*[ORF] Scanning for Opening Range Fade signals...*")
+
+    try:
+        ud = UpstoxData(access_token=token)
+        master = ud._load_master()
+    except Exception as exc:
+        log.error("[ORF] Failed to load instrument master: %s", exc)
+        _notify(f"[ORF] Scanner error: {exc}")
+        return
+
+    eq_keys = {}
+    for inst in master:
+        if inst.get("segment") == "NSE_EQ":
+            tsym = (inst.get("trading_symbol") or "").upper()
+            if tsym:
+                eq_keys[tsym] = inst.get("instrument_key")
+
+    global ORF_UNIVERSE
+    if not ORF_UNIVERSE:
+        ORF_UNIVERSE = _build_fno_universe(master)
+        log.info("[ORF] Built F&O universe: %d stocks", len(ORF_UNIVERSE))
+
+    lot_sizes = {}
+    for inst in master:
+        if inst.get("segment") != "NSE_FO":
+            continue
+        itype = (inst.get("instrument_type") or "").upper()
+        if itype not in ("CE", "PE"):
+            continue
+        tsym = (inst.get("trading_symbol") or "").upper()
+        base = re.match(r'^([A-Z&]+)', tsym)
+        if not base:
+            continue
+        ls = int(inst.get("lot_size") or 0)
+        if ls > 0:
+            lot_sizes[base.group(1)] = ls
+
+    today = datetime.now(IST).date()
+    full_from = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=15)
+    full_to = datetime.combine(today, datetime.min.time()).replace(hour=15, minute=30)
+
+    sym_key_pairs = [
+        (sym, eq_keys[sym]) for sym in ORF_UNIVERSE
+        if sym not in ORF_BLOCKLIST and sym in eq_keys
+    ]
+
+    all_candles = await _parallel_fetch_candles(ud, sym_key_pairs, full_from, full_to, "1minute",
+                                                batch_size=20, label="ORF")
+
+    candidates = []
+    scanned = len(all_candles)
+
+    for sym, candles in all_candles.items():
+        if not candles or len(candles) < 20:
+            continue
+
+        def _ct(c):
+            ts = str(c.get("date", c.get("timestamp", "")))
+            if "T" in ts:
+                return ts.split("T")[1][:5]
+            return ts[-8:-3] if len(ts) >= 8 else ts
+
+        or_candles = [c for c in candles if _ct(c) < "09:20"]
+        if len(or_candles) < 3:
+            continue
+
+        rh = max(c["high"] for c in or_candles)
+        rl = min(c["low"] for c in or_candles)
+        ro = or_candles[0]["open"]
+        if ro <= 0 or rh <= rl:
+            continue
+        rp = (rh - rl) / ro * 100
+        if rp < ORF_MIN_RANGE_PCT or rp > ORF_MAX_RANGE_PCT:
+            continue
+
+        breakout_min_up = rh * (1 + ORF_BREAKOUT_MIN_PCT / 100)
+        breakout_min_dn = rl * (1 - ORF_BREAKOUT_MIN_PCT / 100)
+
+        post_or = [c for c in candles if "09:20" <= _ct(c) <= "10:30"]
+
+        breakout_type = None
+        breakout_idx = None
+
+        for i, cn in enumerate(post_or):
+            if cn["high"] >= breakout_min_up:
+                breakout_type = "up"
+                breakout_idx = i
+                break
+            elif cn["low"] <= breakout_min_dn:
+                breakout_type = "down"
+                breakout_idx = i
+                break
+
+        if breakout_type is None:
+            continue
+
+        for j in range(breakout_idx + 1, min(breakout_idx + 1 + ORF_FADE_WINDOW, len(post_or))):
+            cn = post_or[j]
+            if breakout_type == "up" and cn["close"] < rh:
+                candidates.append({
+                    "symbol": sym, "direction": "bearish", "opt_type": "PE",
+                    "breakout_price": cn["close"], "range_pct": rp,
+                })
+                break
+            elif breakout_type == "down" and cn["close"] > rl:
+                candidates.append({
+                    "symbol": sym, "direction": "bullish", "opt_type": "CE",
+                    "breakout_price": cn["close"], "range_pct": rp,
+                })
+                break
+
+    log.info("[ORF] Scanned %d stocks, found %d fade signals", scanned, len(candidates))
+
+    if not candidates:
+        _notify(f"[ORF] No fade signals found (scanned {scanned} stocks)")
+        return
+
+    candidates.sort(key=lambda x: x["range_pct"], reverse=True)
+
+    if _orf_capital_avail <= 0 and not _orf_capital_locked:
+        _orf_init_capital()
+
+    summary_lines = []
+    executed = 0
+    skipped_capital = 0
+
+    for c in candidates:
+        if _orf_daily_cap_hit():
+            log.info("[ORF] Daily cap hit mid-scan (pnl=₹%.0f), stopping", _orf_daily_pnl)
+            break
+        if _orf_capital_avail < 5000:
+            skipped_capital += len(candidates) - candidates.index(c)
+            break
+
+        sym = c["symbol"]
+        opt_type = c["opt_type"]
+
+        parsed = _resolve_atm_strike(sym, opt_type)
+        if parsed is None:
+            continue
+
+        lot = lot_sizes.get(sym, 1) * 2
+        sl_pct_price = parsed.trigger_price * (1 - ORF_SL_PCT)
+        sl_cap_price = parsed.trigger_price - (ORF_MAX_SL_RS / lot)
+        parsed.stop_loss = round(max(sl_pct_price, sl_cap_price), 2)
+        parsed.targets = []
+
+        trade_capital = parsed.trigger_price * lot
+        if trade_capital > _orf_capital_avail:
+            skipped_capital += 1
+            continue
+
+        result = execute_signal(parsed, channel="orf", max_lots=2)
+        if result["placed"]:
+            actual_capital = result["entry"] * result["qty"]
+            _orf_allocate(result["trade_id"], actual_capital)
+            executed += 1
+            dir_tag = "▼" if c["direction"] == "bearish" else "▲"
+            summary_lines.append(
+                f"BUY {result['symbol']} x{result['qty']} @ {result['entry']:.2f} "
+                f"({dir_tag} fade rng={c['range_pct']:.1f}%) [cap: ₹{_orf_capital_avail:,.0f}]"
+            )
+            _notify(
+                f"*[ORF] Trade #{executed}*\n"
+                f"{dir_tag} {result['symbol']} x{result['qty']}\n"
+                f"Entry: {result['entry']} | SL: {result['sl']} | Floors: ₹500→₹1000→₹1500...\n"
+                f"Capital: ₹{actual_capital:,.0f} locked | ₹{_orf_capital_avail:,.0f} available"
+            )
+        else:
+            summary_lines.append(f"FAIL {sym} {opt_type} — {result['reason']}")
+
+    log.info("[ORF] Scan done: %d executed, %d skipped (capital)", executed, skipped_capital)
+    _notify(
+        f"*[ORF] Scan complete*\n"
+        f"Executed: {executed} | Skipped (capital): {skipped_capital}\n"
+        f"Fade signals: {len(candidates)} | Capital remaining: ₹{_orf_capital_avail:,.0f}\n"
+        f"Daily PnL: ₹{_orf_daily_pnl:,.0f}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# AFT (Afternoon Momentum) scanner
+# ---------------------------------------------------------------------------
+async def _run_aft_scan():
+    """Scan F&O universe for lunchtime range breakouts with volume confirmation."""
+    import re
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from src.broker.upstox_data import UpstoxData, load_cached_token, _expiry_to_date
+
+    IST = ZoneInfo(config.TIMEZONE)
+    if not mc.is_market_open():
+        log.info("[AFT] Market not open, skipping scan")
+        return
+    log.info("[AFT] Scanner starting...")
+
+    if _aft_daily_cap_hit():
+        log.info("[AFT] Daily cap already hit (pnl=₹%.0f), skipping scan", _aft_daily_pnl)
+        _notify(f"*[AFT] Scan skipped* — daily cap hit (PnL: ₹{_aft_daily_pnl:,.0f})")
+        return
+
+    token = load_cached_token()
+    if not token:
+        log.error("[AFT] No valid Upstox token")
+        _notify("*[AFT] Scanner SKIPPED* — No Upstox token.")
+        return
+
+    _notify("*[AFT] Scanning for Afternoon Momentum breakouts...*")
+
+    try:
+        ud = UpstoxData(access_token=token)
+        master = ud._load_master()
+    except Exception as exc:
+        log.error("[AFT] Failed to load instrument master: %s", exc)
+        _notify(f"[AFT] Scanner error: {exc}")
+        return
+
+    eq_keys = {}
+    for inst in master:
+        if inst.get("segment") == "NSE_EQ":
+            tsym = (inst.get("trading_symbol") or "").upper()
+            if tsym:
+                eq_keys[tsym] = inst.get("instrument_key")
+
+    global AFT_UNIVERSE
+    if not AFT_UNIVERSE:
+        AFT_UNIVERSE = _build_fno_universe(master)
+        log.info("[AFT] Built F&O universe: %d stocks", len(AFT_UNIVERSE))
+
+    lot_sizes = {}
+    for inst in master:
+        if inst.get("segment") != "NSE_FO":
+            continue
+        itype = (inst.get("instrument_type") or "").upper()
+        if itype not in ("CE", "PE"):
+            continue
+        tsym = (inst.get("trading_symbol") or "").upper()
+        base = re.match(r'^([A-Z&]+)', tsym)
+        if not base:
+            continue
+        ls = int(inst.get("lot_size") or 0)
+        if ls > 0:
+            lot_sizes[base.group(1)] = ls
+
+    today = datetime.now(IST).date()
+    full_from = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=15)
+    full_to = datetime.combine(today, datetime.min.time()).replace(hour=15, minute=30)
+
+    sym_key_pairs = [
+        (sym, eq_keys[sym]) for sym in AFT_UNIVERSE
+        if sym not in AFT_BLOCKLIST and sym in eq_keys
+    ]
+
+    all_candles = await _parallel_fetch_candles(ud, sym_key_pairs, full_from, full_to, "5minute",
+                                                batch_size=20, label="AFT")
+
+    candidates = []
+    scanned = len(all_candles)
+
+    for sym, candles in all_candles.items():
+        if not candles or len(candles) < 30:
+            continue
+
+        def _ct(c):
+            ts = str(c.get("date", c.get("timestamp", "")))
+            if "T" in ts:
+                return ts.split("T")[1][:5]
+            return ts[-8:-3] if len(ts) >= 8 else ts
+
+        lunch_high = 0
+        lunch_low = float("inf")
+        lunch_vols = []
+
+        for cn in candles:
+            t = _ct(cn)
+            if t < AFT_RANGE_START:
+                continue
+            if t >= AFT_RANGE_END:
+                break
+            lunch_high = max(lunch_high, cn["high"])
+            lunch_low = min(lunch_low, cn["low"])
+            lunch_vols.append(cn.get("volume", 0) or 1)
+
+        if not lunch_vols or lunch_high <= lunch_low:
+            continue
+
+        lunch_range_pct = (lunch_high - lunch_low) / lunch_low * 100
+        if lunch_range_pct < AFT_MIN_RANGE_PCT:
+            continue
+
+        avg_lunch_vol = sum(lunch_vols) / len(lunch_vols)
+        if avg_lunch_vol <= 0:
+            avg_lunch_vol = 1
+
+        for cn in candles:
+            t = _ct(cn)
+            if t < AFT_RANGE_END:
+                continue
+            if t >= AFT_HARD_EXIT:
+                break
+            vol = cn.get("volume", 0) or 0
+
+            if cn["close"] > lunch_high and vol >= avg_lunch_vol * AFT_VOL_MULT:
+                candidates.append({
+                    "symbol": sym, "direction": "bullish", "opt_type": "CE",
+                    "breakout_price": cn["close"],
+                    "vol_ratio": vol / avg_lunch_vol,
+                })
+                break
+            elif cn["close"] < lunch_low and vol >= avg_lunch_vol * AFT_VOL_MULT:
+                candidates.append({
+                    "symbol": sym, "direction": "bearish", "opt_type": "PE",
+                    "breakout_price": cn["close"],
+                    "vol_ratio": vol / avg_lunch_vol,
+                })
+                break
+
+    log.info("[AFT] Scanned %d stocks, found %d momentum signals", scanned, len(candidates))
+
+    if not candidates:
+        _notify(f"[AFT] No momentum signals found (scanned {scanned} stocks)")
+        return
+
+    candidates.sort(key=lambda x: x.get("vol_ratio", 0), reverse=True)
+
+    if _aft_capital_avail <= 0 and not _aft_capital_locked:
+        _aft_init_capital()
+
+    summary_lines = []
+    executed = 0
+    skipped_capital = 0
+
+    for c in candidates:
+        if _aft_daily_cap_hit():
+            log.info("[AFT] Daily cap hit mid-scan (pnl=₹%.0f), stopping", _aft_daily_pnl)
+            break
+        if _aft_capital_avail < 5000:
+            skipped_capital += len(candidates) - candidates.index(c)
+            break
+
+        sym = c["symbol"]
+        opt_type = c["opt_type"]
+
+        parsed = _resolve_atm_strike(sym, opt_type)
+        if parsed is None:
+            continue
+
+        lot = lot_sizes.get(sym, 1) * 2
+        sl_pct_price = parsed.trigger_price * (1 - AFT_SL_PCT)
+        sl_cap_price = parsed.trigger_price - (AFT_MAX_SL_RS / lot)
+        parsed.stop_loss = round(max(sl_pct_price, sl_cap_price), 2)
+        parsed.targets = []
+
+        trade_capital = parsed.trigger_price * lot
+        if trade_capital > _aft_capital_avail:
+            skipped_capital += 1
+            continue
+
+        result = execute_signal(parsed, channel="aft", max_lots=2)
+        if result["placed"]:
+            actual_capital = result["entry"] * result["qty"]
+            _aft_allocate(result["trade_id"], actual_capital)
+            executed += 1
+            dir_tag = "▲" if c["direction"] == "bullish" else "▼"
+            summary_lines.append(
+                f"BUY {result['symbol']} x{result['qty']} @ {result['entry']:.2f} "
+                f"({dir_tag} vol={c['vol_ratio']:.1f}x) [cap: ₹{_aft_capital_avail:,.0f}]"
+            )
+            _notify(
+                f"*[AFT] Trade #{executed}*\n"
+                f"{dir_tag} {result['symbol']} x{result['qty']}\n"
+                f"Entry: {result['entry']} | SL: {result['sl']} | Floors: ₹500→₹1000→₹1500...\n"
+                f"Vol ratio: {c['vol_ratio']:.1f}x\n"
+                f"Capital: ₹{actual_capital:,.0f} locked | ₹{_aft_capital_avail:,.0f} available"
+            )
+        else:
+            summary_lines.append(f"FAIL {sym} {opt_type} — {result['reason']}")
+
+    log.info("[AFT] Scan done: %d executed, %d skipped (capital)", executed, skipped_capital)
+    _notify(
+        f"*[AFT] Scan complete*\n"
+        f"Executed: {executed} | Skipped (capital): {skipped_capital}\n"
+        f"Signals: {len(candidates)} | Capital remaining: ₹{_aft_capital_avail:,.0f}\n"
+        f"Daily PnL: ₹{_aft_daily_pnl:,.0f}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # OEL Early List — 1-min candle scan at 09:16, list only (no trades)
 # ---------------------------------------------------------------------------
 async def _run_oel_list():
@@ -2537,6 +3104,10 @@ def _build_eod_report(target_date: str | None = None) -> str:
         ("ch2", "CH2 G Prime"),
         ("oeh", "OEH Scanner"),
         ("oel", "OEL Scanner"),
+        ("orb", "ORB Scanner"),
+        ("pdhl", "PDHL Scanner"),
+        ("orf", "ORF Scanner"),
+        ("aft", "AFT Scanner"),
     ]
 
     lines = []
@@ -3304,6 +3875,140 @@ async def start_listener() -> None:
     asyncio.get_event_loop().create_task(_pdhl_scheduler())
     log.info("PDHL scanner started — runs at %s + %s IST (capital: ₹%.0f)",
              PDHL_RUN_TIME, PDHL_RESCAN_TIME, PDHL_CAPITAL)
+
+    # --- ORF Scanner: runs at 09:30, rescans every 5 min until 11:30 ---
+    async def _orf_scheduler():
+        from zoneinfo import ZoneInfo
+        from datetime import datetime, timedelta
+        IST = ZoneInfo(config.TIMEZONE)
+
+        h, m = map(int, ORF_RUN_TIME.split(":"))
+        first_run = True
+
+        while True:
+            if not ORF_ENABLED:
+                await asyncio.sleep(60)
+                continue
+
+            now = datetime.now(IST)
+
+            if first_run and mc.is_trading_day():
+                first_run = False
+                scheduled = now.replace(hour=h, minute=m, second=0, microsecond=0)
+                if now > scheduled:
+                    log.info("[ORF] Missed scheduled %s run — catching up now", ORF_RUN_TIME)
+                    try:
+                        await _run_orf_scan()
+                    except Exception as exc:
+                        log.error("[ORF] Catch-up scan failed: %s", exc, exc_info=True)
+                    continue
+            first_run = False
+
+            target = now.replace(hour=h, minute=m, second=0, microsecond=0)
+            if now >= target:
+                target += timedelta(days=1)
+
+            wait_secs = (target - now).total_seconds()
+            log.info("[ORF] Next scan at %s IST (in %.0f min)",
+                     target.strftime("%Y-%m-%d %H:%M"), wait_secs / 60)
+            await asyncio.sleep(wait_secs)
+
+            if not mc.is_trading_day():
+                log.info("[ORF] Not a trading day, skipping scan")
+                continue
+
+            try:
+                await _run_orf_scan()
+            except Exception as exc:
+                log.error("[ORF] Scheduler scan failed: %s", exc, exc_info=True)
+
+            # Rescan every 5 min until ORF_TIME_EXIT
+            while True:
+                await asyncio.sleep(300)
+                now2 = datetime.now(IST)
+                if not mc.is_market_open() or now2.strftime("%H:%M") >= ORF_TIME_EXIT:
+                    log.info("[ORF] Past %s or market closed, stopping rescans", ORF_TIME_EXIT)
+                    break
+                if _orf_daily_cap_hit():
+                    log.info("[ORF] Daily cap hit, stopping rescans")
+                    break
+                if _orf_capital_avail > 5000:
+                    log.info("[ORF] Rescan starting — ₹%.0f available", _orf_capital_avail)
+                    try:
+                        await _run_orf_scan()
+                    except Exception as exc:
+                        log.error("[ORF] Rescan failed: %s", exc, exc_info=True)
+
+    asyncio.get_event_loop().create_task(_orf_scheduler())
+    log.info("ORF scanner started — runs at %s IST, rescans until %s (capital: ₹%.0f)",
+             ORF_RUN_TIME, ORF_TIME_EXIT, ORF_CAPITAL)
+
+    # --- AFT Scanner: runs at 13:35, rescans every 5 min until 15:10 ---
+    async def _aft_scheduler():
+        from zoneinfo import ZoneInfo
+        from datetime import datetime, timedelta
+        IST = ZoneInfo(config.TIMEZONE)
+
+        h, m = map(int, AFT_RUN_TIME.split(":"))
+        first_run = True
+
+        while True:
+            if not AFT_ENABLED:
+                await asyncio.sleep(60)
+                continue
+
+            now = datetime.now(IST)
+
+            if first_run and mc.is_trading_day():
+                first_run = False
+                scheduled = now.replace(hour=h, minute=m, second=0, microsecond=0)
+                if now > scheduled:
+                    log.info("[AFT] Missed scheduled %s run — catching up now", AFT_RUN_TIME)
+                    try:
+                        await _run_aft_scan()
+                    except Exception as exc:
+                        log.error("[AFT] Catch-up scan failed: %s", exc, exc_info=True)
+                    continue
+            first_run = False
+
+            target = now.replace(hour=h, minute=m, second=0, microsecond=0)
+            if now >= target:
+                target += timedelta(days=1)
+
+            wait_secs = (target - now).total_seconds()
+            log.info("[AFT] Next scan at %s IST (in %.0f min)",
+                     target.strftime("%Y-%m-%d %H:%M"), wait_secs / 60)
+            await asyncio.sleep(wait_secs)
+
+            if not mc.is_trading_day():
+                log.info("[AFT] Not a trading day, skipping scan")
+                continue
+
+            try:
+                await _run_aft_scan()
+            except Exception as exc:
+                log.error("[AFT] Scheduler scan failed: %s", exc, exc_info=True)
+
+            # Rescan every 5 min until AFT_HARD_EXIT
+            while True:
+                await asyncio.sleep(300)
+                now2 = datetime.now(IST)
+                if not mc.is_market_open() or now2.strftime("%H:%M") >= AFT_HARD_EXIT:
+                    log.info("[AFT] Past %s or market closed, stopping rescans", AFT_HARD_EXIT)
+                    break
+                if _aft_daily_cap_hit():
+                    log.info("[AFT] Daily cap hit, stopping rescans")
+                    break
+                if _aft_capital_avail > 5000:
+                    log.info("[AFT] Rescan starting — ₹%.0f available", _aft_capital_avail)
+                    try:
+                        await _run_aft_scan()
+                    except Exception as exc:
+                        log.error("[AFT] Rescan failed: %s", exc, exc_info=True)
+
+    asyncio.get_event_loop().create_task(_aft_scheduler())
+    log.info("AFT scanner started — runs at %s IST, rescans until %s (capital: ₹%.0f)",
+             AFT_RUN_TIME, AFT_HARD_EXIT, AFT_CAPITAL)
 
     # --- Stock Credit Spread Runner: run once daily at 09:45 IST ---
     STOCK_RUN_TIME = "09:45"
