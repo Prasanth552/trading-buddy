@@ -263,7 +263,8 @@ def _prev_trading_day(d):
 # Exec trades (shared)
 # ---------------------------------------------------------------------------
 def _exec_trades(candidates, ref_date, ud, opt_master, lot_sizes,
-                 loss_cap, profit_cap, label, verbose, hard_exit_time=None):
+                 loss_cap, profit_cap, label, verbose, hard_exit_time=None,
+                 no_recycle=False):
     from_dt = datetime.combine(ref_date, datetime.min.time()).replace(hour=9, minute=15)
     full_to = datetime.combine(ref_date, datetime.min.time()).replace(hour=15, minute=30)
 
@@ -367,7 +368,7 @@ def _exec_trades(candidates, ref_date, ud, opt_master, lot_sizes,
             continue
         _do_place(idx)
 
-    while pending and active:
+    while pending and active and not no_recycle:
         active.sort(key=lambda x: x[0])
         ext, _et, margin, pnl, tidx = active.pop(0)
         avail += margin + pnl
@@ -722,7 +723,8 @@ def run_day(ud, ref_date, eq_keys, universe, opt_master, lot_sizes, verbose=True
     cands, sc = scan_oeh(candles_5m, universe)
     print(f"\n  --- OEH --- Scanned: {sc} | Candidates: {len(cands)}")
     day_results["OEH"] = _exec_trades(cands, ref_date, ud, opt_master, lot_sizes,
-                                       OEH_LOSS_CAP, OEH_PROFIT_CAP, "OEH", verbose)
+                                       OEH_LOSS_CAP, OEH_PROFIT_CAP, "OEH", verbose,
+                                       no_recycle=True)
 
     # 2. ORB
     cands, sc = scan_orb(candles_5m, universe)
