@@ -45,13 +45,14 @@ ORB_PROFIT_CAP = 999999
 PDHL_LOSS_CAP = 10000
 PDHL_PROFIT_CAP = 25000
 
-# Gap Fade config
-GAP_MIN_PCT = 0.5
-GAP_MAX_PCT = 2.0
-GAP_SL_EXTEND_PCT = 0.003
-GAP_TIME_EXIT = "12:30"
-GAP_LOSS_CAP = 10000
-GAP_PROFIT_CAP = 25000
+# ORF (Opening Range Fade) config
+ORF_MIN_RANGE_PCT = 0.3
+ORF_MAX_RANGE_PCT = 3.0
+ORF_BREAKOUT_MIN_PCT = 0.3
+ORF_FADE_WINDOW = 10       # candles (1-min) to detect failed breakout
+ORF_TIME_EXIT = "11:30"
+ORF_LOSS_CAP = 10000
+ORF_PROFIT_CAP = 25000
 
 # Afternoon Momentum config
 AFT_RANGE_START = "11:30"
@@ -549,78 +550,86 @@ def scan_pdhl(ud, eq_keys, universe, ref_date, candles_5m):
     return candidates, scanned
 
 
-def scan_gap_fade(ud, eq_keys, universe, ref_date, candles_5m):
-    """Gap Fade: stocks gapping 0.5-2% from PDC, first 15-min candle confirms fade."""
-    prev_date = _prev_trading_day(ref_date)
-    prev_from = datetime.combine(prev_date, datetime.min.time()).replace(hour=9, minute=15)
-    prev_to = datetime.combine(prev_date, datetime.min.time()).replace(hour=15, minute=30)
+def scan_orf(candles_1m, universe):
+    """Opening Range Fade: trade failed ORB breakouts that snap back into range.
 
-    prev_jobs = []
-    for sym in universe:
-        if sym in BLOCKLIST:
-            continue
-        inst_key = eq_keys.get(sym)
-        if inst_key:
-            prev_jobs.append((sym, inst_key, prev_from, prev_to, "day"))
-    prev_candles = _parallel_fetch(ud, prev_jobs)
-
-    # Also need 15-min candles for confirmation
-    today_from = datetime.combine(ref_date, datetime.min.time()).replace(hour=9, minute=15)
-    today_to = datetime.combine(ref_date, datetime.min.time()).replace(hour=9, minute=35)
-    c15_jobs = []
-    for sym in universe:
-        if sym in BLOCKLIST:
-            continue
-        inst_key = eq_keys.get(sym)
-        if inst_key:
-            c15_jobs.append((sym, inst_key, today_from, today_to, "15minute"))
-    candles_15m = _parallel_fetch(ud, c15_jobs)
-
+    Logic:
+    1. Compute 09:15 5-min opening range (high/low) from first 5 one-min candles
+    2. Wait for a breakout beyond the range by >= ORF_BREAKOUT_MIN_PCT
+    3. If within ORF_FADE_WINDOW candles the price CLOSES back inside the range → fade it
+    4. Failed up-break → buy PE (bearish reversal), failed down-break → buy CE (bullish reversal)
+    """
     candidates = []
     scanned = 0
 
     for sym in universe:
         if sym in BLOCKLIST:
             continue
-        pc = prev_candles.get(sym)
-        if not pc:
-            continue
-        pdc = pc[0]["close"]
-        if pdc <= 0:
-            continue
-
-        c15 = candles_15m.get(sym)
-        if not c15:
+        candles = candles_1m.get(sym)
+        if not candles or len(candles) < 20:
             continue
         scanned += 1
 
-        today_open = c15[0]["open"]
-        gap_pct = abs(today_open - pdc) / pdc * 100
-
-        if gap_pct < GAP_MIN_PCT or gap_pct > GAP_MAX_PCT:
+        or_candles = [c for c in candles if _candle_time(c) < "09:20"]
+        if len(or_candles) < 3:
             continue
 
-        first_15_close = c15[0]["close"]
-        first_15_open = c15[0]["open"]
+        rh = max(c["high"] for c in or_candles)
+        rl = min(c["low"] for c in or_candles)
+        ro = or_candles[0]["open"]
+        if ro <= 0 or rh <= rl:
+            continue
+        rp = (rh - rl) / ro * 100
+        if rp < ORF_MIN_RANGE_PCT or rp > ORF_MAX_RANGE_PCT:
+            continue
 
-        if today_open > pdc:
-            # Gap up — look for fade (first candle closes below open = selling pressure)
-            if first_15_close < first_15_open:
+        breakout_min_up = rh * (1 + ORF_BREAKOUT_MIN_PCT / 100)
+        breakout_min_dn = rl * (1 - ORF_BREAKOUT_MIN_PCT / 100)
+
+        post_or = [c for c in candles if "09:20" <= _candle_time(c) <= "10:30"]
+
+        breakout_type = None
+        breakout_idx = None
+        breakout_extreme = None
+
+        for i, cn in enumerate(post_or):
+            if cn["high"] >= breakout_min_up:
+                breakout_type = "up"
+                breakout_idx = i
+                breakout_extreme = cn["high"]
+                break
+            elif cn["low"] <= breakout_min_dn:
+                breakout_type = "down"
+                breakout_idx = i
+                breakout_extreme = cn["low"]
+                break
+
+        if breakout_type is None:
+            continue
+
+        fade_found = False
+        for j in range(breakout_idx + 1, min(breakout_idx + 1 + ORF_FADE_WINDOW, len(post_or))):
+            cn = post_or[j]
+            if breakout_type == "up" and cn["close"] < rh:
                 candidates.append({
                     "symbol": sym, "direction": "bearish", "opt_type": "PE",
-                    "breakout_price": first_15_close, "entry_after": "09:30",
-                    "gap_pct": gap_pct, "pdc": pdc,
+                    "breakout_price": cn["close"],
+                    "entry_after": _candle_time(cn),
+                    "range_pct": rp, "breakout_extreme": breakout_extreme,
                 })
-        else:
-            # Gap down — look for bounce (first candle closes above open = buying pressure)
-            if first_15_close > first_15_open:
+                fade_found = True
+                break
+            elif breakout_type == "down" and cn["close"] > rl:
                 candidates.append({
                     "symbol": sym, "direction": "bullish", "opt_type": "CE",
-                    "breakout_price": first_15_close, "entry_after": "09:30",
-                    "gap_pct": gap_pct, "pdc": pdc,
+                    "breakout_price": cn["close"],
+                    "entry_after": _candle_time(cn),
+                    "range_pct": rp, "breakout_extreme": breakout_extreme,
                 })
+                fade_found = True
+                break
 
-    candidates.sort(key=lambda x: x.get("gap_pct", 0), reverse=True)
+    candidates.sort(key=lambda x: x.get("entry_after", ""))
     return candidates, scanned
 
 
@@ -727,12 +736,15 @@ def run_day(ud, ref_date, eq_keys, universe, opt_master, lot_sizes, verbose=True
     day_results["PDHL"] = _exec_trades(cands, ref_date, ud, opt_master, lot_sizes,
                                         PDHL_LOSS_CAP, PDHL_PROFIT_CAP, "PDHL", verbose)
 
-    # 4. Gap Fade
-    cands, sc = scan_gap_fade(ud, eq_keys, universe, ref_date, candles_5m)
-    print(f"\n  --- GAP FADE --- Scanned: {sc} | Candidates: {len(cands)}")
-    day_results["GAP"] = _exec_trades(cands, ref_date, ud, opt_master, lot_sizes,
-                                       GAP_LOSS_CAP, GAP_PROFIT_CAP, "GAP-FADE", verbose,
-                                       hard_exit_time=GAP_TIME_EXIT)
+    # 4. ORF (Opening Range Fade)
+    candles_1m = _prefetch_equity_candles(ud, eq_keys, universe, from_dt,
+                                          datetime.combine(ref_date, datetime.min.time()).replace(hour=10, minute=35),
+                                          "1minute")
+    cands, sc = scan_orf(candles_1m, universe)
+    print(f"\n  --- ORF --- Scanned: {sc} | Candidates: {len(cands)}")
+    day_results["ORF"] = _exec_trades(cands, ref_date, ud, opt_master, lot_sizes,
+                                       ORF_LOSS_CAP, ORF_PROFIT_CAP, "ORF", verbose,
+                                       hard_exit_time=ORF_TIME_EXIT)
 
     # 5. Afternoon Momentum
     cands, sc = scan_afternoon_momentum(candles_5m, universe)
@@ -744,7 +756,7 @@ def run_day(ud, ref_date, eq_keys, universe, opt_master, lot_sizes, verbose=True
     # Day summary
     print(f"\n  {'─'*60}")
     grand = 0
-    for label in ["OEH", "ORB", "PDHL", "GAP", "AFT"]:
+    for label in ["OEH", "ORB", "PDHL", "ORF", "AFT"]:
         r = day_results[label]
         if not r:
             print(f"  {label:5s}: --")
@@ -814,7 +826,7 @@ def main():
     print(f"  Capital: ₹{CAPITAL:,}/strategy | Lots: {LOT_MULT} | SL: {SL_PCT*100:.0f}% / ₹{MAX_SL_RS:,}")
     print(f"  Universe: {len(universe)} stocks | Days: {len(dates)}")
 
-    all_results = {"OEH": [], "ORB": [], "PDHL": [], "GAP": [], "AFT": []}
+    all_results = {"OEH": [], "ORB": [], "PDHL": [], "ORF": [], "AFT": []}
 
     for ref_date in dates:
         day_results = run_day(ud, ref_date, eq_keys, universe, opt_master, lot_sizes, verbose)
@@ -828,7 +840,7 @@ def main():
 
     grand = 0
     summary_lines = []
-    for label in ["OEH", "ORB", "PDHL", "GAP", "AFT"]:
+    for label in ["OEH", "ORB", "PDHL", "ORF", "AFT"]:
         r = all_results[label]
         if not r:
             line = f"  {label:8s}: No trades"
@@ -857,13 +869,13 @@ def main():
             f.write(f"{'='*90}\n\n")
             for ref_date in dates:
                 day_res = {}
-                for label in ["OEH", "ORB", "PDHL", "GAP", "AFT"]:
+                for label in ["OEH", "ORB", "PDHL", "ORF", "AFT"]:
                     day_trades = [x for x in all_results[label] if x.get("date") == ref_date]
                     day_res[label] = day_trades
                 f.write(f"  {ref_date} ({ref_date.strftime('%A')})\n")
                 f.write(f"  {'-'*60}\n")
                 day_grand = 0
-                for label in ["OEH", "ORB", "PDHL", "GAP", "AFT"]:
+                for label in ["OEH", "ORB", "PDHL", "ORF", "AFT"]:
                     r = day_res[label]
                     if not r:
                         f.write(f"  {label:5s}: --\n")
