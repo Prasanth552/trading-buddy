@@ -7,7 +7,7 @@ conn = sqlite3.connect(config.DB_PATH)
 conn.row_factory = sqlite3.Row
 
 rows = conn.execute("""
-    SELECT date(entry_time) as day,
+    SELECT date(ts) as day,
            count(*) as trades,
            sum(case when pnl > 0 then 1 else 0 end) as wins,
            sum(case when pnl <= 0 then 1 else 0 end) as losses,
@@ -15,7 +15,7 @@ rows = conn.execute("""
            round(avg(case when pnl > 0 then pnl end), 0) as avg_win,
            round(avg(case when pnl <= 0 then pnl end), 0) as avg_loss
     FROM trades
-    WHERE channel='oeh' AND status='closed' AND entry_time >= '2026-09-21'
+    WHERE channel='oeh' AND status='closed' AND ts >= '2026-09-21'
     GROUP BY day ORDER BY day
 """).fetchall()
 
