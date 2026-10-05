@@ -1,6 +1,9 @@
-"""Backtest all 5 strategies: OEH + ORB + PDHL + Gap Fade + Afternoon Momentum.
+"""Backtest all 5 strategies: OEH + ORB + PDHL + ORF + AFT.
 
-Optimized: parallel candle fetching with ThreadPoolExecutor, aggressive caching.
+Time-stepped simulation that mirrors the live bot's rescan loop:
+- Each strategy rescans every 5 min within its active window
+- Capital freed by closed trades is immediately available for new entries
+- Per-strategy daily loss/profit caps tracked in real time
 
 Usage:
     PYTHONPATH=. .venv/bin/python3 scripts/backtest_all5.py --month 2026-09
@@ -29,32 +32,40 @@ STT_PCT = 0.000625
 LOT_MULT = 2
 CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "candle_cache"
 
-# OEH config
+# OEH config — capital-only gating, no daily caps
 OEH_TOLERANCE = 0.05
 OEH_MIN_DROP_PCT = 0.3
 OEH_LOSS_CAP = 999999
 OEH_PROFIT_CAP = 999999
+OEH_SCAN_START = "09:20"
+OEH_SCAN_END = "15:20"
 
 # ORB config
 ORB_MIN_RANGE_PCT = 0.3
 ORB_MAX_RANGE_PCT = 3.0
 ORB_LOSS_CAP = 20000
 ORB_PROFIT_CAP = 25000
+ORB_SCAN_START = "09:25"
+ORB_SCAN_END = "14:30"
 
 # PDHL config
 PDHL_LOSS_CAP = 10000
 PDHL_PROFIT_CAP = 25000
+PDHL_SCAN_START = "09:20"
+PDHL_SCAN_END = "14:30"
 
-# ORF (Opening Range Fade) config
+# ORF config
 ORF_MIN_RANGE_PCT = 0.3
 ORF_MAX_RANGE_PCT = 3.0
 ORF_BREAKOUT_MIN_PCT = 0.3
-ORF_FADE_WINDOW = 10       # candles (1-min) to detect failed breakout
+ORF_FADE_WINDOW = 10
 ORF_TIME_EXIT = "11:30"
 ORF_LOSS_CAP = 10000
 ORF_PROFIT_CAP = 25000
+ORF_SCAN_START = "09:30"
+ORF_SCAN_END = "11:30"
 
-# Afternoon Momentum config
+# AFT config
 AFT_RANGE_START = "11:30"
 AFT_RANGE_END = "13:30"
 AFT_VOL_MULT = 2.0
@@ -62,6 +73,8 @@ AFT_HARD_EXIT = "15:10"
 AFT_MIN_RANGE_PCT = 0.3
 AFT_LOSS_CAP = 10000
 AFT_PROFIT_CAP = 25000
+AFT_SCAN_START = "13:35"
+AFT_SCAN_END = "15:10"
 
 # ---------------------------------------------------------------------------
 # Caching + parallel fetch
@@ -86,8 +99,6 @@ def _cached_fetch(ud, inst_key, from_dt, to_dt, interval):
 
 
 def _parallel_fetch(ud, fetch_jobs, max_workers=8):
-    """Fetch candles in parallel. fetch_jobs = list of (sym, inst_key, from_dt, to_dt, interval).
-    Returns dict {sym: candles}."""
     results = {}
     uncached = []
 
@@ -138,10 +149,9 @@ def _candle_time(cn):
 
 
 # ---------------------------------------------------------------------------
-# Trade simulation
+# Charges
 # ---------------------------------------------------------------------------
 def _calc_charges(entry_price, exit_price, qty):
-    """Match live calc_charges exactly."""
     buy_turnover = entry_price * qty
     sell_turnover = exit_price * qty
     total_turnover = buy_turnover + sell_turnover
@@ -152,51 +162,6 @@ def _calc_charges(entry_price, exit_price, qty):
     stamp_duty = buy_turnover * 0.00003
     gst = (brokerage + exchange_txn) * 0.18
     return round(brokerage + stt + exchange_txn + sebi + stamp_duty + gst, 2)
-
-
-def _simulate_trade(ocandles, entry_idx, entry, lot, sl_price, hard_exit_time=None):
-    peak_net = 0.0
-    stepped_floor = 0
-
-    for i, cn in enumerate(ocandles[entry_idx + 1:], start=entry_idx + 1):
-        high, low, close = cn["high"], cn["low"], cn["close"]
-        t_short = _candle_time(cn)
-
-        if hard_exit_time and t_short >= hard_exit_time:
-            return close, "TIME", t_short, peak_net
-
-        # --- simulate live monitor checks using CLOSE as "LTP" ---
-        ltp = close
-        gross_pnl = (ltp - entry) * lot
-        charges = _calc_charges(entry, ltp, lot)
-        net_pnl = gross_pnl - charges
-
-        # also check high for peak tracking (price reached high before close)
-        gross_high = (high - entry) * lot
-        charges_high = _calc_charges(entry, high, lot)
-        net_high = gross_high - charges_high
-        if net_high > peak_net:
-            peak_net = net_high
-
-        # 1) SL check: ltp <= stop_price → exit at ltp
-        #    We use LOW to detect SL hit (price touched SL within candle),
-        #    exit at sl_price (live bot catches it near SL level)
-        if low <= sl_price:
-            return sl_price, "SL", t_short, peak_net
-
-        # 2) Max loss cap per trade: net_pnl <= -MAX_SL_RS → exit at ltp
-        if net_pnl <= -MAX_SL_RS:
-            return ltp, "MAX_LOSS", t_short, peak_net
-
-        # 3) Floor check: peak-based floor, net_pnl exit
-        for fl in FLOOR_STEPS:
-            if peak_net >= fl:
-                stepped_floor = fl
-        if stepped_floor > 0 and net_pnl <= stepped_floor:
-            return ltp, f"FLOOR ₹{stepped_floor}", t_short, peak_net
-
-    last = ocandles[-1]
-    return last["close"], "EOD", _candle_time(last), peak_net
 
 
 # ---------------------------------------------------------------------------
@@ -253,179 +218,13 @@ def _resolve_option(sym, spot, opt_type, ref_date, opt_master, lot_sizes):
 
 
 def _prev_trading_day(d):
-    p = d - timedelta(days=1)
-    while p.weekday() >= 5:
-        p -= timedelta(days=1)
-    return p
+    d = d - timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d
 
 
-# ---------------------------------------------------------------------------
-# Exec trades (shared)
-# ---------------------------------------------------------------------------
-def _exec_trades(candidates, ref_date, ud, opt_master, lot_sizes,
-                 loss_cap, profit_cap, label, verbose, hard_exit_time=None,
-                 no_recycle=False):
-    from_dt = datetime.combine(ref_date, datetime.min.time()).replace(hour=9, minute=15)
-    full_to = datetime.combine(ref_date, datetime.min.time()).replace(hour=15, minute=30)
-
-    # Phase 1: resolve options + fetch option candles in parallel
-    to_resolve = []
-    for c in candidates:
-        sym = c["symbol"]
-        opt_type = c.get("opt_type", "PE")
-        spot = c["breakout_price"]
-        opt_key, strike, lot = _resolve_option(sym, spot, opt_type, ref_date, opt_master, lot_sizes)
-        if opt_key:
-            to_resolve.append((c, sym, opt_type, strike, lot, opt_key))
-
-    if not to_resolve:
-        if verbose:
-            print(f"  {label}: No trades")
-        return []
-
-    # Parallel fetch option candles
-    opt_fetch_jobs = []
-    for c, sym, opt_type, strike, lot, opt_key in to_resolve:
-        opt_fetch_jobs.append((f"{sym}_{strike}_{opt_type}", opt_key, from_dt, full_to, "1minute"))
-
-    opt_candles = _parallel_fetch(ud, opt_fetch_jobs)
-
-    prepared = []
-    for c, sym, opt_type, strike, lot, opt_key in to_resolve:
-        fetch_key = f"{sym}_{strike}_{opt_type}"
-        ocandles = opt_candles.get(fetch_key)
-        if not ocandles or len(ocandles) < 5:
-            continue
-
-        bt = c.get("entry_after", "09:20")
-        entry_candle = None
-        entry_idx = 0
-        for i, cn in enumerate(ocandles):
-            if _candle_time(cn) >= bt:
-                entry_candle = cn
-                entry_idx = i
-                break
-        if not entry_candle:
-            continue
-
-        raw_entry = entry_candle["close"]
-        if raw_entry <= 0 or raw_entry < MIN_PREMIUM:
-            continue
-
-        entry = raw_entry
-        sl_pct_price = entry * (1 - SL_PCT)
-        sl_cap_price = entry - (MAX_SL_RS / lot)
-        sl_price = round(max(sl_pct_price, sl_cap_price), 2)
-
-        exit_price, exit_reason, exit_time, peak_pnl = _simulate_trade(
-            ocandles, entry_idx, entry, lot, sl_price, hard_exit_time
-        )
-
-        pnl = (exit_price - entry) * lot
-        charges = _calc_charges(entry, exit_price, lot)
-        pnl -= charges
-
-        prepared.append({
-            "candidate": c, "sym": sym, "opt_type": opt_type, "strike": strike,
-            "lot": lot, "entry": entry, "margin": entry * lot,
-            "entry_time": bt, "exit_time": exit_time,
-            "exit_price": exit_price, "exit_reason": exit_reason,
-            "pnl": pnl, "peak": peak_pnl,
-        })
-
-    # Phase 2: capital simulation
-    prepared.sort(key=lambda x: x["entry_time"])
-    avail = CAPITAL
-    active = []
-    realized_pnl = 0.0
-    results = []
-    traded_indices = set()
-    cap_stopped = False
-
-    if verbose and prepared:
-        print(f"\n  {'Symbol':<14s} {'Str':>6s} {'D':>1s} {'Entry':>7s} {'Exit':>7s}"
-              f" {'P&L':>9s} {'Peak':>8s} {'Reason':<12s} {'ETime':>5s} {'XTime':>5s}")
-        print(f"  {'-'*95}")
-
-    def _do_place(idx):
-        nonlocal avail
-        t = prepared[idx]
-        avail -= t["margin"]
-        active.append((t["exit_time"], t["entry_time"], t["margin"], t["pnl"], idx))
-        traded_indices.add(idx)
-        results.append({"sym": t["sym"], "pnl": t["pnl"], "reason": t["exit_reason"], "peak": t["peak"], "date": ref_date})
-        if verbose:
-            c = t["candidate"]
-            d_tag = "▲" if c.get("direction", "bearish") == "bullish" else "▼"
-            print(f"  {d_tag} {t['sym']:<12s} {t['strike']:>6.0f}{t['opt_type']} {t['entry']:>7.1f} → {t['exit_price']:>6.1f}"
-                  f"  ₹{t['pnl']:>+8,.0f}  ₹{t['peak']:>+7,.0f} {t['exit_reason']:<12s} {t['entry_time']:>5s} {t['exit_time']:>5s}")
-
-    pending = []
-    for idx in range(len(prepared)):
-        t = prepared[idx]
-        if t["margin"] > avail:
-            pending.append(idx)
-            continue
-        _do_place(idx)
-
-    while pending and active and not no_recycle:
-        active.sort(key=lambda x: x[0])
-        ext, _et, margin, pnl, tidx = active.pop(0)
-        avail += margin + pnl
-        realized_pnl += pnl
-
-        new_active = []
-        for a in active:
-            if a[0] <= ext:
-                avail += a[2] + a[3]
-                realized_pnl += a[3]
-            else:
-                new_active.append(a)
-        active = new_active
-
-        if realized_pnl >= profit_cap or realized_pnl <= -loss_cap:
-            cap_stopped = True
-            break
-
-        if avail < 5000:
-            continue
-
-        retryable = [i for i in pending if prepared[i]["entry_time"] <= ext]
-        later = [i for i in pending if prepared[i]["entry_time"] > ext]
-        placed_now = 0
-        still_pending = []
-        for idx in retryable:
-            if idx in traded_indices:
-                continue
-            if prepared[idx]["margin"] > avail:
-                still_pending.append(idx)
-                continue
-            _do_place(idx)
-            placed_now += 1
-        pending = still_pending + later
-        if placed_now == 0 and not active:
-            break
-
-    skipped = len(pending)
-    if results:
-        day_pnl = sum(r["pnl"] for r in results)
-        wins = sum(1 for r in results if r["pnl"] > 0)
-        losses = len(results) - wins
-        extra = ""
-        if cap_stopped:
-            extra = f" | CAP HIT (₹{realized_pnl:>+,.0f})"
-        print(f"  {label} TOTAL: {len(results)} trades | {wins}W/{losses}L | Skip: {skipped}{extra} | ₹{day_pnl:>+,.0f}")
-    else:
-        print(f"  {label}: No trades")
-
-    return results
-
-
-# ---------------------------------------------------------------------------
-# Strategy scanners
-# ---------------------------------------------------------------------------
 def _prefetch_equity_candles(ud, eq_keys, universe, from_dt, to_dt, interval):
-    """Fetch equity candles for all symbols in parallel. Returns dict {sym: candles}."""
     jobs = []
     for sym in universe:
         if sym in BLOCKLIST:
@@ -436,44 +235,154 @@ def _prefetch_equity_candles(ud, eq_keys, universe, from_dt, to_dt, interval):
     return _parallel_fetch(ud, jobs)
 
 
-def scan_oeh(candles_5m, universe):
+# ---------------------------------------------------------------------------
+# Time-stepped trade simulation engine
+# ---------------------------------------------------------------------------
+# Instead of simulating a trade from start to end in one call, we advance
+# one minute at a time across ALL active positions simultaneously.
+
+def _tick_hhmm(hh, mm):
+    return f"{hh:02d}:{mm:02d}"
+
+
+def _hhmm_to_tuple(s):
+    return int(s[:2]), int(s[3:5])
+
+
+def _advance_1min(hh, mm):
+    mm += 1
+    if mm >= 60:
+        mm = 0
+        hh += 1
+    return hh, mm
+
+
+class Position:
+    __slots__ = ("sym", "opt_type", "strike", "lot", "entry", "sl_price",
+                 "margin", "entry_time", "hard_exit_time", "peak_net",
+                 "stepped_floor", "opt_candle_map", "strategy", "candidate")
+
+    def __init__(self, sym, opt_type, strike, lot, entry, sl_price,
+                 margin, entry_time, hard_exit_time, opt_candle_map, strategy, candidate):
+        self.sym = sym
+        self.opt_type = opt_type
+        self.strike = strike
+        self.lot = lot
+        self.entry = entry
+        self.sl_price = sl_price
+        self.margin = margin
+        self.entry_time = entry_time
+        self.hard_exit_time = hard_exit_time
+        self.peak_net = 0.0
+        self.stepped_floor = 0
+        self.opt_candle_map = opt_candle_map
+        self.strategy = strategy
+        self.candidate = candidate
+
+    def tick(self, current_time):
+        """Check this position at current_time. Returns (exit_price, exit_reason, pnl) or None."""
+        cn = self.opt_candle_map.get(current_time)
+        if cn is None:
+            return None
+
+        high, low, close = cn["high"], cn["low"], cn["close"]
+        ltp = close
+
+        if self.hard_exit_time and current_time >= self.hard_exit_time:
+            pnl = (ltp - self.entry) * self.lot - _calc_charges(self.entry, ltp, self.lot)
+            return ltp, "TIME", pnl
+
+        # peak tracking using high
+        gross_high = (high - self.entry) * self.lot
+        charges_high = _calc_charges(self.entry, high, self.lot)
+        net_high = gross_high - charges_high
+        if net_high > self.peak_net:
+            self.peak_net = net_high
+
+        # SL check
+        if low <= self.sl_price:
+            pnl = (self.sl_price - self.entry) * self.lot - _calc_charges(self.entry, self.sl_price, self.lot)
+            return self.sl_price, "SL", pnl
+
+        # net PnL for floor/max-loss
+        gross_pnl = (ltp - self.entry) * self.lot
+        charges = _calc_charges(self.entry, ltp, self.lot)
+        net_pnl = gross_pnl - charges
+
+        if net_pnl <= -MAX_SL_RS:
+            pnl = net_pnl
+            return ltp, "MAX_LOSS", pnl
+
+        for fl in FLOOR_STEPS:
+            if self.peak_net >= fl:
+                self.stepped_floor = fl
+        if self.stepped_floor > 0 and net_pnl <= self.stepped_floor:
+            return ltp, f"FLOOR ₹{self.stepped_floor}", net_pnl
+
+        return None
+
+    def eod_close(self):
+        """Force close at last available candle."""
+        last_time = max(self.opt_candle_map.keys()) if self.opt_candle_map else "15:29"
+        cn = self.opt_candle_map.get(last_time)
+        if cn:
+            ltp = cn["close"]
+        else:
+            ltp = self.entry
+        pnl = (ltp - self.entry) * self.lot - _calc_charges(self.entry, ltp, self.lot)
+        return ltp, "EOD", pnl
+
+
+# ---------------------------------------------------------------------------
+# Scanners — return candidates visible at current scan time
+# ---------------------------------------------------------------------------
+# These are called repeatedly at each rescan tick. They use candles available
+# up to the current time and return NEW candidates not already in active/done sets.
+
+def scan_oeh_at_tick(candles_5m, universe, tick_time):
+    """OEH: at each tick, check the 5-min candle that just closed.
+    The candle closing at tick_time covers [tick_time-5min, tick_time).
+    We check if open > close by >= OEH_MIN_DROP_PCT and high didn't exceed open+tolerance."""
     candidates = []
-    scanned = 0
     for sym in universe:
         if sym in BLOCKLIST:
             continue
         candles = candles_5m.get(sym)
         if not candles:
             continue
-        scanned += 1
-        op = candles[0]["open"]
-        if op <= 0:
-            continue
-        mh = candles[0]["high"]
-        if mh > op + OEH_TOLERANCE:
-            continue
-        ep = candles[0]["close"]
-        dp = (op - ep) / op * 100
-        if dp < OEH_MIN_DROP_PCT:
-            continue
-        candidates.append({
-            "symbol": sym, "direction": "bearish", "opt_type": "PE",
-            "breakout_price": ep, "entry_after": "09:20", "drop_pct": dp,
-        })
+        # find the candle whose time matches tick_time (the just-closed candle)
+        for cn in candles:
+            ct = _candle_time(cn)
+            if ct == tick_time:
+                op = cn["open"]
+                if op <= 0:
+                    break
+                mh = cn["high"]
+                if mh > op + OEH_TOLERANCE:
+                    break
+                ep = cn["close"]
+                dp = (op - ep) / op * 100
+                if dp < OEH_MIN_DROP_PCT:
+                    break
+                candidates.append({
+                    "symbol": sym, "direction": "bearish", "opt_type": "PE",
+                    "breakout_price": ep, "entry_after": tick_time, "drop_pct": dp,
+                })
+                break
     candidates.sort(key=lambda x: x["drop_pct"], reverse=True)
-    return candidates, scanned
+    return candidates
 
 
-def scan_orb(candles_5m, universe):
+def scan_orb_at_tick(candles_5m, universe, tick_time):
+    """ORB: check if any symbol has a new breakout in the candle at tick_time."""
     candidates = []
-    scanned = 0
     for sym in universe:
         if sym in BLOCKLIST:
             continue
         candles = candles_5m.get(sym)
-        if not candles or len(candles) < 3:
+        if not candles or len(candles) < 2:
             continue
-        scanned += 1
+        # opening range = first 5-min candle
         rh = candles[0]["high"]
         rl = candles[0]["low"]
         ro = candles[0]["open"]
@@ -482,94 +391,66 @@ def scan_orb(candles_5m, universe):
         rp = (rh - rl) / ro * 100
         if rp < ORB_MIN_RANGE_PCT or rp > ORB_MAX_RANGE_PCT:
             continue
-        for dc in candles[1:]:
-            t = _candle_time(dc)
-            if dc["high"] > rh:
+        # check the candle at tick_time for breakout
+        for cn in candles[1:]:
+            ct = _candle_time(cn)
+            if ct != tick_time:
+                continue
+            if cn["high"] > rh:
                 candidates.append({
                     "symbol": sym, "direction": "bullish", "opt_type": "CE",
-                    "breakout_price": dc["close"], "entry_after": t, "range_pct": rp,
+                    "breakout_price": cn["close"], "entry_after": tick_time, "range_pct": rp,
                 })
-                break
-            elif dc["low"] < rl:
+            elif cn["low"] < rl:
                 candidates.append({
                     "symbol": sym, "direction": "bearish", "opt_type": "PE",
-                    "breakout_price": dc["close"], "entry_after": t, "range_pct": rp,
+                    "breakout_price": cn["close"], "entry_after": tick_time, "range_pct": rp,
                 })
-                break
+            break
     candidates.sort(key=lambda x: x.get("range_pct", 0), reverse=True)
-    return candidates, scanned
+    return candidates
 
 
-def scan_pdhl(ud, eq_keys, universe, ref_date, candles_5m):
-    prev_date = _prev_trading_day(ref_date)
-    prev_from = datetime.combine(prev_date, datetime.min.time()).replace(hour=9, minute=15)
-    prev_to = datetime.combine(prev_date, datetime.min.time()).replace(hour=15, minute=30)
-
-    # Fetch prev day candles in parallel
-    prev_jobs = []
-    for sym in universe:
-        if sym in BLOCKLIST:
-            continue
-        inst_key = eq_keys.get(sym)
-        if inst_key:
-            prev_jobs.append((sym, inst_key, prev_from, prev_to, "day"))
-    prev_candles = _parallel_fetch(ud, prev_jobs)
-
+def scan_pdhl_at_tick(candles_5m, prev_day_hl, universe, tick_time):
+    """PDHL: at each tick, check if the current candle breaches prev day high/low."""
     candidates = []
-    scanned = 0
     for sym in universe:
         if sym in BLOCKLIST:
             continue
-        pc = prev_candles.get(sym)
-        if not pc:
+        candles = candles_5m.get(sym)
+        if not candles:
             continue
-        pdh = pc[0]["high"]
-        pdl = pc[0]["low"]
-        if pdh <= 0 or pdl <= 0 or pdh <= pdl:
+        hl = prev_day_hl.get(sym)
+        if not hl:
             continue
-
-        tc = candles_5m.get(sym)
-        if not tc:
-            continue
-        scanned += 1
-
-        for dc in tc:
-            t = _candle_time(dc)
-            if dc["close"] > pdh:
+        pdh, pdl = hl
+        for cn in candles:
+            ct = _candle_time(cn)
+            if ct != tick_time:
+                continue
+            if cn["high"] > pdh:
                 candidates.append({
                     "symbol": sym, "direction": "bullish", "opt_type": "CE",
-                    "breakout_price": dc["close"], "entry_after": t, "pdh": pdh, "pdl": pdl,
+                    "breakout_price": cn["close"], "entry_after": tick_time,
                 })
-                break
-            elif dc["close"] < pdl:
+            elif cn["low"] < pdl:
                 candidates.append({
                     "symbol": sym, "direction": "bearish", "opt_type": "PE",
-                    "breakout_price": dc["close"], "entry_after": t, "pdh": pdh, "pdl": pdl,
+                    "breakout_price": cn["close"], "entry_after": tick_time,
                 })
-                break
-    candidates.sort(key=lambda x: x.get("entry_after", ""))
-    return candidates, scanned
+            break
+    return candidates
 
 
-def scan_orf(candles_1m, universe):
-    """Opening Range Fade: trade failed ORB breakouts that snap back into range.
-
-    Logic:
-    1. Compute 09:15 5-min opening range (high/low) from first 5 one-min candles
-    2. Wait for a breakout beyond the range by >= ORF_BREAKOUT_MIN_PCT
-    3. If within ORF_FADE_WINDOW candles the price CLOSES back inside the range → fade it
-    4. Failed up-break → buy PE (bearish reversal), failed down-break → buy CE (bullish reversal)
-    """
+def scan_orf_at_tick(candles_1m, universe, tick_time):
+    """ORF: at each tick, check for new faded breakouts visible by now."""
     candidates = []
-    scanned = 0
-
     for sym in universe:
         if sym in BLOCKLIST:
             continue
         candles = candles_1m.get(sym)
         if not candles or len(candles) < 20:
             continue
-        scanned += 1
 
         or_candles = [c for c in candles if _candle_time(c) < "09:20"]
         if len(or_candles) < 3:
@@ -587,65 +468,56 @@ def scan_orf(candles_1m, universe):
         breakout_min_up = rh * (1 + ORF_BREAKOUT_MIN_PCT / 100)
         breakout_min_dn = rl * (1 - ORF_BREAKOUT_MIN_PCT / 100)
 
-        post_or = [c for c in candles if "09:20" <= _candle_time(c) <= "10:30"]
+        post_or = [c for c in candles if "09:20" <= _candle_time(c) <= tick_time]
 
         breakout_type = None
         breakout_idx = None
-        breakout_extreme = None
 
         for i, cn in enumerate(post_or):
             if cn["high"] >= breakout_min_up:
                 breakout_type = "up"
                 breakout_idx = i
-                breakout_extreme = cn["high"]
                 break
             elif cn["low"] <= breakout_min_dn:
                 breakout_type = "down"
                 breakout_idx = i
-                breakout_extreme = cn["low"]
                 break
 
         if breakout_type is None:
             continue
 
-        fade_found = False
         for j in range(breakout_idx + 1, min(breakout_idx + 1 + ORF_FADE_WINDOW, len(post_or))):
             cn = post_or[j]
+            fade_time = _candle_time(cn)
+            # only count fades that happened at the current tick (so we don't re-discover old fades)
+            if fade_time != tick_time:
+                continue
             if breakout_type == "up" and cn["close"] < rh:
                 candidates.append({
                     "symbol": sym, "direction": "bearish", "opt_type": "PE",
-                    "breakout_price": cn["close"],
-                    "entry_after": _candle_time(cn),
-                    "range_pct": rp, "breakout_extreme": breakout_extreme,
+                    "breakout_price": cn["close"], "entry_after": tick_time, "range_pct": rp,
                 })
-                fade_found = True
                 break
             elif breakout_type == "down" and cn["close"] > rl:
                 candidates.append({
                     "symbol": sym, "direction": "bullish", "opt_type": "CE",
-                    "breakout_price": cn["close"],
-                    "entry_after": _candle_time(cn),
-                    "range_pct": rp, "breakout_extreme": breakout_extreme,
+                    "breakout_price": cn["close"], "entry_after": tick_time, "range_pct": rp,
                 })
-                fade_found = True
                 break
 
     candidates.sort(key=lambda x: x.get("entry_after", ""))
-    return candidates, scanned
+    return candidates
 
 
-def scan_afternoon_momentum(candles_5m, universe):
-    """Afternoon Momentum: lunchtime range breakout with volume confirmation."""
+def scan_aft_at_tick(candles_5m, universe, tick_time):
+    """AFT: at each tick after 13:30, check for lunch range breakout with volume."""
     candidates = []
-    scanned = 0
-
     for sym in universe:
         if sym in BLOCKLIST:
             continue
         candles = candles_5m.get(sym)
         if not candles or len(candles) < 30:
             continue
-        scanned += 1
 
         lunch_high = 0
         lunch_low = float("inf")
@@ -663,8 +535,6 @@ def scan_afternoon_momentum(candles_5m, universe):
 
         if not lunch_vols or lunch_high <= lunch_low:
             continue
-
-        # Filter: lunch range must be meaningful (at least 0.3%)
         lunch_range_pct = (lunch_high - lunch_low) / lunch_low * 100
         if lunch_range_pct < AFT_MIN_RANGE_PCT:
             continue
@@ -675,29 +545,256 @@ def scan_afternoon_momentum(candles_5m, universe):
 
         for cn in candles:
             t = _candle_time(cn)
-            if t < AFT_RANGE_END:
+            if t != tick_time:
                 continue
-            if t >= AFT_HARD_EXIT:
-                break
             vol = cn.get("volume", 0) or 0
-
             if cn["close"] > lunch_high and vol >= avg_lunch_vol * AFT_VOL_MULT:
                 candidates.append({
                     "symbol": sym, "direction": "bullish", "opt_type": "CE",
-                    "breakout_price": cn["close"], "entry_after": t,
+                    "breakout_price": cn["close"], "entry_after": tick_time,
                     "vol_ratio": vol / avg_lunch_vol,
                 })
-                break
             elif cn["close"] < lunch_low and vol >= avg_lunch_vol * AFT_VOL_MULT:
                 candidates.append({
                     "symbol": sym, "direction": "bearish", "opt_type": "PE",
-                    "breakout_price": cn["close"], "entry_after": t,
+                    "breakout_price": cn["close"], "entry_after": tick_time,
                     "vol_ratio": vol / avg_lunch_vol,
                 })
-                break
+            break
 
     candidates.sort(key=lambda x: x.get("vol_ratio", 0), reverse=True)
-    return candidates, scanned
+    return candidates
+
+
+# ---------------------------------------------------------------------------
+# Time-stepped simulation for one strategy
+# ---------------------------------------------------------------------------
+def _run_strategy_sim(strategy_name, ref_date, ud, opt_master, lot_sizes,
+                      candles_eq, scan_fn, loss_cap, profit_cap,
+                      scan_start, scan_end, scan_interval_min,
+                      hard_exit_time, verbose, candles_1m=None):
+    """Run a single strategy through the day using time-stepped simulation.
+
+    scan_fn(tick_time) -> list of candidates at that tick.
+    """
+    from_dt = datetime.combine(ref_date, datetime.min.time()).replace(hour=9, minute=15)
+    full_to = datetime.combine(ref_date, datetime.min.time()).replace(hour=15, minute=30)
+
+    active_positions: list[Position] = []
+    avail_capital = CAPITAL
+    realized_pnl = 0.0
+    results = []
+    # track (sym, opt_type) currently in a position to avoid duplicate entries
+    active_syms: set[tuple[str, str]] = set()
+    cap_stopped = False
+
+    if verbose:
+        print(f"\n  {'Symbol':<14s} {'Str':>6s} {'D':>1s} {'Entry':>7s} {'Exit':>7s}"
+              f" {'P&L':>9s} {'Peak':>8s} {'Reason':<12s} {'ETime':>5s} {'XTime':>5s}")
+        print(f"  {'-'*95}")
+
+    # pre-resolve and cache option candles for any candidate we might encounter
+    # We'll do this lazily as candidates appear
+    _opt_candle_cache: dict[str, dict[str, dict]] = {}  # "SYM_STRIKE_TYPE" -> {time: candle}
+    _opt_resolve_cache: dict[tuple, tuple] = {}  # (sym, spot, opt_type) -> (opt_key, strike, lot)
+
+    def _get_opt_candles(sym, spot, opt_type):
+        """Resolve option + fetch/cache 1-min candles, return (strike, lot, candle_map) or None."""
+        cache_key_resolve = (sym, round(spot, 1), opt_type)
+        if cache_key_resolve in _opt_resolve_cache:
+            opt_key, strike, lot = _opt_resolve_cache[cache_key_resolve]
+        else:
+            opt_key, strike, lot = _resolve_option(sym, spot, opt_type, ref_date, opt_master, lot_sizes)
+            _opt_resolve_cache[cache_key_resolve] = (opt_key, strike, lot)
+
+        if not opt_key:
+            return None
+
+        candle_cache_key = f"{sym}_{strike}_{opt_type}"
+        if candle_cache_key not in _opt_candle_cache:
+            ocandles = _cached_fetch(ud, opt_key, from_dt, full_to, "1minute")
+            if not ocandles or len(ocandles) < 5:
+                _opt_candle_cache[candle_cache_key] = {}
+                return None
+            cmap = {}
+            for cn in ocandles:
+                cmap[_candle_time(cn)] = cn
+            _opt_candle_cache[candle_cache_key] = cmap
+
+        cmap = _opt_candle_cache[candle_cache_key]
+        if not cmap:
+            return None
+
+        # re-lookup strike/lot from cache
+        opt_key, strike, lot = _opt_resolve_cache[cache_key_resolve]
+        return strike, lot, cmap
+
+    def _try_enter(candidate):
+        nonlocal avail_capital
+        sym = candidate["symbol"]
+        opt_type = candidate.get("opt_type", "PE")
+        spot = candidate["breakout_price"]
+        entry_time = candidate.get("entry_after", "09:20")
+
+        result = _get_opt_candles(sym, spot, opt_type)
+        if result is None:
+            return False
+        strike, lot, cmap = result
+
+        # get entry price from the candle at entry_time
+        entry_cn = cmap.get(entry_time)
+        if not entry_cn:
+            return False
+        entry_price = entry_cn["close"]
+        if entry_price <= 0 or entry_price < MIN_PREMIUM:
+            return False
+
+        margin = entry_price * lot
+        if margin > avail_capital:
+            return False
+
+        sl_pct_price = entry_price * (1 - SL_PCT)
+        sl_cap_price = entry_price - (MAX_SL_RS / lot)
+        sl_price = round(max(sl_pct_price, sl_cap_price), 2)
+
+        pos = Position(
+            sym=sym, opt_type=opt_type, strike=strike, lot=lot,
+            entry=entry_price, sl_price=sl_price, margin=margin,
+            entry_time=entry_time, hard_exit_time=hard_exit_time,
+            opt_candle_map=cmap, strategy=strategy_name, candidate=candidate,
+        )
+        active_positions.append(pos)
+        active_syms.add((sym, opt_type))
+        avail_capital -= margin
+        return True
+
+    def _close_position(pos, exit_price, exit_reason, pnl, exit_time):
+        nonlocal avail_capital, realized_pnl
+        avail_capital += pos.margin
+        realized_pnl += pnl
+        active_syms.discard((pos.sym, pos.opt_type))
+
+        results.append({
+            "sym": pos.sym, "pnl": pnl, "reason": exit_reason,
+            "peak": pos.peak_net, "date": ref_date,
+            "entry": pos.entry, "exit_price": exit_price,
+            "entry_time": pos.entry_time, "exit_time": exit_time,
+            "strike": pos.strike, "opt_type": pos.opt_type,
+            "lot": pos.lot, "direction": pos.candidate.get("direction", "bearish"),
+        })
+
+        if verbose:
+            d_tag = "▲" if pos.candidate.get("direction", "bearish") == "bullish" else "▼"
+            print(f"  {d_tag} {pos.sym:<12s} {pos.strike:>6.0f}{pos.opt_type} {pos.entry:>7.1f} → {exit_price:>6.1f}"
+                  f"  ₹{pnl:>+8,.0f}  ₹{pos.peak_net:>+7,.0f} {exit_reason:<12s} {pos.entry_time:>5s} {exit_time:>5s}")
+
+    # Build scan ticks
+    sh, sm = _hhmm_to_tuple(scan_start)
+    eh, em = _hhmm_to_tuple(scan_end)
+    scan_ticks = set()
+    h, m = sh, sm
+    while _tick_hhmm(h, m) <= scan_end:
+        scan_ticks.add(_tick_hhmm(h, m))
+        m += scan_interval_min
+        while m >= 60:
+            m -= 60
+            h += 1
+        if h > eh or (h == eh and m > em):
+            break
+
+    # Main time loop: 1-min ticks from 09:16 to 15:29
+    for hh in range(9, 16):
+        mm_start = 16 if hh == 9 else 0
+        mm_end = 30 if hh == 15 else 60
+        for mm in range(mm_start, mm_end):
+            current_time = _tick_hhmm(hh, mm)
+
+            if cap_stopped:
+                break
+
+            # 1. Tick all active positions — check for exits
+            closed_this_tick = []
+            for pos in active_positions:
+                result = pos.tick(current_time)
+                if result:
+                    exit_price, exit_reason, pnl = result
+                    closed_this_tick.append((pos, exit_price, exit_reason, pnl, current_time))
+
+            for pos, exit_price, exit_reason, pnl, etime in closed_this_tick:
+                active_positions.remove(pos)
+                _close_position(pos, exit_price, exit_reason, pnl, etime)
+
+                if realized_pnl >= profit_cap or realized_pnl <= -loss_cap:
+                    cap_stopped = True
+                    break
+
+            if cap_stopped:
+                break
+
+            # 2. At scan ticks, run scanner and try to enter new trades
+            if current_time in scan_ticks:
+                new_candidates = scan_fn(current_time)
+                for cand in new_candidates:
+                    if cap_stopped:
+                        break
+                    sym = cand["symbol"]
+                    ot = cand.get("opt_type", "PE")
+                    if (sym, ot) in active_syms:
+                        continue
+                    if avail_capital < 5000:
+                        continue
+                    if _try_enter(cand):
+                        if realized_pnl >= profit_cap or realized_pnl <= -loss_cap:
+                            cap_stopped = True
+
+        if cap_stopped:
+            break
+
+    # EOD: close remaining positions
+    for pos in list(active_positions):
+        exit_price, exit_reason, pnl = pos.eod_close()
+        active_positions.remove(pos)
+        _close_position(pos, exit_price, exit_reason, pnl, "15:29")
+
+    if results:
+        day_pnl = sum(r["pnl"] for r in results)
+        wins = sum(1 for r in results if r["pnl"] > 0)
+        losses = len(results) - wins
+        extra = ""
+        if cap_stopped:
+            extra = f" | CAP HIT (₹{realized_pnl:>+,.0f})"
+        print(f"  {strategy_name} TOTAL: {len(results)} trades | {wins}W/{losses}L{extra} | ₹{day_pnl:>+,.0f}")
+    else:
+        print(f"  {strategy_name}: No trades")
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Fetch prev day high/low for PDHL
+# ---------------------------------------------------------------------------
+def _fetch_prev_day_hl(ud, eq_keys, universe, ref_date):
+    prev_date = _prev_trading_day(ref_date)
+    prev_from = datetime.combine(prev_date, datetime.min.time()).replace(hour=9, minute=15)
+    prev_to = datetime.combine(prev_date, datetime.min.time()).replace(hour=15, minute=30)
+
+    prev_jobs = []
+    for sym in universe:
+        if sym in BLOCKLIST:
+            continue
+        inst_key = eq_keys.get(sym)
+        if inst_key:
+            prev_jobs.append((sym, inst_key, prev_from, prev_to, "day"))
+    prev_candles = _parallel_fetch(ud, prev_jobs)
+
+    prev_day_hl = {}
+    for sym, candles in prev_candles.items():
+        if candles:
+            pdh = max(c["high"] for c in candles)
+            pdl = min(c["low"] for c in candles)
+            if pdh > 0 and pdl > 0:
+                prev_day_hl[sym] = (pdh, pdl)
+    return prev_day_hl
 
 
 # ---------------------------------------------------------------------------
@@ -711,48 +808,69 @@ def run_day(ud, ref_date, eq_keys, universe, opt_master, lot_sizes, verbose=True
     from_dt = datetime.combine(ref_date, datetime.min.time()).replace(hour=9, minute=15)
     to_dt = datetime.combine(ref_date, datetime.min.time()).replace(hour=15, minute=30)
 
-    # Prefetch all equity 5-min candles in one parallel batch
+    # Prefetch equity candles
     t0 = _t.time()
     candles_5m = _prefetch_equity_candles(ud, eq_keys, universe, from_dt, to_dt, "5minute")
+    candles_1m = _prefetch_equity_candles(ud, eq_keys, universe, from_dt,
+                                          datetime.combine(ref_date, datetime.min.time()).replace(hour=11, minute=35),
+                                          "1minute")
     fetch_time = _t.time() - t0
     print(f"  Fetched {len(candles_5m)} stocks in {fetch_time:.1f}s")
 
     day_results = {}
 
-    # 1. OEH
-    cands, sc = scan_oeh(candles_5m, universe)
-    print(f"\n  --- OEH --- Scanned: {sc} | Candidates: {len(cands)}")
-    day_results["OEH"] = _exec_trades(cands, ref_date, ud, opt_master, lot_sizes,
-                                       OEH_LOSS_CAP, OEH_PROFIT_CAP, "OEH", verbose)
+    # Fetch prev day data for PDHL
+    prev_day_hl = _fetch_prev_day_hl(ud, eq_keys, universe, ref_date)
 
-    # 2. ORB
-    cands, sc = scan_orb(candles_5m, universe)
-    print(f"\n  --- ORB --- Scanned: {sc} | Breakouts: {len(cands)}")
-    day_results["ORB"] = _exec_trades(cands, ref_date, ud, opt_master, lot_sizes,
-                                       ORB_LOSS_CAP, ORB_PROFIT_CAP, "ORB", verbose)
+    # 1. OEH — rescans every 5 min from 09:20 to 15:20
+    print(f"\n  --- OEH ---")
+    day_results["OEH"] = _run_strategy_sim(
+        "OEH", ref_date, ud, opt_master, lot_sizes, candles_5m,
+        scan_fn=lambda tick: scan_oeh_at_tick(candles_5m, universe, tick),
+        loss_cap=OEH_LOSS_CAP, profit_cap=OEH_PROFIT_CAP,
+        scan_start=OEH_SCAN_START, scan_end=OEH_SCAN_END,
+        scan_interval_min=5, hard_exit_time=None, verbose=verbose,
+    )
 
-    # 3. PDHL
-    cands, sc = scan_pdhl(ud, eq_keys, universe, ref_date, candles_5m)
-    print(f"\n  --- PDHL --- Scanned: {sc} | Breakouts: {len(cands)}")
-    day_results["PDHL"] = _exec_trades(cands, ref_date, ud, opt_master, lot_sizes,
-                                        PDHL_LOSS_CAP, PDHL_PROFIT_CAP, "PDHL", verbose)
+    # 2. ORB — rescans every 5 min from 09:25 to 14:30
+    print(f"\n  --- ORB ---")
+    day_results["ORB"] = _run_strategy_sim(
+        "ORB", ref_date, ud, opt_master, lot_sizes, candles_5m,
+        scan_fn=lambda tick: scan_orb_at_tick(candles_5m, universe, tick),
+        loss_cap=ORB_LOSS_CAP, profit_cap=ORB_PROFIT_CAP,
+        scan_start=ORB_SCAN_START, scan_end=ORB_SCAN_END,
+        scan_interval_min=5, hard_exit_time=None, verbose=verbose,
+    )
 
-    # 4. ORF (Opening Range Fade)
-    candles_1m = _prefetch_equity_candles(ud, eq_keys, universe, from_dt,
-                                          datetime.combine(ref_date, datetime.min.time()).replace(hour=10, minute=35),
-                                          "1minute")
-    cands, sc = scan_orf(candles_1m, universe)
-    print(f"\n  --- ORF --- Scanned: {sc} | Candidates: {len(cands)}")
-    day_results["ORF"] = _exec_trades(cands, ref_date, ud, opt_master, lot_sizes,
-                                       ORF_LOSS_CAP, ORF_PROFIT_CAP, "ORF", verbose,
-                                       hard_exit_time=ORF_TIME_EXIT)
+    # 3. PDHL — rescans every 5 min from 09:20 to 14:30
+    print(f"\n  --- PDHL ---")
+    day_results["PDHL"] = _run_strategy_sim(
+        "PDHL", ref_date, ud, opt_master, lot_sizes, candles_5m,
+        scan_fn=lambda tick: scan_pdhl_at_tick(candles_5m, prev_day_hl, universe, tick),
+        loss_cap=PDHL_LOSS_CAP, profit_cap=PDHL_PROFIT_CAP,
+        scan_start=PDHL_SCAN_START, scan_end=PDHL_SCAN_END,
+        scan_interval_min=5, hard_exit_time=None, verbose=verbose,
+    )
 
-    # 5. Afternoon Momentum
-    cands, sc = scan_afternoon_momentum(candles_5m, universe)
-    print(f"\n  --- AFT MOM --- Scanned: {sc} | Breakouts: {len(cands)}")
-    day_results["AFT"] = _exec_trades(cands, ref_date, ud, opt_master, lot_sizes,
-                                       AFT_LOSS_CAP, AFT_PROFIT_CAP, "AFT-MOM", verbose,
-                                       hard_exit_time=AFT_HARD_EXIT)
+    # 4. ORF — rescans every 5 min from 09:30 to 11:30, hard exit at 11:30
+    print(f"\n  --- ORF ---")
+    day_results["ORF"] = _run_strategy_sim(
+        "ORF", ref_date, ud, opt_master, lot_sizes, candles_1m,
+        scan_fn=lambda tick: scan_orf_at_tick(candles_1m, universe, tick),
+        loss_cap=ORF_LOSS_CAP, profit_cap=ORF_PROFIT_CAP,
+        scan_start=ORF_SCAN_START, scan_end=ORF_SCAN_END,
+        scan_interval_min=5, hard_exit_time=ORF_TIME_EXIT, verbose=verbose,
+    )
+
+    # 5. AFT — rescans every 5 min from 13:35 to 15:10, hard exit at 15:10
+    print(f"\n  --- AFT ---")
+    day_results["AFT"] = _run_strategy_sim(
+        "AFT", ref_date, ud, opt_master, lot_sizes, candles_5m,
+        scan_fn=lambda tick: scan_aft_at_tick(candles_5m, universe, tick),
+        loss_cap=AFT_LOSS_CAP, profit_cap=AFT_PROFIT_CAP,
+        scan_start=AFT_SCAN_START, scan_end=AFT_SCAN_END,
+        scan_interval_min=5, hard_exit_time=AFT_HARD_EXIT, verbose=verbose,
+    )
 
     # Day summary
     print(f"\n  {'─'*60}")
@@ -823,7 +941,7 @@ def main():
 
     verbose = not args.quiet
 
-    print(f"\n  ALL 5 STRATEGIES BACKTEST")
+    print(f"\n  ALL 5 STRATEGIES BACKTEST (time-stepped simulation)")
     print(f"  Capital: ₹{CAPITAL:,}/strategy | Lots: {LOT_MULT} | SL: {SL_PCT*100:.0f}% / ₹{MAX_SL_RS:,}")
     print(f"  Universe: {len(universe)} stocks | Days: {len(dates)}")
 
@@ -834,9 +952,9 @@ def main():
         for k in all_results:
             all_results[k].extend(day_results.get(k, []))
 
-    # Monthly summary
+    # Summary
     print(f"\n{'='*90}")
-    print(f"  MONTHLY SUMMARY — {len(dates)} trading days")
+    print(f"  SUMMARY — {len(dates)} trading days")
     print(f"{'='*90}")
 
     grand = 0
@@ -892,7 +1010,7 @@ def main():
             f.write(f"{'='*90}\n")
             for line in summary_lines:
                 f.write(line + "\n")
-        print(f"  Report saved to: {report_path}")
+        print(f"  Report saved to {report_path}")
 
 
 if __name__ == "__main__":
