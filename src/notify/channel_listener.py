@@ -122,6 +122,8 @@ OEH_FLOOR_LEVELS = [500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5
 OEH_TOLERANCE = 0.05            # ₹0.05 tolerance for high <= open check
 OEH_MIN_DROP_PCT = 0.3          # skip candidates with <0.3% drop (weak signal)
 OEH_BLOCKLIST = {"GODREJCP", "GRASIM"}  # repeat losers — skip these
+OEH_LOSS_CAP = 10000
+OEH_PROFIT_CAP = 25000
 
 # ---------------------------------------------------------------------------
 # OEL Scanner (Open=Low) — bullish counterpart to OEH
@@ -149,6 +151,8 @@ ORB_FLOOR_LEVELS = [500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5
 ORB_MIN_RANGE_PCT = 0.3         # opening range must be >= 0.3% of open
 ORB_MAX_RANGE_PCT = 3.0         # skip if range is too wide
 ORB_BLOCKLIST = {"GODREJCP", "GRASIM"}
+ORB_LOSS_CAP = 10000
+ORB_PROFIT_CAP = 25000
 
 # PDH/PDL Breakout config
 PDHL_ENABLED = True
@@ -222,6 +226,34 @@ def _oeh_free(trade_id: int, pnl: float):
         log.info("[OEH-CAP] Freed ₹%.0f + PnL ₹%.0f = avail ₹%.0f (locked: %d)",
                  locked, pnl, _oeh_capital_avail, len(_oeh_capital_locked))
 
+_oeh_daily_pnl: float = 0.0
+_oeh_daily_date: str = ""
+
+def _oeh_record_pnl(pnl: float):
+    global _oeh_daily_pnl, _oeh_daily_date
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    today = datetime.now(ZoneInfo(config.TIMEZONE)).strftime("%Y-%m-%d")
+    if _oeh_daily_date != today:
+        _oeh_daily_pnl = 0.0
+        _oeh_daily_date = today
+    _oeh_daily_pnl += pnl
+
+def _oeh_daily_cap_hit() -> bool:
+    global _oeh_daily_pnl, _oeh_daily_date
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    today = datetime.now(ZoneInfo(config.TIMEZONE)).strftime("%Y-%m-%d")
+    if _oeh_daily_date != today:
+        _oeh_daily_pnl = 0.0
+        _oeh_daily_date = today
+        return False
+    if _oeh_daily_pnl >= OEH_PROFIT_CAP:
+        return True
+    if _oeh_daily_pnl <= -OEH_LOSS_CAP:
+        return True
+    return False
+
 # ORB capital tracking — in-memory, resets on restart
 _orb_capital_avail: float = 0.0
 _orb_capital_locked: dict[int, float] = {}
@@ -246,6 +278,34 @@ def _orb_free(trade_id: int, pnl: float):
         _orb_capital_avail += locked + pnl
         log.info("[ORB-CAP] Freed ₹%.0f + PnL ₹%.0f = avail ₹%.0f (locked: %d)",
                  locked, pnl, _orb_capital_avail, len(_orb_capital_locked))
+
+_orb_daily_pnl: float = 0.0
+_orb_daily_date: str = ""
+
+def _orb_record_pnl(pnl: float):
+    global _orb_daily_pnl, _orb_daily_date
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    today = datetime.now(ZoneInfo(config.TIMEZONE)).strftime("%Y-%m-%d")
+    if _orb_daily_date != today:
+        _orb_daily_pnl = 0.0
+        _orb_daily_date = today
+    _orb_daily_pnl += pnl
+
+def _orb_daily_cap_hit() -> bool:
+    global _orb_daily_pnl, _orb_daily_date
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    today = datetime.now(ZoneInfo(config.TIMEZONE)).strftime("%Y-%m-%d")
+    if _orb_daily_date != today:
+        _orb_daily_pnl = 0.0
+        _orb_daily_date = today
+        return False
+    if _orb_daily_pnl >= ORB_PROFIT_CAP:
+        return True
+    if _orb_daily_pnl <= -ORB_LOSS_CAP:
+        return True
+    return False
 
 # PDHL capital tracking — in-memory, resets on restart
 _pdhl_capital_avail: float = 0.0
@@ -937,8 +997,10 @@ def _close_trade_by_id(trade_id: int, exit_price: float, reason: str) -> None:
             # Free capital if this was an OEH/ORB trade
             if row["id"] in _oeh_capital_locked:
                 _oeh_free(row["id"], net_pnl)
+                _oeh_record_pnl(net_pnl)
             if row["id"] in _orb_capital_locked:
                 _orb_free(row["id"], net_pnl)
+                _orb_record_pnl(net_pnl)
             if row["id"] in _pdhl_capital_locked:
                 _pdhl_free(row["id"], net_pnl)
                 _pdhl_record_pnl(net_pnl)
@@ -1908,6 +1970,11 @@ async def _run_oeh_scan():
         return
     log.info("[OEH] Scanner starting...")
 
+    if _oeh_daily_cap_hit():
+        log.info("[OEH] Daily cap already hit (pnl=₹%.0f), skipping scan", _oeh_daily_pnl)
+        _notify(f"*[OEH] Scan skipped* — daily cap hit (PnL: ₹{_oeh_daily_pnl:,.0f})")
+        return
+
     token = load_cached_token()
     if not token:
         log.error("[OEH] No valid Upstox token — scanner cannot run")
@@ -2016,6 +2083,9 @@ async def _run_oeh_scan():
     skipped_capital = 0
 
     for c in candidates:
+        if _oeh_daily_cap_hit():
+            log.info("[OEH] Daily cap hit mid-scan (pnl=₹%.0f), stopping", _oeh_daily_pnl)
+            break
         if _oeh_capital_avail < 5000:
             skipped_capital += len(candidates) - candidates.index(c)
             break
@@ -2079,6 +2149,11 @@ async def _run_orb_scan():
         log.info("[ORB] Market not open, skipping scan")
         return
     log.info("[ORB] Scanner starting...")
+
+    if _orb_daily_cap_hit():
+        log.info("[ORB] Daily cap already hit (pnl=₹%.0f), skipping scan", _orb_daily_pnl)
+        _notify(f"*[ORB] Scan skipped* — daily cap hit (PnL: ₹{_orb_daily_pnl:,.0f})")
+        return
 
     token = load_cached_token()
     if not token:
@@ -2195,6 +2270,9 @@ async def _run_orb_scan():
     skipped_capital = 0
 
     for c in candidates:
+        if _orb_daily_cap_hit():
+            log.info("[ORB] Daily cap hit mid-scan (pnl=₹%.0f), stopping", _orb_daily_pnl)
+            break
         if _orb_capital_avail < 5000:
             skipped_capital += len(candidates) - candidates.index(c)
             break
@@ -3606,6 +3684,9 @@ async def start_listener() -> None:
                 if not mc.is_market_open():
                     log.info("[OEH] Market closed, stopping rescans")
                     break
+                if _oeh_daily_cap_hit():
+                    log.info("[OEH] Daily cap hit, stopping rescans")
+                    break
                 if _oeh_capital_avail > 5000:
                     log.info("[OEH] Rescan starting — ₹%.0f available", _oeh_capital_avail)
                     try:
@@ -3785,6 +3866,9 @@ async def start_listener() -> None:
                 await asyncio.sleep(300)
                 if not mc.is_market_open():
                     log.info("[ORB] Market closed, stopping rescans")
+                    break
+                if _orb_daily_cap_hit():
+                    log.info("[ORB] Daily cap hit, stopping rescans")
                     break
                 if _orb_capital_avail > 5000:
                     log.info("[ORB] Rescan starting — ₹%.0f available", _orb_capital_avail)
