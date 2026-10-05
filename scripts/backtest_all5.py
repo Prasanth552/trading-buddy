@@ -35,6 +35,7 @@ CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "candle_cache"
 # Realism constraints
 SYM_COOLDOWN_MIN = 15       # minutes before re-entering same symbol after exit
 MAX_CONCURRENT = 8          # max open positions per strategy at any time
+MAX_ENTRIES_PER_SCAN = 3    # max new trades placed per scan tick (API/order throughput)
 
 # OEH config — capital-only gating, no daily caps
 OEH_TOLERANCE = 0.05
@@ -746,8 +747,11 @@ def _run_strategy_sim(strategy_name, ref_date, ud, opt_master, lot_sizes,
             # 2. At scan ticks, run scanner and try to enter new trades
             if current_time in scan_ticks:
                 new_candidates = scan_fn(current_time)
+                entries_this_tick = 0
                 for cand in new_candidates:
                     if cap_stopped:
+                        break
+                    if entries_this_tick >= MAX_ENTRIES_PER_SCAN:
                         break
                     if len(active_positions) >= MAX_CONCURRENT:
                         break
@@ -761,6 +765,7 @@ def _run_strategy_sim(strategy_name, ref_date, ud, opt_master, lot_sizes,
                     if avail_capital < 5000:
                         continue
                     if _try_enter(cand):
+                        entries_this_tick += 1
                         if realized_pnl >= profit_cap or realized_pnl <= -loss_cap:
                             cap_stopped = True
 
@@ -960,7 +965,7 @@ def main():
 
     print(f"\n  ALL 5 STRATEGIES BACKTEST (time-stepped simulation)")
     print(f"  Capital: ₹{CAPITAL:,}/strategy | Lots: {LOT_MULT} | SL: {SL_PCT*100:.0f}% / ₹{MAX_SL_RS:,}")
-    print(f"  Max concurrent: {MAX_CONCURRENT} | Symbol cooldown: {SYM_COOLDOWN_MIN}min")
+    print(f"  Max concurrent: {MAX_CONCURRENT} | Cooldown: {SYM_COOLDOWN_MIN}min | Max/scan: {MAX_ENTRIES_PER_SCAN}")
     print(f"  Universe: {len(universe)} stocks | Days: {len(dates)}")
 
     all_results = {"OEH": [], "ORB": [], "PDHL": [], "ORF": [], "AFT": []}
