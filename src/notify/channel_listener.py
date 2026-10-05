@@ -151,7 +151,7 @@ ORB_FLOOR_LEVELS = [500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5
 ORB_MIN_RANGE_PCT = 0.3         # opening range must be >= 0.3% of open
 ORB_MAX_RANGE_PCT = 3.0         # skip if range is too wide
 ORB_BLOCKLIST = {"GODREJCP", "GRASIM"}
-ORB_LOSS_CAP = 10000
+ORB_LOSS_CAP = 20000
 ORB_PROFIT_CAP = 25000
 
 # PDH/PDL Breakout config
