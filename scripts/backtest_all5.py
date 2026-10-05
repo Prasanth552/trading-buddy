@@ -32,8 +32,8 @@ CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "candle_cache"
 # OEH config
 OEH_TOLERANCE = 0.05
 OEH_MIN_DROP_PCT = 0.3
-OEH_LOSS_CAP = 10000
-OEH_PROFIT_CAP = 25000
+OEH_LOSS_CAP = 999999
+OEH_PROFIT_CAP = 999999
 
 # ORB config
 ORB_MIN_RANGE_PCT = 0.3
