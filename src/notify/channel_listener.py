@@ -756,8 +756,9 @@ def execute_signal(sig: ParsedSignal, *, channel: str = "ch1", max_lots: int | N
     db.init_db()
 
     # Daily loss limit — stop taking new trades if today's losses exceeded cap
+    # Strategy channels (oeh/orb/pdhl/orf/aft) manage their own per-strategy caps
     day_pnl = _todays_realised_pnl()
-    if day_pnl <= -MAX_DAILY_LOSS:
+    if channel not in ("oeh", "oel", "orb", "pdhl", "orf", "aft") and day_pnl <= -MAX_DAILY_LOSS:
         log.warning("DAILY LOSS LIMIT: today's P&L is ₹%.0f (limit -₹%d). Skipping new trade.",
                     day_pnl, MAX_DAILY_LOSS)
         _notify(
