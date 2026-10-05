@@ -32,6 +32,10 @@ STT_PCT = 0.000625
 LOT_MULT = 2
 CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "candle_cache"
 
+# Realism constraints
+SYM_COOLDOWN_MIN = 15       # minutes before re-entering same symbol after exit
+MAX_CONCURRENT = 8          # max open positions per strategy at any time
+
 # OEH config — capital-only gating, no daily caps
 OEH_TOLERANCE = 0.05
 OEH_MIN_DROP_PCT = 0.3
@@ -584,8 +588,9 @@ def _run_strategy_sim(strategy_name, ref_date, ud, opt_master, lot_sizes,
     avail_capital = CAPITAL
     realized_pnl = 0.0
     results = []
-    # track (sym, opt_type) currently in a position to avoid duplicate entries
     active_syms: set[tuple[str, str]] = set()
+    # cooldown: (sym, opt_type) -> earliest re-entry time (HH:MM)
+    sym_cooldown: dict[tuple[str, str], str] = {}
     cap_stopped = False
 
     if verbose:
@@ -673,6 +678,13 @@ def _run_strategy_sim(strategy_name, ref_date, ud, opt_master, lot_sizes,
         avail_capital += pos.margin
         realized_pnl += pnl
         active_syms.discard((pos.sym, pos.opt_type))
+        # set cooldown: can't re-enter this symbol for SYM_COOLDOWN_MIN minutes
+        eh, em = _hhmm_to_tuple(exit_time)
+        em += SYM_COOLDOWN_MIN
+        while em >= 60:
+            em -= 60
+            eh += 1
+        sym_cooldown[(pos.sym, pos.opt_type)] = _tick_hhmm(eh, em)
 
         results.append({
             "sym": pos.sym, "pnl": pnl, "reason": exit_reason,
@@ -737,9 +749,14 @@ def _run_strategy_sim(strategy_name, ref_date, ud, opt_master, lot_sizes,
                 for cand in new_candidates:
                     if cap_stopped:
                         break
+                    if len(active_positions) >= MAX_CONCURRENT:
+                        break
                     sym = cand["symbol"]
                     ot = cand.get("opt_type", "PE")
                     if (sym, ot) in active_syms:
+                        continue
+                    cooldown_until = sym_cooldown.get((sym, ot))
+                    if cooldown_until and current_time < cooldown_until:
                         continue
                     if avail_capital < 5000:
                         continue
@@ -943,6 +960,7 @@ def main():
 
     print(f"\n  ALL 5 STRATEGIES BACKTEST (time-stepped simulation)")
     print(f"  Capital: ₹{CAPITAL:,}/strategy | Lots: {LOT_MULT} | SL: {SL_PCT*100:.0f}% / ₹{MAX_SL_RS:,}")
+    print(f"  Max concurrent: {MAX_CONCURRENT} | Symbol cooldown: {SYM_COOLDOWN_MIN}min")
     print(f"  Universe: {len(universe)} stocks | Days: {len(dates)}")
 
     all_results = {"OEH": [], "ORB": [], "PDHL": [], "ORF": [], "AFT": []}
