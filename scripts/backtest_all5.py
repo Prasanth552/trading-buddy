@@ -723,8 +723,7 @@ def run_day(ud, ref_date, eq_keys, universe, opt_master, lot_sizes, verbose=True
     cands, sc = scan_oeh(candles_5m, universe)
     print(f"\n  --- OEH --- Scanned: {sc} | Candidates: {len(cands)}")
     day_results["OEH"] = _exec_trades(cands, ref_date, ud, opt_master, lot_sizes,
-                                       OEH_LOSS_CAP, OEH_PROFIT_CAP, "OEH", verbose,
-                                       no_recycle=True)
+                                       OEH_LOSS_CAP, OEH_PROFIT_CAP, "OEH", verbose)
 
     # 2. ORB
     cands, sc = scan_orb(candles_5m, universe)
