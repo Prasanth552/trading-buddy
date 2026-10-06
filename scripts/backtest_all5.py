@@ -733,9 +733,6 @@ def _run_strategy_sim(strategy_name, ref_date, ud, opt_master, lot_sizes,
         for mm in range(mm_start, mm_end):
             current_time = _tick_hhmm(hh, mm)
 
-            if cap_stopped:
-                break
-
             # 1. Tick all active positions — check for exits
             closed_this_tick = []
             for pos in active_positions:
@@ -750,9 +747,9 @@ def _run_strategy_sim(strategy_name, ref_date, ud, opt_master, lot_sizes,
 
                 if realized_pnl >= profit_cap or realized_pnl <= -loss_cap:
                     cap_stopped = True
-                    break
 
-            if cap_stopped:
+            # If all positions closed, no point continuing
+            if cap_stopped and not active_positions:
                 break
 
             # 2. At scan ticks, run scanner and try to enter new trades
@@ -780,7 +777,7 @@ def _run_strategy_sim(strategy_name, ref_date, ud, opt_master, lot_sizes,
                         if realized_pnl >= profit_cap or realized_pnl <= -loss_cap:
                             cap_stopped = True
 
-        if cap_stopped:
+        if cap_stopped and not active_positions:
             break
 
     # EOD: close remaining positions
