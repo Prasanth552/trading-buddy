@@ -96,7 +96,7 @@ CH2F_SKIP_HOURS = {12, 13}  # skip 12:xx and 13:xx signals
 # Scanner (ch5) — auto-execute config
 # ---------------------------------------------------------------------------
 SCANNER_ENABLED = True
-SCANNER_RUN_TIME = "09:20"       # IST — run once after ORB range forms
+SCANNER_RUN_TIME = "09:24"       # IST — staggered from OEH/PDHL to avoid API rate limit
 SCANNER_MIN_CONFIDENCE = 65      # only execute signals scoring >= this
 SCANNER_MAX_TRADES = 3           # max trades per scanner run
 SCANNER_SL_PCT = 0.30            # 30% of premium as stop-loss
@@ -156,7 +156,7 @@ ORB_PROFIT_CAP = 25000
 
 # PDH/PDL Breakout config
 PDHL_ENABLED = True
-PDHL_RUN_TIME = "09:20"          # IST — right after first 5-min candle closes
+PDHL_RUN_TIME = "09:22"          # IST — staggered from OEH (09:20) to avoid API rate limit
 PDHL_CAPITAL = 150000
 PDHL_SL_PCT = 0.30
 PDHL_MAX_SL_RS = 5000
@@ -1828,16 +1828,14 @@ async def _parallel_fetch_candles(ud, sym_key_pairs, from_dt, to_dt, interval,
     empty_count = 0
 
     def _fetch_one(sym, inst_key):
-        for attempt in range(2):
+        for attempt in range(3):
             try:
                 candles = ud.historical_data(inst_key, from_dt, to_dt, interval)
                 if candles:
                     return sym, candles
-                if attempt == 0:
-                    _pt.sleep(0.3)
+                _pt.sleep(0.5 * (attempt + 1))
             except Exception:
-                if attempt == 0:
-                    _pt.sleep(0.5)
+                _pt.sleep(1.0 * (attempt + 1))
         return sym, None
 
     loop = asyncio.get_event_loop()
