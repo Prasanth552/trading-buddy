@@ -287,15 +287,26 @@ class Position:
     def tick(self, current_time):
         """Check this position at current_time. Returns (exit_price, exit_reason, pnl) or None."""
         cn = self.opt_candle_map.get(current_time)
+
+        # hard exit check even if no candle at this exact minute
+        if self.hard_exit_time and current_time >= self.hard_exit_time:
+            if cn:
+                ltp = cn["close"]
+            else:
+                # find the last available candle before this time
+                earlier = [t for t in self.opt_candle_map if t < current_time]
+                if earlier:
+                    ltp = self.opt_candle_map[max(earlier)]["close"]
+                else:
+                    ltp = self.entry
+            pnl = (ltp - self.entry) * self.lot - _calc_charges(self.entry, ltp, self.lot)
+            return ltp, "TIME", pnl
+
         if cn is None:
             return None
 
         high, low, close = cn["high"], cn["low"], cn["close"]
         ltp = close
-
-        if self.hard_exit_time and current_time >= self.hard_exit_time:
-            pnl = (ltp - self.entry) * self.lot - _calc_charges(self.entry, ltp, self.lot)
-            return ltp, "TIME", pnl
 
         # peak tracking using high
         gross_high = (high - self.entry) * self.lot
