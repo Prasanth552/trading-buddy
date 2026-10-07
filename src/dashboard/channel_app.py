@@ -2282,7 +2282,7 @@ async function loadForex(){
     ].map(([l,v,c])=>'<div style="background:var(--sf);border:1px solid var(--bd);border-radius:10px;padding:10px;text-align:center">'+
       '<div style="font-size:16px;font-weight:700;font-family:var(--mn);color:'+c+'">'+v+'</div>'+
       '<div style="font-size:9px;text-transform:uppercase;letter-spacing:.6px;color:var(--mt);margin-top:2px">'+l+'</div></div>').join('');
-    $('fx-cfg').textContent='₹'+s.trade_amount.toLocaleString('en-IN')+'/trade · '+s.payout_pct*100+'% payout · ₹'+(s.daily_loss_cap/1000)+'K loss cap · '+(s.pairs||[]).join(' + ')
+    $('fx-cfg').textContent='₹'+s.trade_amount.toLocaleString('en-IN')+'/trade · '+s.payout_pct*100+'% payout · ₹'+(s.daily_loss_cap/1000)+'K day cap · ₹'+((s.pair_daily_loss_cap||10000)/1000)+'K/pair cap · '+(s.pairs||[]).join(' + ')
       +(s.started_at?' · started '+s.started_at:'');
     const today=s.now?.split(' ')[0];
     const todayT=trades.filter(t=>t.day===today);

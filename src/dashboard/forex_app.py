@@ -32,6 +32,7 @@ STARTING_CAPITAL = 150_000
 TRADE_AMOUNT = 2_000
 PAYOUT_PCT = 0.80
 MAX_DAILY_LOSS = 20_000
+MAX_PAIR_DAILY_LOSS = 10_000
 MIN_CAPITAL = 20_000
 BEST_HOURS_UTC = {0, 1, 2, 3, 4, 19, 21, 22, 23}
 PAIRS = {"EUR/GBP": "EURGBP=X", "CAD/CHF": "CADCHF=X"}
@@ -45,6 +46,7 @@ _state: dict[str, Any] = {
     "peak_capital": STARTING_CAPITAL,
     "trades": [],
     "daily_pnl": {},
+    "pair_daily_pnl": {},  # {"2026-10-05_EUR/GBP": pnl}
     "candles": {},  # {pair: [candles]}
     "running": False,
     "last_poll": None,
@@ -194,6 +196,11 @@ def _execute_paper_trade(signal: dict) -> dict | None:
     day_pnl = _state["daily_pnl"].get(day_key, 0)
     if day_pnl <= -MAX_DAILY_LOSS:
         return None
+    pair = signal.get("pair", "EUR/GBP")
+    pair_key = f"{day_key}_{pair}"
+    pair_pnl = _state["pair_daily_pnl"].get(pair_key, 0)
+    if pair_pnl <= -MAX_PAIR_DAILY_LOSS:
+        return None
     if _state["capital"] < MIN_CAPITAL or _state["capital"] < TRADE_AMOUNT:
         return None
 
@@ -227,6 +234,7 @@ def _execute_paper_trade(signal: dict) -> dict | None:
     dd = _state["peak_capital"] - _state["capital"]
     _state["max_drawdown"] = max(_state["max_drawdown"], dd)
     _state["daily_pnl"][day_key] = day_pnl + pnl
+    _state["pair_daily_pnl"][pair_key] = pair_pnl + pnl
 
     trade = {
         "id": len(_state["trades"]) + 1,
@@ -381,6 +389,7 @@ def api_status() -> JSONResponse:
         "trade_amount": TRADE_AMOUNT,
         "payout_pct": PAYOUT_PCT,
         "daily_loss_cap": MAX_DAILY_LOSS,
+        "pair_daily_loss_cap": MAX_PAIR_DAILY_LOSS,
         "pairs": list(PAIRS.keys()),
         "started_at": _state["started_at"],
         "errors": _state["errors"][-5:],
