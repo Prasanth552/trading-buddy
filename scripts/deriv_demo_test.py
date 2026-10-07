@@ -28,14 +28,19 @@ async def send_recv(ws, msg):
     return json.loads(await asyncio.wait_for(ws.recv(), timeout=15))
 
 
-def ws_connect(uri):
+async def ws_connect(uri):
     """Connect with or without extra_headers depending on websockets version."""
     try:
-        return websockets.connect(uri, extra_headers={
+        return await websockets.connect(uri, additional_headers={
             "Origin": "https://app.deriv.com",
         })
     except TypeError:
-        return websockets.connect(uri)
+        try:
+            return await websockets.connect(uri, extra_headers={
+                "Origin": "https://app.deriv.com",
+            })
+        except TypeError:
+            return await websockets.connect(uri)
 
 
 async def main():
