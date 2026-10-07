@@ -24,13 +24,35 @@ WS_URL = f"wss://ws.derivws.com/websockets/v3?app_id={APP_ID}"
 
 async def main():
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        page = await browser.new_page()
+        browser = await p.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-blink-features=AutomationControlled",
+            ],
+        )
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        )
+        page = await context.new_page()
+
+        # Hide webdriver flag
+        await page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
         # Navigate to deriv first to get proper cookies/origin
         print("Opening browser and loading Deriv...", flush=True)
-        await page.goto("https://deriv.com", wait_until="domcontentloaded", timeout=30000)
-        print("  Page loaded.", flush=True)
+        try:
+            resp = await page.goto("https://deriv.com", wait_until="domcontentloaded", timeout=30000)
+            print(f"  Page loaded. Status: {resp.status if resp else 'no response'}", flush=True)
+            print(f"  URL: {page.url}", flush=True)
+        except Exception as e:
+            print(f"  Page load failed: {e}", flush=True)
+            print("  Trying app.deriv.com instead...", flush=True)
+            try:
+                resp = await page.goto("https://app.deriv.com", wait_until="domcontentloaded", timeout=30000)
+                print(f"  app.deriv.com loaded. Status: {resp.status if resp else 'no response'}", flush=True)
+            except Exception as e2:
+                print(f"  Also failed: {e2}", flush=True)
 
         # Create WebSocket connection from within the browser
         print(f"\nConnecting WebSocket via browser...", flush=True)
@@ -52,12 +74,30 @@ async def main():
 
             try {{
                 // Connect
-                const ws = await new Promise((resolve, reject) => {{
-                    const s = new WebSocket(WS_URL);
-                    s.onopen = () => resolve(s);
-                    s.onerror = () => reject(new Error('ws connection failed'));
-                    setTimeout(() => reject(new Error('ws timeout')), 10000);
-                }});
+                // Try multiple endpoints
+                const endpoints = [
+                    WS_URL,
+                    WS_URL.replace('ws.derivws.com', 'ws.binaryws.com'),
+                    WS_URL.replace('ws.derivws.com', 'green.derivws.com'),
+                ];
+                let ws = null;
+                let lastErr = '';
+                for (const url of endpoints) {{
+                    try {{
+                        ws = await new Promise((resolve, reject) => {{
+                            const s = new WebSocket(url);
+                            s.onopen = () => resolve(s);
+                            s.onerror = (e) => reject(new Error('ws_error at ' + url));
+                            s.onclose = (e) => reject(new Error('ws_closed code=' + e.code + ' reason=' + e.reason + ' at ' + url));
+                            setTimeout(() => reject(new Error('ws_timeout at ' + url)), 10000);
+                        }});
+                        break;
+                    }} catch (e) {{
+                        lastErr = e.message;
+                        ws = null;
+                    }}
+                }}
+                if (!ws) return {{error: lastErr, tried: endpoints.length}};
 
                 const results = {{}};
                 results.connected = true;
