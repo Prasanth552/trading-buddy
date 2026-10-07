@@ -23,15 +23,19 @@ ENDPOINTS = [
     f"wss://blue.derivws.com/websockets/v3?app_id={APP_ID}",
 ]
 
-HEADERS = {
-    "Origin": "https://app.deriv.com",
-    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
-}
-
-
 async def send_recv(ws, msg):
     await ws.send(json.dumps(msg))
     return json.loads(await asyncio.wait_for(ws.recv(), timeout=15))
+
+
+def ws_connect(uri):
+    """Connect with or without extra_headers depending on websockets version."""
+    try:
+        return websockets.connect(uri, extra_headers={
+            "Origin": "https://app.deriv.com",
+        })
+    except TypeError:
+        return websockets.connect(uri)
 
 
 async def main():
@@ -39,9 +43,7 @@ async def main():
     for uri in ENDPOINTS:
         try:
             print(f"Trying {uri[:50]}...", end=" ", flush=True)
-            ws = await asyncio.wait_for(
-                websockets.connect(uri, extra_headers=HEADERS), timeout=10
-            )
+            ws = await asyncio.wait_for(ws_connect(uri), timeout=10)
             print("Connected!")
             break
         except Exception as e:
@@ -49,28 +51,14 @@ async def main():
             ws = None
 
     if not ws:
-        print("\nAll WebSocket endpoints failed. Trying REST approach...")
-        # Try REST API
-        try:
-            import urllib.request
-            url = f"https://api.deriv.com/websockets/v3?app_id={APP_ID}"
-            req = urllib.request.Request(url, headers=HEADERS)
-            resp = urllib.request.urlopen(req, timeout=10)
-            print(f"REST status: {resp.status}")
-        except Exception as e:
-            print(f"REST also failed: {e}")
-
-        # Try with numeric app_id as fallback
-        print("\nTrying with default app_id 1089 + browser headers...")
+        print("\nTrying with default app_id 1089...")
         for uri in [
             "wss://ws.derivws.com/websockets/v3?app_id=1089",
             "wss://ws.binaryws.com/websockets/v3?app_id=1089",
         ]:
             try:
                 print(f"  {uri[:50]}...", end=" ", flush=True)
-                ws = await asyncio.wait_for(
-                    websockets.connect(uri, extra_headers=HEADERS), timeout=10
-                )
+                ws = await asyncio.wait_for(ws_connect(uri), timeout=10)
                 print("Connected!")
                 break
             except Exception as e:
