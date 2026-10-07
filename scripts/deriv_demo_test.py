@@ -1,7 +1,6 @@
-"""Deriv API Demo Test — check pairs, contracts, and place a test trade.
+"""Deriv API Demo Test — PAT + App ID (REST/WebSocket hybrid).
 
 Run on VM:
-    cd ~/Trading-Buddy && .venv/bin/pip install websockets
     cd ~/Trading-Buddy && .venv/bin/python scripts/deriv_demo_test.py
 """
 import asyncio
@@ -11,16 +10,24 @@ import sys
 try:
     import websockets
 except ImportError:
-    print("Install websockets: pip install websockets")
+    print("Install: pip install websockets")
     sys.exit(1)
 
-TOKEN = "pat_04ee674de985b74c6cd04abe3dfa25ec50be32e8759c306b24209bc4e7c56851"
+PAT_TOKEN = "pat_04ee674de985b74c6cd04abe3dfa25ec50be32e8759c306b24209bc4e7c56851"
+APP_ID = "34BQhpQsZoNW0za6aNV7F"
+
 ENDPOINTS = [
-    "wss://ws.derivws.com/websockets/v3?app_id=1089",
-    "wss://ws.binaryws.com/websockets/v3?app_id=1089",
-    "wss://green.derivws.com/websockets/v3?app_id=1089",
-    "wss://blue.derivws.com/websockets/v3?app_id=1089",
+    f"wss://ws.derivws.com/websockets/v3?app_id={APP_ID}",
+    f"wss://ws.binaryws.com/websockets/v3?app_id={APP_ID}",
+    f"wss://green.derivws.com/websockets/v3?app_id={APP_ID}",
+    f"wss://blue.derivws.com/websockets/v3?app_id={APP_ID}",
 ]
+
+HEADERS = {
+    "Origin": "https://app.deriv.com",
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+}
+
 
 async def send_recv(ws, msg):
     await ws.send(json.dumps(msg))
@@ -28,12 +35,13 @@ async def send_recv(ws, msg):
 
 
 async def main():
-    # Try endpoints until one works
     ws = None
     for uri in ENDPOINTS:
         try:
-            print(f"Trying {uri[:40]}...", end=" ", flush=True)
-            ws = await asyncio.wait_for(websockets.connect(uri), timeout=10)
+            print(f"Trying {uri[:50]}...", end=" ", flush=True)
+            ws = await asyncio.wait_for(
+                websockets.connect(uri, extra_headers=HEADERS), timeout=10
+            )
             print("Connected!")
             break
         except Exception as e:
@@ -41,7 +49,41 @@ async def main():
             ws = None
 
     if not ws:
-        print("\nAll endpoints failed. Check network/firewall.")
+        print("\nAll WebSocket endpoints failed. Trying REST approach...")
+        # Try REST API
+        try:
+            import urllib.request
+            url = f"https://api.deriv.com/websockets/v3?app_id={APP_ID}"
+            req = urllib.request.Request(url, headers=HEADERS)
+            resp = urllib.request.urlopen(req, timeout=10)
+            print(f"REST status: {resp.status}")
+        except Exception as e:
+            print(f"REST also failed: {e}")
+
+        # Try with numeric app_id as fallback
+        print("\nTrying with default app_id 1089 + browser headers...")
+        for uri in [
+            "wss://ws.derivws.com/websockets/v3?app_id=1089",
+            "wss://ws.binaryws.com/websockets/v3?app_id=1089",
+        ]:
+            try:
+                print(f"  {uri[:50]}...", end=" ", flush=True)
+                ws = await asyncio.wait_for(
+                    websockets.connect(uri, extra_headers=HEADERS), timeout=10
+                )
+                print("Connected!")
+                break
+            except Exception as e:
+                print(f"Failed: {e}")
+                ws = None
+
+    if not ws:
+        print("\n\nAll connection methods failed.")
+        print("Possible issues:")
+        print("  1. Deriv may be blocked in your region/IP")
+        print("  2. App ID format might need to be numeric")
+        print("  3. Try: curl -v https://ws.derivws.com 2>&1 | head -20")
+        print("  4. Try accessing deriv.com from your browser on the VM")
         return
 
     try:
@@ -49,147 +91,111 @@ async def main():
         print("\n" + "=" * 80)
         print("  STEP 1: Authorize")
         print("=" * 80)
-        resp = await send_recv(ws, {"authorize": TOKEN})
+        resp = await send_recv(ws, {"authorize": PAT_TOKEN})
         if "error" in resp:
             print(f"  AUTH ERROR: {resp['error']}")
-            print(f"  Full response: {json.dumps(resp, indent=2)[:500]}")
-            print("\n  Token might be wrong. Get it from: api.deriv.com → Manage Tokens")
-            return
-        auth = resp["authorize"]
-        print(f"  Account:  {auth['loginid']}")
-        print(f"  Balance:  {auth['balance']} {auth['currency']}")
+            # Try without PAT prefix
+            print("  Trying token without pat_ prefix...")
+            token_short = PAT_TOKEN.replace("pat_", "")
+            resp = await send_recv(ws, {"authorize": token_short})
+            if "error" in resp:
+                print(f"  Still error: {resp['error']}")
+                print("\n  You may need an old-style API token:")
+                print("  deriv.com → Settings → Security → API Token")
+                return
+
+        auth = resp.get("authorize", {})
+        print(f"  Account:  {auth.get('loginid')}")
+        print(f"  Balance:  {auth.get('balance')} {auth.get('currency')}")
         print(f"  Virtual:  {auth.get('is_virtual', '?')}")
-        print(f"  Email:    {auth.get('email', '?')}")
 
         # 2. Get forex symbols
         print("\n" + "=" * 80)
         print("  STEP 2: Available Forex Pairs")
         print("=" * 80)
         resp = await send_recv(ws, {"active_symbols": "brief", "product_type": "basic"})
-        symbols = resp.get("active_symbols", [])
-        forex = [s for s in symbols if s.get("market") == "forex"]
-        print(f"  Total forex pairs: {len(forex)}")
-
-        # Find our pairs
-        our_pairs = {}
-        for s in forex:
-            sym = s["symbol"].lower()
-            name = s.get("display_name", "").lower()
-            if "eurgbp" in sym or ("eur" in name and "gbp" in name):
-                our_pairs["EUR/GBP"] = s
-            if "cadchf" in sym or ("cad" in name and "chf" in name):
-                our_pairs["CAD/CHF"] = s
-
-        if our_pairs:
-            print(f"\n  OUR PAIRS FOUND:")
-            for label, s in our_pairs.items():
-                print(f"    ✓ {label}: symbol={s['symbol']}, pip={s.get('pip','?')}, spot={s.get('spot','?')}")
+        if "error" in resp:
+            print(f"  Error: {resp['error']}")
         else:
-            print(f"\n  EUR/GBP and CAD/CHF NOT found. All forex pairs:")
-            for s in sorted(forex, key=lambda x: x.get("display_name", "")):
-                print(f"    {s['symbol']:<15s} {s.get('display_name',''):<20s} {s.get('submarket_display_name','')}")
+            symbols = resp.get("active_symbols", [])
+            forex = [s for s in symbols if s.get("market") == "forex"]
+            print(f"  Total forex pairs: {len(forex)}")
 
-        # 3. Check contracts for each pair
-        print("\n" + "=" * 80)
-        print("  STEP 3: Available Contracts")
-        print("=" * 80)
+            our_pairs = {}
+            for s in forex:
+                sym = s["symbol"].lower()
+                name = s.get("display_name", "").lower()
+                if "eurgbp" in sym or ("eur" in name and "gbp" in name):
+                    our_pairs["EUR/GBP"] = s
+                if "cadchf" in sym or ("cad" in name and "chf" in name):
+                    our_pairs["CAD/CHF"] = s
 
-        check_symbols = list(our_pairs.values()) if our_pairs else []
-        # Also check synthetic indices as fallback
-        for test in ["frxEURGBP", "frxCADCHF", "frxEURUSD", "R_10", "R_50", "R_100", "1HZ10V", "1HZ100V"]:
-            if not any(s["symbol"] == test for s in check_symbols):
-                check_symbols.append({"symbol": test, "display_name": test})
-
-        for s in check_symbols:
-            sym = s["symbol"]
-            try:
-                resp = await send_recv(ws, {"contracts_for": sym, "product_type": "basic"})
-                if "error" in resp:
-                    continue
-                avail = resp.get("contracts_for", {}).get("available", [])
-                rise_fall = [c for c in avail if c.get("contract_type") in ("CALL", "PUT", "CALLE", "PUTE", "DIGITDIFF", "DIGITOVER", "DIGITUNDER")]
-
-                if rise_fall:
-                    print(f"\n  {sym} ({s.get('display_name', '')}):")
-                    for c in avail:
-                        ct = c.get("contract_type", "")
-                        cat = c.get("contract_category_display", "")
-                        dur_min = c.get("min_contract_duration", "")
-                        dur_max = c.get("max_contract_duration", "")
-                        sub = c.get("submarket", "")
-                        print(f"    {ct:<12s} | {cat:<25s} | duration: {dur_min} - {dur_max}")
-            except Exception as e:
-                pass
-
-        # 4. Try a demo trade (Rise/Fall, smallest amount, 1 min)
-        if our_pairs:
-            print("\n" + "=" * 80)
-            print("  STEP 4: Demo Trade Test")
-            print("=" * 80)
-            test_pair = list(our_pairs.values())[0]
-            sym = test_pair["symbol"]
-            print(f"  Getting price proposal for {sym} CALL 1min $1...")
-
-            resp = await send_recv(ws, {
-                "proposal": 1,
-                "amount": "1",
-                "basis": "stake",
-                "contract_type": "CALL",
-                "currency": "USD",
-                "duration": 1,
-                "duration_unit": "m",
-                "symbol": sym,
-            })
-
-            if "error" in resp:
-                print(f"  Proposal error: {resp['error'].get('message', resp['error'])}")
-                # Try with different duration
-                print(f"  Trying 5 ticks instead...")
-                resp = await send_recv(ws, {
-                    "proposal": 1,
-                    "amount": "1",
-                    "basis": "stake",
-                    "contract_type": "CALL",
-                    "currency": "USD",
-                    "duration": 5,
-                    "duration_unit": "t",
-                    "symbol": sym,
-                })
-                if "error" in resp:
-                    print(f"  Still error: {resp['error'].get('message', resp['error'])}")
-                else:
-                    p = resp["proposal"]
-                    print(f"  ✓ Proposal OK!")
-                    print(f"    Payout: {p.get('payout', '?')}")
-                    print(f"    Ask price: {p.get('ask_price', '?')}")
-                    print(f"    Spot: {p.get('spot', '?')}")
-                    print(f"    ID: {p.get('id', '?')}")
+            if our_pairs:
+                for label, s in our_pairs.items():
+                    print(f"  ✓ {label}: symbol={s['symbol']}, spot={s.get('spot','?')}")
             else:
-                p = resp["proposal"]
-                print(f"  ✓ Proposal OK!")
-                print(f"    Payout: {p.get('payout', '?')}")
-                print(f"    Ask price (stake): {p.get('ask_price', '?')}")
-                print(f"    Spot: {p.get('spot', '?')}")
-                print(f"    Proposal ID: {p.get('id', '?')}")
+                print("  EUR/GBP / CAD/CHF not found. All forex:")
+                for s in sorted(forex, key=lambda x: x.get("display_name", "")):
+                    print(f"    {s['symbol']:<15s} {s.get('display_name','')}")
 
-                # Buy it!
-                print(f"\n  Buying demo trade...")
-                buy_resp = await send_recv(ws, {
-                    "buy": p["id"],
-                    "price": float(p["ask_price"]) + 1,
-                })
-                if "error" in buy_resp:
-                    print(f"  Buy error: {buy_resp['error'].get('message', buy_resp['error'])}")
-                else:
-                    b = buy_resp.get("buy", {})
-                    print(f"  ✓ TRADE PLACED!")
-                    print(f"    Contract ID: {b.get('contract_id', '?')}")
-                    print(f"    Buy price: {b.get('buy_price', '?')}")
-                    print(f"    Payout: {b.get('payout', '?')}")
-                    print(f"    Start time: {b.get('start_time', '?')}")
+            # 3. Contracts
+            print("\n" + "=" * 80)
+            print("  STEP 3: Contracts")
+            print("=" * 80)
+            test_syms = list(our_pairs.values()) if our_pairs else []
+            for fallback in ["frxEURGBP", "frxCADCHF", "frxEURUSD", "R_50", "R_100", "1HZ100V"]:
+                if not any(s["symbol"] == fallback for s in test_syms):
+                    test_syms.append({"symbol": fallback, "display_name": fallback})
+
+            for s in test_syms:
+                sym = s["symbol"]
+                try:
+                    resp = await send_recv(ws, {"contracts_for": sym, "product_type": "basic"})
+                    if "error" in resp:
+                        continue
+                    avail = resp.get("contracts_for", {}).get("available", [])
+                    call_put = [c for c in avail if c.get("contract_type") in ("CALL", "PUT")]
+                    if call_put or avail:
+                        print(f"\n  {sym} ({s.get('display_name', '')}):")
+                        for c in avail[:15]:
+                            ct = c.get("contract_type", "")
+                            cat = c.get("contract_category_display", "")
+                            dur_min = c.get("min_contract_duration", "")
+                            dur_max = c.get("max_contract_duration", "")
+                            print(f"    {ct:<12s} | {cat:<25s} | {dur_min} - {dur_max}")
+                except Exception:
+                    pass
+
+            # 4. Demo trade
+            if our_pairs:
+                print("\n" + "=" * 80)
+                print("  STEP 4: Demo Trade")
+                print("=" * 80)
+                sym = list(our_pairs.values())[0]["symbol"]
+                for dur, unit in [(1, "m"), (5, "t"), (2, "m"), (5, "m")]:
+                    print(f"  Trying {sym} CALL {dur}{unit} $1...", end=" ", flush=True)
+                    resp = await send_recv(ws, {
+                        "proposal": 1, "amount": "1", "basis": "stake",
+                        "contract_type": "CALL", "currency": "USD",
+                        "duration": dur, "duration_unit": unit, "symbol": sym,
+                    })
+                    if "error" in resp:
+                        print(f"Error: {resp['error'].get('message','')}")
+                        continue
+                    p = resp["proposal"]
+                    print(f"OK! payout={p.get('payout')} ask={p.get('ask_price')} spot={p.get('spot')}")
+
+                    print(f"  Buying demo trade...")
+                    buy = await send_recv(ws, {"buy": p["id"], "price": float(p["ask_price"]) + 1})
+                    if "error" in buy:
+                        print(f"  Buy error: {buy['error'].get('message','')}")
+                    else:
+                        b = buy.get("buy", {})
+                        print(f"  ✓ TRADE PLACED! contract_id={b.get('contract_id')} buy_price={b.get('buy_price')} payout={b.get('payout')}")
+                    break
 
         print("\n" + "=" * 80)
-        print("  DONE — Copy the output above and share with me!")
+        print("  DONE")
         print("=" * 80)
 
     finally:
