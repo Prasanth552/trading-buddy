@@ -1817,29 +1817,40 @@ async def _run_scanner_once():
 # Parallel candle fetch helper
 # ---------------------------------------------------------------------------
 async def _parallel_fetch_candles(ud, sym_key_pairs, from_dt, to_dt, interval,
-                                  batch_size=10, label=""):
+                                  batch_size=5, label=""):
     """Fetch candles for many symbols in parallel using thread pool.
-    Returns dict {symbol: candles_list (non-empty only)}."""
+    Returns dict {symbol: candles_list (non-empty only)}.
+    batch_size kept small (5) to avoid Upstox/Cloudflare 429 rate limits.
+    Each call hits 2 endpoints (historical + intraday), so 5 workers = 10 reqs."""
     import asyncio
     import time as _pt
     from concurrent.futures import ThreadPoolExecutor
 
     results = {}
     empty_count = 0
+    rate_limited = False
 
     def _fetch_one(sym, inst_key):
+        nonlocal rate_limited
         for attempt in range(3):
             try:
                 candles = ud.historical_data(inst_key, from_dt, to_dt, interval)
                 if candles:
                     return sym, candles
                 _pt.sleep(0.5 * (attempt + 1))
-            except Exception:
-                _pt.sleep(1.0 * (attempt + 1))
+            except Exception as exc:
+                if "429" in str(exc) or "rate_limited" in str(exc):
+                    rate_limited = True
+                    _pt.sleep(5.0 * (attempt + 1))
+                else:
+                    _pt.sleep(1.0 * (attempt + 1))
         return sym, None
 
     loop = asyncio.get_event_loop()
     for i in range(0, len(sym_key_pairs), batch_size):
+        if rate_limited:
+            await asyncio.sleep(10.0)
+            rate_limited = False
         batch = sym_key_pairs[i:i + batch_size]
         with ThreadPoolExecutor(max_workers=batch_size) as pool:
             futures = [
@@ -1853,7 +1864,7 @@ async def _parallel_fetch_candles(ud, sym_key_pairs, from_dt, to_dt, interval,
             else:
                 empty_count += 1
         if i + batch_size < len(sym_key_pairs):
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(1.0)
     if label:
         log.info("[%s] Parallel fetch done: %d/%d ok, %d empty",
                  label, len(results), len(sym_key_pairs), empty_count)
