@@ -16,11 +16,16 @@ except ImportError:
 PAT_TOKEN = "pat_04ee674de985b74c6cd04abe3dfa25ec50be32e8759c306b24209bc4e7c56851"
 APP_ID = "34BQhpQsZoNW0za6aNV7F"
 
+# Cloudflare Worker proxy — deploy scripts/deriv_ws_proxy/ first
+# Replace with your actual worker URL after deploying
+PROXY_HOST = "deriv-ws-proxy.tbprasanth.workers.dev"
+
 ENDPOINTS = [
+    # Proxy first (bypasses Cloudflare bot detection from India)
+    f"wss://{PROXY_HOST}/websockets/v3?app_id={APP_ID}",
+    # Direct endpoints as fallback
     f"wss://ws.derivws.com/websockets/v3?app_id={APP_ID}",
     f"wss://ws.binaryws.com/websockets/v3?app_id={APP_ID}",
-    f"wss://green.derivws.com/websockets/v3?app_id={APP_ID}",
-    f"wss://blue.derivws.com/websockets/v3?app_id={APP_ID}",
 ]
 
 async def send_recv(ws, msg):
