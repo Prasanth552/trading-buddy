@@ -284,8 +284,29 @@ class Position:
         self.strategy = strategy
         self.candidate = candidate
 
+    def _net_pnl_at(self, price):
+        gross = (price - self.entry) * self.lot
+        return gross - _calc_charges(self.entry, price, self.lot)
+
+    def _update_floor(self, net_pnl_at_peak):
+        if net_pnl_at_peak > self.peak_net:
+            self.peak_net = net_pnl_at_peak
+        for fl in FLOOR_STEPS:
+            if self.peak_net >= fl:
+                self.stepped_floor = fl
+
     def tick(self, current_time):
-        """Check this position at current_time. Returns (exit_price, exit_reason, pnl) or None."""
+        """Check this position at current_time using full OHLC for realistic simulation.
+
+        Within each candle we know Open/High/Low/Close. We determine the likely
+        intra-candle order of price action:
+        - If open is closer to high → price went up first then down (high→low)
+        - If open is closer to low  → price went down first then up (low→high)
+
+        This lets us check SL/floor/max-loss at the candle's extreme that came
+        FIRST, avoiding impossible scenarios like "peak updated then SL hit" when
+        the SL was actually breached before the peak.
+        """
         cn = self.opt_candle_map.get(current_time)
 
         # hard exit check even if no candle at this exact minute
@@ -293,47 +314,69 @@ class Position:
             if cn:
                 ltp = cn["close"]
             else:
-                # find the last available candle before this time
                 earlier = [t for t in self.opt_candle_map if t < current_time]
                 if earlier:
                     ltp = self.opt_candle_map[max(earlier)]["close"]
                 else:
                     ltp = self.entry
-            pnl = (ltp - self.entry) * self.lot - _calc_charges(self.entry, ltp, self.lot)
-            return ltp, "TIME", pnl
+            return ltp, "TIME", self._net_pnl_at(ltp)
 
         if cn is None:
             return None
 
-        high, low, close = cn["high"], cn["low"], cn["close"]
-        ltp = close
+        opn, high, low, close = cn["open"], cn["high"], cn["low"], cn["close"]
 
-        # peak tracking using high
-        gross_high = (high - self.entry) * self.lot
-        charges_high = _calc_charges(self.entry, high, self.lot)
-        net_high = gross_high - charges_high
-        if net_high > self.peak_net:
-            self.peak_net = net_high
+        # Determine intra-candle order: did price go up first or down first?
+        high_first = (opn - low) >= (high - opn)  # open closer to high → went up first
 
-        # SL check
-        if low <= self.sl_price:
-            pnl = (self.sl_price - self.entry) * self.lot - _calc_charges(self.entry, self.sl_price, self.lot)
-            return self.sl_price, "SL", pnl
+        if high_first:
+            # Sequence: open → high → low → close
 
-        # net PnL for floor/max-loss
-        gross_pnl = (ltp - self.entry) * self.lot
-        charges = _calc_charges(self.entry, ltp, self.lot)
-        net_pnl = gross_pnl - charges
+            # 1. Price rises to high — update peak & floor
+            self._update_floor(self._net_pnl_at(high))
 
-        if net_pnl <= -MAX_SL_RS:
-            pnl = net_pnl
-            return ltp, "MAX_LOSS", pnl
+            # 2. Price drops to low — check max loss cap first (PnL-based)
+            net_at_low = self._net_pnl_at(low)
+            if net_at_low <= -MAX_SL_RS:
+                # max loss hit — exit at the price that gives exactly -MAX_SL_RS
+                exit_p = self.entry - (MAX_SL_RS + _calc_charges(self.entry, self.entry, self.lot)) / self.lot
+                exit_p = max(exit_p, low)  # can't get better than low
+                return round(exit_p, 2), "MAX_LOSS", self._net_pnl_at(exit_p)
 
-        for fl in FLOOR_STEPS:
-            if self.peak_net >= fl:
-                self.stepped_floor = fl
-        if self.stepped_floor > 0 and net_pnl <= self.stepped_floor:
-            return ltp, f"FLOOR ₹{self.stepped_floor}", net_pnl
+            # 3. SL check at low
+            if low <= self.sl_price:
+                return self.sl_price, "SL", self._net_pnl_at(self.sl_price)
+
+            # 4. Floor check — peak was set at high, now price dropped
+            if self.stepped_floor > 0 and net_at_low <= self.stepped_floor:
+                # Exit at the floor level price (interpolate)
+                return low, f"FLOOR ₹{self.stepped_floor}", net_at_low
+
+        else:
+            # Sequence: open → low → high → close
+
+            # 1. Price drops to low first — check max loss cap
+            net_at_low = self._net_pnl_at(low)
+            if net_at_low <= -MAX_SL_RS:
+                exit_p = self.entry - (MAX_SL_RS + _calc_charges(self.entry, self.entry, self.lot)) / self.lot
+                exit_p = max(exit_p, low)
+                return round(exit_p, 2), "MAX_LOSS", self._net_pnl_at(exit_p)
+
+            # 2. SL check at low
+            if low <= self.sl_price:
+                return self.sl_price, "SL", self._net_pnl_at(self.sl_price)
+
+            # 3. Floor check at low (using existing peak from previous candles)
+            if self.stepped_floor > 0 and net_at_low <= self.stepped_floor:
+                return low, f"FLOOR ₹{self.stepped_floor}", net_at_low
+
+            # 4. Price rises to high — update peak & floor
+            self._update_floor(self._net_pnl_at(high))
+
+        # 5. End of candle — check floor at close (peak may have been set this candle)
+        net_at_close = self._net_pnl_at(close)
+        if self.stepped_floor > 0 and net_at_close <= self.stepped_floor:
+            return close, f"FLOOR ₹{self.stepped_floor}", net_at_close
 
         return None
 
