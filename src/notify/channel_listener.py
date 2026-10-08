@@ -2056,7 +2056,38 @@ async def _run_oeh_scan():
         if sym not in OEH_BLOCKLIST and sym in eq_keys
     ]
 
-    all_candles = await _parallel_fetch_candles(ud, sym_key_pairs, from_dt, to_dt, "5minute",
+    # --- FAST PRE-FILTER: bulk OHLC in 1-2 API calls ---
+    all_eq_keys = [key for _, key in sym_key_pairs]
+    key_to_sym = {key: sym for sym, key in sym_key_pairs}
+    try:
+        bulk_ohlc = ud.market_quote_ohlc(all_eq_keys)
+    except Exception as exc:
+        log.warning("[OEH] Bulk OHLC failed (%s), falling back to candle fetch", exc)
+        bulk_ohlc = {}
+
+    if bulk_ohlc:
+        pre_filtered = []
+        for key, ohlc in bulk_ohlc.items():
+            sym = key_to_sym.get(key)
+            if not sym:
+                continue
+            opn, high = ohlc["open"], ohlc["high"]
+            if opn <= 0:
+                continue
+            if high > opn + OEH_TOLERANCE:
+                continue
+            ltp = ohlc["ltp"] or ohlc["close"]
+            drop_pct = (opn - ltp) / opn * 100
+            if drop_pct < OEH_MIN_DROP_PCT:
+                continue
+            pre_filtered.append((sym, eq_keys[sym]))
+        log.info("[OEH] Bulk OHLC pre-filter: %d/%d pass OEH criteria",
+                 len(pre_filtered), len(sym_key_pairs))
+        fetch_pairs = pre_filtered
+    else:
+        fetch_pairs = sym_key_pairs
+
+    all_candles = await _parallel_fetch_candles(ud, fetch_pairs, from_dt, to_dt, "5minute",
                                                 batch_size=20, label="OEH")
 
     candidates = []

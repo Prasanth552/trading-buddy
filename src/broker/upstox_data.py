@@ -183,6 +183,26 @@ class UpstoxData:
                 out[k] = item.get("last_price", 0.0)
         return out
 
+    def market_quote_ohlc(self, instrument_keys: list[str]) -> dict[str, dict]:
+        """Fetch day OHLC for up to 500 instruments in one call.
+        Returns {instrument_key: {open, high, low, close, ltp}}."""
+        out: dict[str, dict] = {}
+        for i in range(0, len(instrument_keys), 500):
+            batch = instrument_keys[i:i + 500]
+            data = self._get("/v2/market-quote/ohlc",
+                             params={"instrument_key": ",".join(batch)}).get("data", {})
+            for item in data.values():
+                k = item.get("instrument_token")
+                ohlc = item.get("ohlc") or {}
+                out[k] = {
+                    "open": ohlc.get("open", 0),
+                    "high": ohlc.get("high", 0),
+                    "low": ohlc.get("low", 0),
+                    "close": ohlc.get("close", 0),
+                    "ltp": item.get("last_price", 0),
+                }
+        return out
+
     # --- historical candles (kite-shaped) -------------------------------------
     def historical_data(self, instrument_token: Any, from_dt: datetime,
                         to_dt: datetime, interval: str, **_: Any) -> list[dict[str, Any]]:
