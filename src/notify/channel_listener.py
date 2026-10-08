@@ -95,7 +95,7 @@ CH2F_SKIP_HOURS = {12, 13}  # skip 12:xx and 13:xx signals
 # ---------------------------------------------------------------------------
 # Scanner (ch5) — auto-execute config
 # ---------------------------------------------------------------------------
-SCANNER_ENABLED = True
+SCANNER_ENABLED = False
 SCANNER_RUN_TIME = "09:24"       # IST — staggered from OEH/PDHL to avoid API rate limit
 SCANNER_MIN_CONFIDENCE = 65      # only execute signals scoring >= this
 SCANNER_MAX_TRADES = 3           # max trades per scanner run
@@ -912,13 +912,18 @@ def execute_signal(sig: ParsedSignal, *, channel: str = "ch1", max_lots: int | N
                     f"({ratio:.1f}x) — wrong instrument?")
             return {"placed": False, "reason": f"LTP {entry_price} too far from signal {sig.trigger_price}"}
 
+    # Recalculate SL based on actual entry price so max loss stays within cap
+    max_sl_rs = _loss_cap_for_channel(channel)
+    sl_from_entry = entry_price - (max_sl_rs / qty) if qty > 0 else sig.stop_loss
+    actual_sl = round(max(sig.stop_loss, sl_from_entry), 2)
+
     trade_row = {
         "ts": __import__("src.utils.market_calendar", fromlist=["now_ist"]).now_ist().isoformat(timespec="seconds"),
         "symbol": f"{sig.symbol} {int(sig.strike)} {sig.option_type}",
         "side": "BUY",
         "qty": qty,
         "price": entry_price,
-        "stop_price": sig.stop_loss,
+        "stop_price": actual_sl,
         "target_price": sig.targets[0] if sig.targets else 0,
         "broker_key": instrument_token,
         "mode": config.MODE,
@@ -988,10 +993,11 @@ def _close_trade_by_id(trade_id: int, exit_price: float, reason: str) -> None:
             charges = calc_charges(entry_price, exit_price, row["qty"])
             net_pnl = gross_pnl - charges["total"]
             status = "CLOSED" if reason != "sl_hit" else "CLOSED_SL"
+            peak = _peak_net.get(row["id"])
 
             conn.execute(
-                "UPDATE trades SET status = ?, exit_price = ?, pnl = ?, charges = ? WHERE id = ?",
-                (status, exit_price, net_pnl, charges["total"], row["id"]),
+                "UPDATE trades SET status = ?, exit_price = ?, pnl = ?, charges = ?, peak_price = ? WHERE id = ?",
+                (status, exit_price, net_pnl, charges["total"], peak, row["id"]),
             )
 
             # Free capital if this was an OEH/ORB trade
@@ -3469,7 +3475,7 @@ async def start_listener() -> None:
                 with db.get_conn() as conn:
                     rows = conn.execute(
                         "SELECT id, symbol, price, qty, stop_price, target_price, "
-                        "broker_key, channel, targets_remaining "
+                        "broker_key, channel, targets_remaining, peak_price "
                         "FROM trades WHERE status = 'OPEN' AND broker_key IS NOT NULL"
                     ).fetchall()
                 if not rows:
@@ -3515,11 +3521,32 @@ async def start_listener() -> None:
                     charges_est = calc_charges(entry, ltp, qty)["total"]
                     net_pnl = gross_pnl - charges_est
 
-                    prev_peak = _peak_net.get(tid, 0)
+                    # Load peak from DB if not in memory (survives restarts)
+                    prev_peak = _peak_net.get(tid)
+                    if prev_peak is None:
+                        prev_peak = trade["peak_price"] or 0
                     _peak_net[tid] = max(prev_peak, net_pnl)
 
-                    if trade["target_price"] and ltp >= trade["target_price"]:
-                        ch = trade["channel"] or "ch1"
+                    # Persist peak to DB when it changes
+                    if _peak_net[tid] > prev_peak:
+                        with db.get_conn() as conn:
+                            conn.execute("UPDATE trades SET peak_price = ? WHERE id = ?",
+                                         (_peak_net[tid], tid))
+
+                    # Check max loss cap FIRST (PnL-based) — catches gap-through-SL
+                    ch = trade["channel"] or "ch1"
+                    loss_cap = _loss_cap_for_channel(ch)
+                    if net_pnl <= -(loss_cap):
+                        log.warning("MAX LOSS CAP for %s: net_pnl=₹%.0f hit -₹%d cap. Force closing.",
+                                    trade["symbol"], net_pnl, loss_cap)
+                        _close_trade_by_id(tid, ltp, "max_loss_cap")
+                        _peak_net.pop(tid, None)
+                        _notify(
+                            f"🛑 *MAX LOSS CAP* — {trade['symbol']}\n"
+                            f"Loss hit ₹{abs(net_pnl):,.0f} (cap: ₹{loss_cap:,})\n"
+                            f"Auto-closed to protect capital."
+                        )
+                    elif trade["target_price"] and ltp >= trade["target_price"]:
                         remaining = trade["targets_remaining"] or ""
                         if remaining:
                             next_tgts = [float(t) for t in remaining.split(",") if t.strip()]
@@ -3547,21 +3574,10 @@ async def start_listener() -> None:
                             _close_trade_by_id(tid, ltp, "target_hit")
                             _peak_net.pop(tid, None)
                     elif trade["stop_price"] and ltp <= trade["stop_price"]:
-                        log.info("SL HIT for %s: LTP=%.2f <= SL=%.2f",
-                                 trade["symbol"], ltp, trade["stop_price"])
+                        log.info("SL HIT for %s: LTP=%.2f <= SL=%.2f net=₹%.0f",
+                                 trade["symbol"], ltp, trade["stop_price"], net_pnl)
                         _close_trade_by_id(tid, ltp, "sl_hit")
                         _peak_net.pop(tid, None)
-                    elif net_pnl <= -(_loss_cap_for_channel(trade["channel"] or "ch1")):
-                        loss_cap = _loss_cap_for_channel(trade["channel"] or "ch1")
-                        log.warning("MAX LOSS CAP for %s: net_pnl=₹%.0f hit -₹%d cap. Force closing.",
-                                    trade["symbol"], net_pnl, loss_cap)
-                        _close_trade_by_id(tid, ltp, "max_loss_cap")
-                        _peak_net.pop(tid, None)
-                        _notify(
-                            f"🛑 *MAX LOSS CAP* — {trade['symbol']}\n"
-                            f"Loss hit ₹{abs(net_pnl):,.0f} (cap: ₹{loss_cap:,})\n"
-                            f"Auto-closed to protect capital."
-                        )
                     else:
                         ch = trade["channel"] or "ch1"
                         levels = _floor_levels_for_channel(ch)
@@ -4234,7 +4250,7 @@ async def start_listener() -> None:
 
         log.info("[%s] Channel message: %s", ch_label, text[:120])
 
-        if channel in ("ch1", "ch1b", "ch2"):
+        if channel in ("ch1", "ch1b", "ch2", "ch3"):
             return
 
         # --- CH2: handle control messages before parsing ---
