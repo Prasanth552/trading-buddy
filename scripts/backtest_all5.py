@@ -45,6 +45,14 @@ OEH_PROFIT_CAP = 999999
 OEH_SCAN_START = "09:20"
 OEH_SCAN_END = "15:20"
 
+# OEL config — mirror of OEH but bullish (Open=Low, buy CE)
+OEL_TOLERANCE = 0.05
+OEL_MIN_RISE_PCT = 0.3
+OEL_LOSS_CAP = 999999
+OEL_PROFIT_CAP = 999999
+OEL_SCAN_START = "09:20"
+OEL_SCAN_END = "15:20"
+
 # ORB config
 ORB_MIN_RANGE_PCT = 0.3
 ORB_MAX_RANGE_PCT = 3.0
@@ -429,6 +437,38 @@ def scan_oeh_at_tick(candles_5m, universe, tick_time):
                 })
                 break
     candidates.sort(key=lambda x: x["drop_pct"], reverse=True)
+    return candidates
+
+
+def scan_oel_at_tick(candles_5m, universe, tick_time):
+    """OEL: mirror of OEH — open=low (bullish). Buy CE when low didn't breach open-tolerance
+    and close rose >= OEL_MIN_RISE_PCT above open."""
+    candidates = []
+    for sym in universe:
+        if sym in BLOCKLIST:
+            continue
+        candles = candles_5m.get(sym)
+        if not candles:
+            continue
+        for cn in candles:
+            ct = _candle_time(cn)
+            if ct == tick_time:
+                op = cn["open"]
+                if op <= 0:
+                    break
+                ml = cn["low"]
+                if ml < op - OEL_TOLERANCE:
+                    break
+                ep = cn["close"]
+                rp = (ep - op) / op * 100
+                if rp < OEL_MIN_RISE_PCT:
+                    break
+                candidates.append({
+                    "symbol": sym, "direction": "bullish", "opt_type": "CE",
+                    "breakout_price": ep, "entry_after": tick_time, "rise_pct": rp,
+                })
+                break
+    candidates.sort(key=lambda x: x["rise_pct"], reverse=True)
     return candidates
 
 
@@ -905,6 +945,16 @@ def run_day(ud, ref_date, eq_keys, universe, opt_master, lot_sizes, verbose=True
         scan_interval_min=5, hard_exit_time=None, verbose=verbose,
     )
 
+    # 1b. OEL — mirror of OEH, bullish (Open=Low, buy CE)
+    print(f"\n  --- OEL ---")
+    day_results["OEL"] = _run_strategy_sim(
+        "OEL", ref_date, ud, opt_master, lot_sizes, candles_5m,
+        scan_fn=lambda tick: scan_oel_at_tick(candles_5m, universe, tick),
+        loss_cap=OEL_LOSS_CAP, profit_cap=OEL_PROFIT_CAP,
+        scan_start=OEL_SCAN_START, scan_end=OEL_SCAN_END,
+        scan_interval_min=5, hard_exit_time=None, verbose=verbose,
+    )
+
     # 2. ORB — rescans every 5 min from 09:25 to 14:30
     print(f"\n  --- ORB ---")
     day_results["ORB"] = _run_strategy_sim(
@@ -948,7 +998,7 @@ def run_day(ud, ref_date, eq_keys, universe, opt_master, lot_sizes, verbose=True
     # Day summary
     print(f"\n  {'─'*60}")
     grand = 0
-    for label in ["OEH", "ORB", "PDHL", "ORF", "AFT"]:
+    for label in ["OEH", "OEL", "ORB", "PDHL", "ORF", "AFT"]:
         r = day_results[label]
         if not r:
             print(f"  {label:5s}: --")
@@ -1019,7 +1069,7 @@ def main():
     print(f"  Max concurrent: {MAX_CONCURRENT} | Cooldown: {SYM_COOLDOWN_MIN}min | Max/scan: {MAX_ENTRIES_PER_SCAN}")
     print(f"  Universe: {len(universe)} stocks | Days: {len(dates)}")
 
-    all_results = {"OEH": [], "ORB": [], "PDHL": [], "ORF": [], "AFT": []}
+    all_results = {"OEH": [], "OEL": [], "ORB": [], "PDHL": [], "ORF": [], "AFT": []}
 
     for ref_date in dates:
         day_results = run_day(ud, ref_date, eq_keys, universe, opt_master, lot_sizes, verbose)
@@ -1033,7 +1083,7 @@ def main():
 
     grand = 0
     summary_lines = []
-    for label in ["OEH", "ORB", "PDHL", "ORF", "AFT"]:
+    for label in ["OEH", "OEL", "ORB", "PDHL", "ORF", "AFT"]:
         r = all_results[label]
         if not r:
             line = f"  {label:8s}: No trades"
@@ -1062,13 +1112,13 @@ def main():
             f.write(f"{'='*90}\n\n")
             for ref_date in dates:
                 day_res = {}
-                for label in ["OEH", "ORB", "PDHL", "ORF", "AFT"]:
+                for label in ["OEH", "OEL", "ORB", "PDHL", "ORF", "AFT"]:
                     day_trades = [x for x in all_results[label] if x.get("date") == ref_date]
                     day_res[label] = day_trades
                 f.write(f"  {ref_date} ({ref_date.strftime('%A')})\n")
                 f.write(f"  {'-'*60}\n")
                 day_grand = 0
-                for label in ["OEH", "ORB", "PDHL", "ORF", "AFT"]:
+                for label in ["OEH", "OEL", "ORB", "PDHL", "ORF", "AFT"]:
                     r = day_res[label]
                     if not r:
                         f.write(f"  {label:5s}: --\n")
