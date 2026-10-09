@@ -3736,9 +3736,9 @@ async def start_listener() -> None:
             except Exception as exc:
                 log.error("[OEH] Scheduler scan failed: %s", exc, exc_info=True)
 
-            # Rescan every 2 min until market close, whenever capital is freed
+            # Rescan every 1 min until market close, whenever capital is freed
             while True:
-                await asyncio.sleep(120)
+                await asyncio.sleep(60)
                 if not mc.is_market_open():
                     log.info("[OEH] Market closed, stopping rescans")
                     break
