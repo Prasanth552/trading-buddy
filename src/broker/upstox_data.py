@@ -190,7 +190,8 @@ class UpstoxData:
         for i in range(0, len(instrument_keys), 500):
             batch = instrument_keys[i:i + 500]
             data = self._get("/v2/market-quote/ohlc",
-                             params={"instrument_key": ",".join(batch)}).get("data", {})
+                             params={"instrument_key": ",".join(batch),
+                                     "interval": "1d"}).get("data", {})
             for item in data.values():
                 k = item.get("instrument_token")
                 ohlc = item.get("ohlc") or {}

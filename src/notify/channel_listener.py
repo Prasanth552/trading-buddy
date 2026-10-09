@@ -201,6 +201,8 @@ AFT_LOSS_CAP = 10000
 AFT_PROFIT_CAP = 25000
 AFT_BLOCKLIST = {"GODREJCP", "GRASIM"}
 
+_peak_net: dict[int, float] = {}
+
 # OEH capital tracking — in-memory, resets on restart
 _oeh_capital_avail: float = 0.0
 _oeh_capital_locked: dict[int, float] = {}
@@ -3491,7 +3493,7 @@ async def start_listener() -> None:
     _notify(f"Channel listener started as {me.first_name} ({ch_list})")
 
     # --- Background position monitor: checks LTP every 5s, auto-closes ---
-    _peak_net: dict[int, float] = {}
+    global _peak_net
 
     _monitor_fail_count = 0
 
