@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Live OEH + ORB dashboard for today — refreshes every 2s."""
+"""Live OEH + OEL + ORB dashboard for today — refreshes every 2s."""
 from __future__ import annotations
 
 import os
@@ -44,14 +44,14 @@ def run():
         now = datetime.now(IST)
         os.system("clear")
         print(f"{'=' * 72}")
-        print(f"  LIVE OEH + ORB Dashboard — {now.strftime('%Y-%m-%d %H:%M:%S')} IST")
+        print(f"  LIVE OEH + OEL + ORB Dashboard — {now.strftime('%Y-%m-%d %H:%M:%S')} IST")
         print(f"{'=' * 72}")
 
         with db.get_conn() as c:
             all_trades = c.execute(
                 "SELECT id, symbol, price, qty, stop_price, exit_price, pnl, "
                 "peak_price, channel, status, broker_key, ts "
-                "FROM trades WHERE date(ts) = date('now') AND channel IN ('oeh','orb') "
+                "FROM trades WHERE date(ts) = date('now') AND channel IN ('oeh','oel','orb') "
                 "ORDER BY channel, id"
             ).fetchall()
 
@@ -85,7 +85,7 @@ def run():
                     print(f"  LTP fetch error: {e}")
 
         # --- OPEN TRADES ---
-        for ch_name in ["oeh", "orb"]:
+        for ch_name in ["oeh", "oel", "orb"]:
             ch_open = [t for t in open_trades if t["channel"] == ch_name]
             ch_closed = [t for t in closed_trades if t["channel"] == ch_name]
 

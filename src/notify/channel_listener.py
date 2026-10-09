@@ -129,15 +129,18 @@ OEH_PROFIT_CAP = 999999
 # OEL Scanner (Open=Low) — bullish counterpart to OEH
 # ---------------------------------------------------------------------------
 OEL_ENABLED = True
-OEL_RUN_TIME = "09:20"
-OEL_LIST_TIME = "09:16"
-OEL_MAX_TRADES = 5
-OEL_SL_PCT = 0.30
+OEL_RUN_TIME = "09:20"          # IST — same as OEH
+OEL_LIST_TIME = "09:16"         # IST — early list using 1-min candle
+OEL_CAPITAL = 300000            # ₹3 lakh capital pool — no trade limit, capital-gated
+OEL_SL_PCT = 0.30               # 30% of premium as stop-loss
+OEL_MAX_SL = 5000               # cap max SL at ₹5000
 OEL_FLOOR_STEP = 1500           # legacy — used as fallback; live uses OEL_FLOOR_LEVELS
 OEL_FLOOR_LEVELS = [500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5500, 6000]  # ₹500 steps
-OEL_TOLERANCE = 0.05
-OEL_MIN_RISE_PCT = 0.3
-OEL_BLOCKLIST: set[str] = set()
+OEL_TOLERANCE = 0.05            # ₹0.05 tolerance for low >= open check
+OEL_MIN_RISE_PCT = 0.3          # skip candidates with <0.3% rise (weak signal)
+OEL_BLOCKLIST = {"GODREJCP", "GRASIM"}  # same as OEH
+OEL_LOSS_CAP = 999999
+OEL_PROFIT_CAP = 999999
 
 # ---------------------------------------------------------------------------
 # ORB (Opening Range Breakout) scanner
@@ -253,6 +256,59 @@ def _oeh_daily_cap_hit() -> bool:
     if _oeh_daily_pnl >= OEH_PROFIT_CAP:
         return True
     if _oeh_daily_pnl <= -OEH_LOSS_CAP:
+        return True
+    return False
+
+# OEL capital tracking — in-memory, resets on restart (mirrors OEH)
+_oel_capital_avail: float = 0.0
+_oel_capital_locked: dict[int, float] = {}
+
+def _oel_init_capital():
+    global _oel_capital_avail
+    _oel_capital_avail = OEL_CAPITAL
+    _oel_capital_locked.clear()
+
+def _oel_allocate(trade_id: int, amount: float) -> bool:
+    global _oel_capital_avail
+    if amount > _oel_capital_avail:
+        return False
+    _oel_capital_avail -= amount
+    _oel_capital_locked[trade_id] = amount
+    return True
+
+def _oel_free(trade_id: int, pnl: float):
+    global _oel_capital_avail
+    locked = _oel_capital_locked.pop(trade_id, 0)
+    if locked > 0:
+        _oel_capital_avail += locked + pnl
+        log.info("[OEL-CAP] Freed ₹%.0f + PnL ₹%.0f = avail ₹%.0f (locked: %d)",
+                 locked, pnl, _oel_capital_avail, len(_oel_capital_locked))
+
+_oel_daily_pnl: float = 0.0
+_oel_daily_date: str = ""
+
+def _oel_record_pnl(pnl: float):
+    global _oel_daily_pnl, _oel_daily_date
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    today = datetime.now(ZoneInfo(config.TIMEZONE)).strftime("%Y-%m-%d")
+    if _oel_daily_date != today:
+        _oel_daily_pnl = 0.0
+        _oel_daily_date = today
+    _oel_daily_pnl += pnl
+
+def _oel_daily_cap_hit() -> bool:
+    global _oel_daily_pnl, _oel_daily_date
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    today = datetime.now(ZoneInfo(config.TIMEZONE)).strftime("%Y-%m-%d")
+    if _oel_daily_date != today:
+        _oel_daily_pnl = 0.0
+        _oel_daily_date = today
+        return False
+    if _oel_daily_pnl >= OEL_PROFIT_CAP:
+        return True
+    if _oel_daily_pnl <= -OEL_LOSS_CAP:
         return True
     return False
 
@@ -1006,6 +1062,9 @@ def _close_trade_by_id(trade_id: int, exit_price: float, reason: str) -> None:
             if row["id"] in _oeh_capital_locked:
                 _oeh_free(row["id"], net_pnl)
                 _oeh_record_pnl(net_pnl)
+            if row["id"] in _oel_capital_locked:
+                _oel_free(row["id"], net_pnl)
+                _oel_record_pnl(net_pnl)
             if row["id"] in _orb_capital_locked:
                 _orb_free(row["id"], net_pnl)
                 _orb_record_pnl(net_pnl)
@@ -3194,42 +3253,74 @@ async def _run_oel_scan():
         return
 
     candidates.sort(key=lambda x: x["rise_pct"], reverse=True)
-    top = candidates[:OEL_MAX_TRADES]
+
+    # Initialize capital pool (only on first scan of the day)
+    if _oel_capital_avail <= 0 and not _oel_capital_locked:
+        _oel_init_capital()
 
     summary_lines = []
     executed = 0
+    skipped_capital = 0
 
-    for c in top:
+    lot_sizes = {}
+    for inst in master:
+        if inst.get("segment") == "NSE_FO":
+            import re as _re
+            _base = _re.match(r'^([A-Z&]+)', (inst.get("trading_symbol") or "").upper())
+            if _base:
+                _ls = int(inst.get("lot_size") or 0)
+                if _ls > 0:
+                    lot_sizes[_base.group(1)] = _ls
+
+    for c in candidates:
+        if _oel_daily_cap_hit():
+            log.info("[OEL] Daily cap hit mid-scan (pnl=₹%.0f), stopping", _oel_daily_pnl)
+            break
+        if _oel_capital_avail < 5000:
+            skipped_capital += len(candidates) - candidates.index(c)
+            break
+
         parsed = _resolve_atm_strike(c["symbol"], "CE")
         if parsed is None:
             summary_lines.append(f"SKIP {c['symbol']} CE — could not resolve ATM")
             continue
 
-        parsed.stop_loss = round(parsed.trigger_price * (1 - OEL_SL_PCT), 2)
-        parsed.targets = []  # no price-target; ₹1500 stepping floor handles exits
+        oel_lot = lot_sizes.get(c["symbol"], 1) * 2
+        sl_pct_price = parsed.trigger_price * (1 - OEL_SL_PCT)
+        sl_cap_price = parsed.trigger_price - (OEL_MAX_SL / oel_lot)
+        parsed.stop_loss = round(max(sl_pct_price, sl_cap_price), 2)
+        parsed.targets = []
+
+        trade_capital = parsed.trigger_price * oel_lot
+        if trade_capital > _oel_capital_avail:
+            skipped_capital += 1
+            continue
 
         result = execute_signal(parsed, channel="oel", max_lots=2)
         if result["placed"]:
+            actual_capital = result["entry"] * result["qty"]
+            _oel_allocate(result["trade_id"], actual_capital)
             executed += 1
             summary_lines.append(
                 f"BUY {result['symbol']} x{result['qty']} @ {result['entry']:.2f} "
-                f"(OEL rise={c['rise_pct']:.1f}%)"
+                f"(OEL rise={c['rise_pct']:.1f}%) [cap: ₹{_oel_capital_avail:,.0f}]"
             )
             _notify(
-                f"*[OEL] Trade placed (2 lots)*\n"
+                f"*[OEL] Trade #{executed}*\n"
                 f"{result['symbol']} x{result['qty']}\n"
-                f"Entry: {result['entry']} | SL: {result['sl']} | Floors: ₹500→₹1500→₹3000...\n"
-                f"Signal: {c['symbol']} Open={c['open']:.2f} Low={c['min_low']:.2f} "
-                f"(rise {c['rise_pct']:.1f}% in 15min)"
+                f"Entry: {result['entry']} | SL: {result['sl']} | Floors: ₹500→₹1000→₹1500...\n"
+                f"Capital: ₹{actual_capital:,.0f} locked | ₹{_oel_capital_avail:,.0f} available"
             )
         else:
             summary_lines.append(f"FAIL {c['symbol']} CE — {result['reason']}")
 
     summary = "\n".join(summary_lines)
-    log.info("[OEL] Scan done: %d/%d executed\n%s", executed, len(top), summary)
+    log.info("[OEL] Scan done: %d/%d executed (skipped %d capital)\n%s",
+             executed, len(candidates), skipped_capital, summary)
     _notify(
-        f"*[OEL] Scan complete: {executed}/{len(top)} trades placed*\n"
-        f"Candidates found: {len(candidates)} | Scanned: {scanned}\n{summary}"
+        f"*[OEL] Scan complete: {executed} trades placed*\n"
+        f"Candidates: {len(candidates)} | Skipped (capital): {skipped_capital}\n"
+        f"Capital remaining: ₹{_oel_capital_avail:,.0f}\n{summary}"
     )
 
 
