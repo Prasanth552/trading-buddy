@@ -70,7 +70,7 @@ async def _ws_push_loop():
             _ensure_db()
             today_iso = mc.now_ist().date().isoformat()
             payload: dict[str, dict] = {}
-            for ch in ("ch3", "oeh", "orb", "pdhl", "orf", "aft"):
+            for ch in ("ch3", "oeh", "oel", "orb"):
                 cf = _ch_filter(ch)
                 with db.get_conn() as conn:
                     row = conn.execute(f"""SELECT
@@ -1133,10 +1133,8 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
 
 <div class=tabs id=tabbar>
   <button class="tab active" onclick="switchCh('oeh')" id="tab-oeh"><span class=ico>O</span> OEH</button>
+  <button class="tab" onclick="switchCh('oel')" id="tab-oel"><span class=ico>L</span> OEL</button>
   <button class="tab" onclick="switchCh('orb')" id="tab-orb"><span class=ico>R</span> ORB</button>
-  <button class="tab" onclick="switchCh('pdhl')" id="tab-pdhl"><span class=ico>P</span> PDHL</button>
-  <button class="tab" onclick="switchCh('orf')" id="tab-orf"><span class=ico>F</span> ORF</button>
-  <button class="tab" onclick="switchCh('aft')" id="tab-aft"><span class=ico>A</span> AFT</button>
 </div>
 
 <div class=wrap>
