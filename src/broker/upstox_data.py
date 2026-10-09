@@ -77,6 +77,9 @@ class UpstoxData:
     """KiteClient-compatible data client backed by Upstox's free API."""
 
     _SEGMENT_FOR_EXCHANGE = {"NFO": "NSE_FO", "BFO": "BSE_FO"}
+    _shared_master: list[dict[str, Any]] | None = None
+    _shared_by_symbol: dict[str, str] = {}
+    _shared_master_date: str | None = None
 
     def __init__(self, access_token: str | None = None) -> None:
         self.token = access_token or os.getenv("UPSTOX_ACCESS_TOKEN") or load_cached_token()
@@ -84,8 +87,13 @@ class UpstoxData:
             raise UpstoxDataError(
                 "No Upstox data token for today — run: "
                 ".venv/bin/python -m src.broker.upstox_data")
-        self._master: list[dict[str, Any]] | None = None
-        self._by_symbol: dict[str, str] = {}   # "SEGMENT:TRADINGSYMBOL" -> instrument_key
+        today = _today_iso()
+        if UpstoxData._shared_master is not None and UpstoxData._shared_master_date == today:
+            self._master = UpstoxData._shared_master
+            self._by_symbol = UpstoxData._shared_by_symbol
+        else:
+            self._master: list[dict[str, Any]] | None = None
+            self._by_symbol: dict[str, str] = {}
 
     # --- auth/infra ---------------------------------------------------------
     def _headers(self) -> dict[str, str]:
@@ -114,6 +122,9 @@ class UpstoxData:
                 if seg and tsym:
                     self._by_symbol[f"{seg}:{tsym.replace(' ', '')}"] = inst["instrument_key"]
             log.info("Loaded %d Upstox instruments.", len(self._master))
+            UpstoxData._shared_master = self._master
+            UpstoxData._shared_by_symbol = self._by_symbol
+            UpstoxData._shared_master_date = _today_iso()
         return self._master
 
     def instruments(self, exchange: str | None = None) -> list[dict[str, Any]]:

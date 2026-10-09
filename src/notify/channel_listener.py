@@ -3666,8 +3666,12 @@ async def start_listener() -> None:
                 first_run = False
                 scheduled = now.replace(hour=h, minute=m, second=0, microsecond=0)
                 if now > scheduled:
-                    log.info("[CH5] Missed scheduled %s run — catching up now", SCANNER_RUN_TIME)
-                    await _run_scanner_once()
+                    mins_late = (now - scheduled).total_seconds() / 60
+                    if mins_late > 30:
+                        log.info("[CH5] Missed scheduled %s by %.0f min — too stale, skipping", SCANNER_RUN_TIME, mins_late)
+                    else:
+                        log.info("[CH5] Missed scheduled %s run — catching up now", SCANNER_RUN_TIME)
+                        await _run_scanner_once()
                     continue
             first_run = False
 
@@ -3805,11 +3809,15 @@ async def start_listener() -> None:
                 first_run = False
                 scheduled = now.replace(hour=h, minute=m, second=0, microsecond=0)
                 if now > scheduled:
-                    log.info("[OEL] Missed scheduled %s run — catching up now", OEL_RUN_TIME)
-                    try:
-                        await _run_oel_scan()
-                    except Exception as exc:
-                        log.error("[OEL] Catch-up scan failed: %s", exc, exc_info=True)
+                    mins_late = (now - scheduled).total_seconds() / 60
+                    if mins_late > 30:
+                        log.info("[OEL] Missed scheduled %s by %.0f min — too stale, skipping", OEL_RUN_TIME, mins_late)
+                    else:
+                        log.info("[OEL] Missed scheduled %s run — catching up now", OEL_RUN_TIME)
+                        try:
+                            await _run_oel_scan()
+                        except Exception as exc:
+                            log.error("[OEL] Catch-up scan failed: %s", exc, exc_info=True)
                     continue
             first_run = False
 
@@ -3885,19 +3893,22 @@ async def start_listener() -> None:
                 first_run = False
                 scheduled = now.replace(hour=h, minute=m, second=0, microsecond=0)
                 if now > scheduled:
-                    log.info("[ORB] Missed scheduled %s run — catching up now", ORB_RUN_TIME)
-                    try:
-                        await _run_orb_scan()
-                    except Exception as exc:
-                        log.error("[ORB] Catch-up scan failed: %s", exc, exc_info=True)
-                    # Also do rescan if past rescan time
-                    rescan_t = now.replace(hour=h2, minute=m2, second=0, microsecond=0)
-                    if now > rescan_t:
-                        log.info("[ORB] Also missed rescan at %s — running now", ORB_RESCAN_TIME)
+                    mins_late = (now - scheduled).total_seconds() / 60
+                    if mins_late > 30:
+                        log.info("[ORB] Missed scheduled %s by %.0f min — too stale, skipping catch-up", ORB_RUN_TIME, mins_late)
+                    else:
+                        log.info("[ORB] Missed scheduled %s run — catching up now", ORB_RUN_TIME)
                         try:
                             await _run_orb_scan()
                         except Exception as exc:
-                            log.error("[ORB] Catch-up rescan failed: %s", exc, exc_info=True)
+                            log.error("[ORB] Catch-up scan failed: %s", exc, exc_info=True)
+                        rescan_t = now.replace(hour=h2, minute=m2, second=0, microsecond=0)
+                        if now > rescan_t:
+                            log.info("[ORB] Also missed rescan at %s — running now", ORB_RESCAN_TIME)
+                            try:
+                                await _run_orb_scan()
+                            except Exception as exc:
+                                log.error("[ORB] Catch-up rescan failed: %s", exc, exc_info=True)
                     continue
             first_run = False
 
@@ -3964,18 +3975,22 @@ async def start_listener() -> None:
                 first_run = False
                 scheduled = now.replace(hour=h, minute=m, second=0, microsecond=0)
                 if now > scheduled:
-                    log.info("[PDHL] Missed scheduled %s run — catching up now", PDHL_RUN_TIME)
-                    try:
-                        await _run_pdhl_scan()
-                    except Exception as exc:
-                        log.error("[PDHL] Catch-up scan failed: %s", exc, exc_info=True)
-                    rescan_t = now.replace(hour=h2, minute=m2, second=0, microsecond=0)
-                    if now > rescan_t:
-                        log.info("[PDHL] Also missed rescan at %s — running now", PDHL_RESCAN_TIME)
+                    mins_late = (now - scheduled).total_seconds() / 60
+                    if mins_late > 30:
+                        log.info("[PDHL] Missed scheduled %s by %.0f min — too stale, skipping", PDHL_RUN_TIME, mins_late)
+                    else:
+                        log.info("[PDHL] Missed scheduled %s run — catching up now", PDHL_RUN_TIME)
                         try:
                             await _run_pdhl_scan()
                         except Exception as exc:
-                            log.error("[PDHL] Catch-up rescan failed: %s", exc, exc_info=True)
+                            log.error("[PDHL] Catch-up scan failed: %s", exc, exc_info=True)
+                        rescan_t = now.replace(hour=h2, minute=m2, second=0, microsecond=0)
+                        if now > rescan_t:
+                            log.info("[PDHL] Also missed rescan at %s — running now", PDHL_RESCAN_TIME)
+                            try:
+                                await _run_pdhl_scan()
+                            except Exception as exc:
+                                log.error("[PDHL] Catch-up rescan failed: %s", exc, exc_info=True)
                     continue
             first_run = False
 
@@ -4039,11 +4054,15 @@ async def start_listener() -> None:
                 first_run = False
                 scheduled = now.replace(hour=h, minute=m, second=0, microsecond=0)
                 if now > scheduled:
-                    log.info("[ORF] Missed scheduled %s run — catching up now", ORF_RUN_TIME)
-                    try:
-                        await _run_orf_scan()
-                    except Exception as exc:
-                        log.error("[ORF] Catch-up scan failed: %s", exc, exc_info=True)
+                    mins_late = (now - scheduled).total_seconds() / 60
+                    if mins_late > 30:
+                        log.info("[ORF] Missed scheduled %s by %.0f min — too stale, skipping", ORF_RUN_TIME, mins_late)
+                    else:
+                        log.info("[ORF] Missed scheduled %s run — catching up now", ORF_RUN_TIME)
+                        try:
+                            await _run_orf_scan()
+                        except Exception as exc:
+                            log.error("[ORF] Catch-up scan failed: %s", exc, exc_info=True)
                     continue
             first_run = False
 
@@ -4106,11 +4125,15 @@ async def start_listener() -> None:
                 first_run = False
                 scheduled = now.replace(hour=h, minute=m, second=0, microsecond=0)
                 if now > scheduled:
-                    log.info("[AFT] Missed scheduled %s run — catching up now", AFT_RUN_TIME)
-                    try:
-                        await _run_aft_scan()
-                    except Exception as exc:
-                        log.error("[AFT] Catch-up scan failed: %s", exc, exc_info=True)
+                    mins_late = (now - scheduled).total_seconds() / 60
+                    if mins_late > 30:
+                        log.info("[AFT] Missed scheduled %s by %.0f min — too stale, skipping", AFT_RUN_TIME, mins_late)
+                    else:
+                        log.info("[AFT] Missed scheduled %s run — catching up now", AFT_RUN_TIME)
+                        try:
+                            await _run_aft_scan()
+                        except Exception as exc:
+                            log.error("[AFT] Catch-up scan failed: %s", exc, exc_info=True)
                     continue
             first_run = False
 
@@ -4171,11 +4194,15 @@ async def start_listener() -> None:
                 first_run = False
                 scheduled = now.replace(hour=h, minute=m, second=0, microsecond=0)
                 if now > scheduled:
-                    log.info("[STOCK] Missed scheduled %s run — catching up now", STOCK_RUN_TIME)
-                    try:
-                        await _run_stock_strategy()
-                    except Exception as exc:
-                        log.error("[STOCK] Catch-up run failed: %s", exc, exc_info=True)
+                    mins_late = (now - scheduled).total_seconds() / 60
+                    if mins_late > 30:
+                        log.info("[STOCK] Missed scheduled %s by %.0f min — too stale, skipping", STOCK_RUN_TIME, mins_late)
+                    else:
+                        log.info("[STOCK] Missed scheduled %s run — catching up now", STOCK_RUN_TIME)
+                        try:
+                            await _run_stock_strategy()
+                        except Exception as exc:
+                            log.error("[STOCK] Catch-up run failed: %s", exc, exc_info=True)
                     continue
             first_run = False
 
