@@ -15,7 +15,18 @@ load_dotenv()
 import config
 from src.storage import db
 from src.broker.upstox_data import UpstoxData, load_cached_token
-from src.utils.charges import calc_charges
+
+
+def calc_charges(entry_price: float, exit_price: float, qty: int) -> dict[str, float]:
+    turnover = (entry_price + exit_price) * qty
+    brokerage = min(40, turnover * 0.0003)
+    stt = exit_price * qty * 0.000625
+    exchange = turnover * 0.0005
+    sebi = turnover * 0.000001
+    gst = (brokerage + exchange + sebi) * 0.18
+    stamp = entry_price * qty * 0.00003
+    total = brokerage + stt + exchange + sebi + gst + stamp
+    return {"total": total}
 
 IST = ZoneInfo(config.TIMEZONE)
 
