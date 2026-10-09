@@ -913,7 +913,7 @@ def _fetch_prev_day_hl(ud, eq_keys, universe, ref_date):
 # ---------------------------------------------------------------------------
 # Run one day
 # ---------------------------------------------------------------------------
-def run_day(ud, ref_date, eq_keys, universe, opt_master, lot_sizes, verbose=True):
+def run_day(ud, ref_date, eq_keys, universe, opt_master, lot_sizes, verbose=True, enabled=None):
     print(f"\n{'#'*90}")
     print(f"  {ref_date} ({ref_date.strftime('%A')})")
     print(f"{'#'*90}")
@@ -924,20 +924,21 @@ def run_day(ud, ref_date, eq_keys, universe, opt_master, lot_sizes, verbose=True
     # Prefetch equity candles
     t0 = _t.time()
     candles_5m = _prefetch_equity_candles(ud, eq_keys, universe, from_dt, to_dt, "5minute")
-    candles_1m = _prefetch_equity_candles(ud, eq_keys, universe, from_dt,
-                                          datetime.combine(ref_date, datetime.min.time()).replace(hour=11, minute=35),
-                                          "1minute")
     fetch_time = _t.time() - t0
     print(f"  Fetched {len(candles_5m)} stocks in {fetch_time:.1f}s")
 
     day_results = {}
+    _en = lambda s: enabled is None or s in enabled
 
     # Fetch prev day data for PDHL
-    prev_day_hl = _fetch_prev_day_hl(ud, eq_keys, universe, ref_date)
+    prev_day_hl = _fetch_prev_day_hl(ud, eq_keys, universe, ref_date) if _en("PDHL") else {}
 
     # 1. OEH — rescans every 5 min from 09:20 to 15:20
-    print(f"\n  --- OEH ---")
-    day_results["OEH"] = _run_strategy_sim(
+    if not _en("OEH"):
+        day_results["OEH"] = []
+    else:
+        print(f"\n  --- OEH ---")
+        day_results["OEH"] = _run_strategy_sim(
         "OEH", ref_date, ud, opt_master, lot_sizes, candles_5m,
         scan_fn=lambda tick: scan_oeh_at_tick(candles_5m, universe, tick),
         loss_cap=OEH_LOSS_CAP, profit_cap=OEH_PROFIT_CAP,
@@ -946,54 +947,72 @@ def run_day(ud, ref_date, eq_keys, universe, opt_master, lot_sizes, verbose=True
     )
 
     # 1b. OEL — mirror of OEH, bullish (Open=Low, buy CE)
-    print(f"\n  --- OEL ---")
-    day_results["OEL"] = _run_strategy_sim(
-        "OEL", ref_date, ud, opt_master, lot_sizes, candles_5m,
-        scan_fn=lambda tick: scan_oel_at_tick(candles_5m, universe, tick),
-        loss_cap=OEL_LOSS_CAP, profit_cap=OEL_PROFIT_CAP,
-        scan_start=OEL_SCAN_START, scan_end=OEL_SCAN_END,
-        scan_interval_min=5, hard_exit_time=None, verbose=verbose,
-    )
+    if not _en("OEL"):
+        day_results["OEL"] = []
+    else:
+        print(f"\n  --- OEL ---")
+        day_results["OEL"] = _run_strategy_sim(
+            "OEL", ref_date, ud, opt_master, lot_sizes, candles_5m,
+            scan_fn=lambda tick: scan_oel_at_tick(candles_5m, universe, tick),
+            loss_cap=OEL_LOSS_CAP, profit_cap=OEL_PROFIT_CAP,
+            scan_start=OEL_SCAN_START, scan_end=OEL_SCAN_END,
+            scan_interval_min=5, hard_exit_time=None, verbose=verbose,
+        )
 
-    # 2. ORB — rescans every 5 min from 09:25 to 14:30
-    print(f"\n  --- ORB ---")
-    day_results["ORB"] = _run_strategy_sim(
-        "ORB", ref_date, ud, opt_master, lot_sizes, candles_5m,
-        scan_fn=lambda tick: scan_orb_at_tick(candles_5m, universe, tick),
-        loss_cap=ORB_LOSS_CAP, profit_cap=ORB_PROFIT_CAP,
-        scan_start=ORB_SCAN_START, scan_end=ORB_SCAN_END,
-        scan_interval_min=5, hard_exit_time=None, verbose=verbose,
-    )
+    # 2. ORB
+    if not _en("ORB"):
+        day_results["ORB"] = []
+    else:
+        print(f"\n  --- ORB ---")
+        day_results["ORB"] = _run_strategy_sim(
+            "ORB", ref_date, ud, opt_master, lot_sizes, candles_5m,
+            scan_fn=lambda tick: scan_orb_at_tick(candles_5m, universe, tick),
+            loss_cap=ORB_LOSS_CAP, profit_cap=ORB_PROFIT_CAP,
+            scan_start=ORB_SCAN_START, scan_end=ORB_SCAN_END,
+            scan_interval_min=5, hard_exit_time=None, verbose=verbose,
+        )
 
-    # 3. PDHL — rescans every 5 min from 09:20 to 14:30
-    print(f"\n  --- PDHL ---")
-    day_results["PDHL"] = _run_strategy_sim(
-        "PDHL", ref_date, ud, opt_master, lot_sizes, candles_5m,
-        scan_fn=lambda tick: scan_pdhl_at_tick(candles_5m, prev_day_hl, universe, tick),
-        loss_cap=PDHL_LOSS_CAP, profit_cap=PDHL_PROFIT_CAP,
-        scan_start=PDHL_SCAN_START, scan_end=PDHL_SCAN_END,
-        scan_interval_min=5, hard_exit_time=None, verbose=verbose,
-    )
+    # 3. PDHL
+    if not _en("PDHL"):
+        day_results["PDHL"] = []
+    else:
+        print(f"\n  --- PDHL ---")
+        day_results["PDHL"] = _run_strategy_sim(
+            "PDHL", ref_date, ud, opt_master, lot_sizes, candles_5m,
+            scan_fn=lambda tick: scan_pdhl_at_tick(candles_5m, prev_day_hl, universe, tick),
+            loss_cap=PDHL_LOSS_CAP, profit_cap=PDHL_PROFIT_CAP,
+            scan_start=PDHL_SCAN_START, scan_end=PDHL_SCAN_END,
+            scan_interval_min=5, hard_exit_time=None, verbose=verbose,
+        )
 
-    # 4. ORF — rescans every 5 min from 09:30 to 11:30, hard exit at 11:30
-    print(f"\n  --- ORF ---")
-    day_results["ORF"] = _run_strategy_sim(
-        "ORF", ref_date, ud, opt_master, lot_sizes, candles_1m,
-        scan_fn=lambda tick: scan_orf_at_tick(candles_1m, universe, tick),
-        loss_cap=ORF_LOSS_CAP, profit_cap=ORF_PROFIT_CAP,
-        scan_start=ORF_SCAN_START, scan_end=ORF_SCAN_END,
-        scan_interval_min=5, hard_exit_time=ORF_TIME_EXIT, verbose=verbose,
-    )
+    # 4. ORF
+    if not _en("ORF"):
+        day_results["ORF"] = []
+    else:
+        candles_1m = _prefetch_equity_candles(ud, eq_keys, universe, from_dt,
+                                              datetime.combine(ref_date, datetime.min.time()).replace(hour=11, minute=35),
+                                              "1minute")
+        print(f"\n  --- ORF ---")
+        day_results["ORF"] = _run_strategy_sim(
+            "ORF", ref_date, ud, opt_master, lot_sizes, candles_1m,
+            scan_fn=lambda tick: scan_orf_at_tick(candles_1m, universe, tick),
+            loss_cap=ORF_LOSS_CAP, profit_cap=ORF_PROFIT_CAP,
+            scan_start=ORF_SCAN_START, scan_end=ORF_SCAN_END,
+            scan_interval_min=5, hard_exit_time=ORF_TIME_EXIT, verbose=verbose,
+        )
 
-    # 5. AFT — rescans every 5 min from 13:35 to 15:10, hard exit at 15:10
-    print(f"\n  --- AFT ---")
-    day_results["AFT"] = _run_strategy_sim(
-        "AFT", ref_date, ud, opt_master, lot_sizes, candles_5m,
-        scan_fn=lambda tick: scan_aft_at_tick(candles_5m, universe, tick),
-        loss_cap=AFT_LOSS_CAP, profit_cap=AFT_PROFIT_CAP,
-        scan_start=AFT_SCAN_START, scan_end=AFT_SCAN_END,
-        scan_interval_min=5, hard_exit_time=AFT_HARD_EXIT, verbose=verbose,
-    )
+    # 5. AFT
+    if not _en("AFT"):
+        day_results["AFT"] = []
+    else:
+        print(f"\n  --- AFT ---")
+        day_results["AFT"] = _run_strategy_sim(
+            "AFT", ref_date, ud, opt_master, lot_sizes, candles_5m,
+            scan_fn=lambda tick: scan_aft_at_tick(candles_5m, universe, tick),
+            loss_cap=AFT_LOSS_CAP, profit_cap=AFT_PROFIT_CAP,
+            scan_start=AFT_SCAN_START, scan_end=AFT_SCAN_END,
+            scan_interval_min=5, hard_exit_time=AFT_HARD_EXIT, verbose=verbose,
+        )
 
     # Day summary
     print(f"\n  {'─'*60}")
@@ -1034,7 +1053,9 @@ def main():
     parser.add_argument("--month", help="Full month YYYY-MM")
     parser.add_argument("--quiet", action="store_true", help="Only show summaries")
     parser.add_argument("--report", type=str, help="Write report to file")
+    parser.add_argument("--strategies", type=str, help="Comma-separated strategies to run (e.g. OEH,OEL)")
     args = parser.parse_args()
+    enabled_strategies = set(args.strategies.upper().split(",")) if args.strategies else None
 
     if args.from_date and args.to_date:
         start = date.fromisoformat(args.from_date)
@@ -1072,7 +1093,7 @@ def main():
     all_results = {"OEH": [], "OEL": [], "ORB": [], "PDHL": [], "ORF": [], "AFT": []}
 
     for ref_date in dates:
-        day_results = run_day(ud, ref_date, eq_keys, universe, opt_master, lot_sizes, verbose)
+        day_results = run_day(ud, ref_date, eq_keys, universe, opt_master, lot_sizes, verbose, enabled=enabled_strategies)
         for k in all_results:
             all_results[k].extend(day_results.get(k, []))
 
