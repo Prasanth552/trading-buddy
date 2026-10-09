@@ -3827,11 +3827,15 @@ async def start_listener() -> None:
                 first_run = False
                 scheduled = now.replace(hour=h, minute=m, second=0, microsecond=0)
                 if now > scheduled:
-                    log.info("[OEH] Missed scheduled %s run — catching up now", OEH_RUN_TIME)
-                    try:
-                        await _run_oeh_scan()
-                    except Exception as exc:
-                        log.error("[OEH] Catch-up scan failed: %s", exc, exc_info=True)
+                    mins_late = (now - scheduled).total_seconds() / 60
+                    if mins_late > 30:
+                        log.info("[OEH] Missed scheduled %s by %.0f min — too stale, skipping", OEH_RUN_TIME, mins_late)
+                    else:
+                        log.info("[OEH] Missed scheduled %s run — catching up now", OEH_RUN_TIME)
+                        try:
+                            await _run_oeh_scan()
+                        except Exception as exc:
+                            log.error("[OEH] Catch-up scan failed: %s", exc, exc_info=True)
                     continue
             first_run = False
 
