@@ -128,7 +128,7 @@ OEH_PROFIT_CAP = 999999
 # ---------------------------------------------------------------------------
 # OEL Scanner (Open=Low) — bullish counterpart to OEH
 # ---------------------------------------------------------------------------
-OEL_ENABLED = False
+OEL_ENABLED = True
 OEL_RUN_TIME = "09:20"
 OEL_LIST_TIME = "09:16"
 OEL_MAX_TRADES = 5
@@ -155,7 +155,7 @@ ORB_LOSS_CAP = 20000
 ORB_PROFIT_CAP = 25000
 
 # PDH/PDL Breakout config
-PDHL_ENABLED = True
+PDHL_ENABLED = False
 PDHL_RUN_TIME = "09:22"          # IST — staggered from OEH (09:20) to avoid API rate limit
 PDHL_CAPITAL = 150000
 PDHL_SL_PCT = 0.30
@@ -168,7 +168,7 @@ PDHL_PROFIT_CAP = 25000
 # ---------------------------------------------------------------------------
 # ORF (Opening Range Fade) — failed ORB breakouts that snap back
 # ---------------------------------------------------------------------------
-ORF_ENABLED = True
+ORF_ENABLED = False
 ORF_RUN_TIME = "09:30"           # IST — needs 10+ candles post-open
 ORF_CAPITAL = 150000
 ORF_SL_PCT = 0.30
@@ -186,7 +186,7 @@ ORF_BLOCKLIST = {"GODREJCP", "GRASIM"}
 # ---------------------------------------------------------------------------
 # AFT (Afternoon Momentum) — lunchtime range breakout with volume
 # ---------------------------------------------------------------------------
-AFT_ENABLED = True
+AFT_ENABLED = False
 AFT_RUN_TIME = "13:35"           # IST — just after lunch range ends
 AFT_CAPITAL = 150000
 AFT_SL_PCT = 0.30
@@ -3713,7 +3713,7 @@ async def start_listener() -> None:
             await _run_scanner_once()
 
     # asyncio.get_event_loop().create_task(_scanner_scheduler())
-    log.info("Scanner (ch5) DISABLED — only OEH + ORB active")
+    log.info("Scanner (ch5) DISABLED — only OEH + OEL + ORB active")
 
     # --- OEH Scanner: run once daily at OEH_RUN_TIME ---
     async def _oeh_scheduler():
@@ -3861,8 +3861,8 @@ async def start_listener() -> None:
             except Exception as exc:
                 log.error("[OEL] Scheduler scan failed: %s", exc, exc_info=True)
 
-    # asyncio.get_event_loop().create_task(_oel_scheduler())
-    log.info("OEL scanner DISABLED — only OEH + ORB active")
+    asyncio.get_event_loop().create_task(_oel_scheduler())
+    log.info("OEL scanner started — runs daily at %s IST", OEL_RUN_TIME)
 
     # --- OEL Early List: send stock list at 09:16 IST ---
     async def _oel_list_scheduler():
@@ -3889,8 +3889,8 @@ async def start_listener() -> None:
 
             await _run_oel_list()
 
-    # asyncio.get_event_loop().create_task(_oel_list_scheduler())
-    log.info("OEL early list DISABLED — only OEH + ORB active")
+    asyncio.get_event_loop().create_task(_oel_list_scheduler())
+    log.info("OEL early list scheduler started — runs daily at %s IST", OEL_LIST_TIME)
 
     # --- ORB Scanner: runs at 09:25 (initial) + 09:45 (rescan with recycled capital) ---
     ORB_RESCAN_TIME = "09:45"
@@ -4061,7 +4061,7 @@ async def start_listener() -> None:
                     log.debug("[PDHL] Rescan skipped — only ₹%.0f available", _pdhl_capital_avail)
 
     # asyncio.get_event_loop().create_task(_pdhl_scheduler())
-    log.info("PDHL scanner DISABLED — only OEH + ORB active")
+    log.info("PDHL scanner DISABLED — only OEH + OEL + ORB active")
 
     # --- ORF Scanner: runs at 09:30, rescans every 5 min until 11:30 ---
     async def _orf_scheduler():
@@ -4131,7 +4131,7 @@ async def start_listener() -> None:
                         log.error("[ORF] Rescan failed: %s", exc, exc_info=True)
 
     # asyncio.get_event_loop().create_task(_orf_scheduler())
-    log.info("ORF scanner DISABLED — only OEH + ORB active")
+    log.info("ORF scanner DISABLED — only OEH + OEL + ORB active")
 
     # --- AFT Scanner: runs at 13:35, rescans every 5 min until 15:10 ---
     async def _aft_scheduler():
@@ -4201,7 +4201,7 @@ async def start_listener() -> None:
                         log.error("[AFT] Rescan failed: %s", exc, exc_info=True)
 
     # asyncio.get_event_loop().create_task(_aft_scheduler())
-    log.info("AFT scanner DISABLED — only OEH + ORB active")
+    log.info("AFT scanner DISABLED — only OEH + OEL + ORB active")
 
     # --- Stock Credit Spread Runner: run once daily at 09:45 IST ---
     STOCK_RUN_TIME = "09:45"
@@ -4282,7 +4282,7 @@ async def start_listener() -> None:
         )
 
     # asyncio.get_event_loop().create_task(_stock_scheduler())
-    log.info("Stock strategy DISABLED — only OEH + ORB active")
+    log.info("Stock strategy DISABLED — only OEH + OEL + ORB active")
 
     # --- EOD Report: send daily at 15:35 IST ---
     async def _eod_report_scheduler():
