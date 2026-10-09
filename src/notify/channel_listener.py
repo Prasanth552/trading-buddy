@@ -2257,12 +2257,34 @@ async def _run_orb_scan():
     full_from = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=15)
     full_to = datetime.combine(today, datetime.min.time()).replace(hour=15, minute=30)
 
-    # Phase 1: Fetch 5-min candles in parallel, identify opening ranges and breakouts
-    sym_key_pairs = [
+    # Phase 0: Bulk OHLC pre-filter — skip stocks with negligible day range
+    sym_key_pairs_all = [
         (sym, eq_keys[sym]) for sym in ORB_UNIVERSE
         if sym not in ORB_BLOCKLIST and sym in eq_keys
     ]
+    ikeys = [k for _, k in sym_key_pairs_all]
+    key_to_sym = {k: s for s, k in sym_key_pairs_all}
+    try:
+        ohlc_data = ud.market_quote_ohlc(ikeys)
+    except Exception as exc:
+        log.warning("[ORB] Bulk OHLC failed (%s), proceeding with all stocks", exc)
+        ohlc_data = {}
 
+    if ohlc_data:
+        sym_key_pairs = []
+        for sym, ikey in sym_key_pairs_all:
+            q = ohlc_data.get(ikey)
+            if not q or q["open"] <= 0:
+                continue
+            day_range_pct = (q["high"] - q["low"]) / q["open"] * 100
+            if day_range_pct < 0.2:
+                continue
+            sym_key_pairs.append((sym, ikey))
+        log.info("[ORB] Bulk OHLC pre-filter: %d/%d pass", len(sym_key_pairs), len(sym_key_pairs_all))
+    else:
+        sym_key_pairs = sym_key_pairs_all
+
+    # Phase 1: Fetch 5-min candles in parallel, identify opening ranges and breakouts
     all_candles = await _parallel_fetch_candles(ud, sym_key_pairs, full_from, full_to, "5minute",
                                                 batch_size=20, label="ORB")
 
@@ -3894,21 +3916,29 @@ async def start_listener() -> None:
                 scheduled = now.replace(hour=h, minute=m, second=0, microsecond=0)
                 if now > scheduled:
                     mins_late = (now - scheduled).total_seconds() / 60
-                    if mins_late > 30:
-                        log.info("[ORB] Missed scheduled %s by %.0f min — too stale, skipping catch-up", ORB_RUN_TIME, mins_late)
-                    else:
+                    rescan_t = now.replace(hour=h2, minute=m2, second=0, microsecond=0)
+                    rescan_late = (now - rescan_t).total_seconds() / 60 if now > rescan_t else -1
+                    if mins_late <= 30:
                         log.info("[ORB] Missed scheduled %s run — catching up now", ORB_RUN_TIME)
                         try:
                             await _run_orb_scan()
                         except Exception as exc:
                             log.error("[ORB] Catch-up scan failed: %s", exc, exc_info=True)
-                        rescan_t = now.replace(hour=h2, minute=m2, second=0, microsecond=0)
                         if now > rescan_t:
                             log.info("[ORB] Also missed rescan at %s — running now", ORB_RESCAN_TIME)
                             try:
                                 await _run_orb_scan()
                             except Exception as exc:
                                 log.error("[ORB] Catch-up rescan failed: %s", exc, exc_info=True)
+                    elif now > rescan_t and rescan_late <= 30:
+                        log.info("[ORB] Initial %s too stale (%.0f min), but rescan %s only %.0f min late — running",
+                                 ORB_RUN_TIME, mins_late, ORB_RESCAN_TIME, rescan_late)
+                        try:
+                            await _run_orb_scan()
+                        except Exception as exc:
+                            log.error("[ORB] Catch-up rescan failed: %s", exc, exc_info=True)
+                    else:
+                        log.info("[ORB] Missed scheduled %s by %.0f min — too stale, skipping", ORB_RUN_TIME, mins_late)
                     continue
             first_run = False
 
