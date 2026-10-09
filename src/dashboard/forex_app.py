@@ -1,10 +1,7 @@
-"""Forex paper trading bot — EUR/GBP binary options simulator.
+"""Forex Paper Trading Dashboard — Multi-Strategy Portfolio v3.
 
-Real-time paper trading using S/R + LinReg Reversion strategies.
-Polls yfinance for 1-min EUR/GBP candles, generates signals, tracks paper P&L.
-
-Mounted on main dashboard at /forex, or run standalone on port 8002:
-    python -m src.dashboard.forex_app
+Reads live state from forex_app_v3.py (JSON files) and serves a dashboard.
+Mounted on main dashboard at /forex, or run standalone on port 8002.
 """
 from __future__ import annotations
 
@@ -14,7 +11,7 @@ import os
 import threading
 import time
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -25,479 +22,242 @@ from fastapi.responses import HTMLResponse, JSONResponse
 UTC = ZoneInfo("UTC")
 IST = ZoneInfo("Asia/Kolkata")
 
-app = FastAPI(title="Forex Paper Trader", docs_url=None, redoc_url=None)
+app = FastAPI(title="Forex Portfolio v3", docs_url=None, redoc_url=None)
 
-# ── Config ──────────────────────────────────────────────────────────────────
+DATA_DIR = Path(os.path.expanduser("~/Trading-Buddy/data"))
+TRADES_FILE = DATA_DIR / "forex_paper_trades_v3.json"
+STATE_FILE = DATA_DIR / "forex_state_v3.json"
 STARTING_CAPITAL = 150_000
-TRADE_AMOUNT = 2_000
-PAYOUT_PCT = 0.80
-MAX_DAILY_LOSS = 20_000
-MAX_PAIR_DAILY_LOSS = 10_000
-MIN_CAPITAL = 20_000
-BEST_HOURS_UTC = {0, 1, 2, 3, 4, 19, 21, 22, 23}
-PAIRS = {"EUR/GBP": "EURGBP=X", "CAD/CHF": "CADCHF=X"}
-POLL_INTERVAL = 60  # seconds
 
-DATA_FILE = Path(__file__).parent.parent.parent / "data" / "forex_paper_trades.json"
+_ws_clients: set[WebSocket] = set()
+_stop_event = threading.Event()
+_loop: asyncio.AbstractEventLoop | None = None
 
-# ── State ───────────────────────────────────────────────────────────────────
 _state: dict[str, Any] = {
+    "running": False,
     "capital": STARTING_CAPITAL,
     "peak_capital": STARTING_CAPITAL,
     "trades": [],
     "daily_pnl": {},
-    "pair_daily_pnl": {},  # {"2026-10-05_EUR/GBP": pnl}
-    "candles": {},  # {pair: [candles]}
-    "running": False,
-    "last_poll": None,
-    "last_price": {},  # {pair: price}
-    "today_trades": 0,
-    "today_pnl": 0.0,
     "total_wins": 0,
     "total_losses": 0,
     "total_draws": 0,
     "max_drawdown": 0,
-    "win_streak": 0,
-    "loss_streak": 0,
     "max_win_streak": 0,
     "max_loss_streak": 0,
-    "streak": 0,
     "started_at": None,
+    "last_poll": None,
+    "last_price": {},
     "errors": [],
 }
 
-_ws_clients: set[WebSocket] = set()
-_poll_thread: threading.Thread | None = None
-_stop_event = threading.Event()
-_loop: asyncio.AbstractEventLoop | None = None
-
-
-# ── Persistence ─────────────────────────────────────────────────────────────
-
-def _save_state() -> None:
-    try:
-        DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
-        saveable = {
-            "capital": _state["capital"],
-            "peak_capital": _state["peak_capital"],
-            "trades": _state["trades"][-500:],
-            "daily_pnl": _state["daily_pnl"],
-            "total_wins": _state["total_wins"],
-            "total_losses": _state["total_losses"],
-            "total_draws": _state["total_draws"],
-            "max_drawdown": _state["max_drawdown"],
-            "max_win_streak": _state["max_win_streak"],
-            "max_loss_streak": _state["max_loss_streak"],
-            "started_at": _state["started_at"],
-        }
-        DATA_FILE.write_text(json.dumps(saveable, indent=2))
-    except Exception:
-        pass
-
 
 def _load_state() -> None:
-    if DATA_FILE.exists():
+    trades = []
+    if TRADES_FILE.exists():
         try:
-            data = json.loads(DATA_FILE.read_text())
-            for k in ("capital", "peak_capital", "trades", "daily_pnl",
-                       "total_wins", "total_losses", "total_draws",
-                       "max_drawdown", "max_win_streak", "max_loss_streak",
-                       "started_at"):
-                if k in data:
-                    _state[k] = data[k]
+            trades = json.loads(TRADES_FILE.read_text())
+        except Exception:
+            pass
+    state_data = {}
+    if STATE_FILE.exists():
+        try:
+            state_data = json.loads(STATE_FILE.read_text())
         except Exception:
             pass
 
+    _state["trades"] = trades
+    _state["running"] = len(state_data.get("open_positions", [])) > 0 or True
+    _state["open_positions"] = state_data.get("open_positions", [])
 
-# ── Strategies ──────────────────────────────────────────────────────────────
+    wins = sum(1 for t in trades if t.get("won"))
+    losses = sum(1 for t in trades if not t.get("won"))
+    _state["total_wins"] = wins
+    _state["total_losses"] = losses
 
-def strategy_sr(candles: list[dict]) -> list[tuple[int, str]]:
-    closes = [c["close"] for c in candles]
-    highs = [c["high"] for c in candles]
-    lows = [c["low"] for c in candles]
-    signals = []
-    lookback = 25
-    threshold_pct = 0.0005
-    for i in range(lookback, len(candles)):
-        resistance = max(highs[i - lookback:i])
-        support = min(lows[i - lookback:i])
-        price = closes[i]
-        rng = resistance - support
-        if rng == 0:
-            continue
-        if (price - support) / rng < threshold_pct * 10:
-            signals.append((i, "CALL"))
-        elif (resistance - price) / rng < threshold_pct * 10:
-            signals.append((i, "PUT"))
-    return signals
+    daily = defaultdict(float)
+    for t in trades:
+        day = t.get("exit_time", "")[:10]
+        if day:
+            daily[day] += t.get("pnl", 0)
+    _state["daily_pnl"] = dict(daily)
 
+    total_pnl = sum(t.get("pnl", 0) for t in trades)
+    _state["capital"] = STARTING_CAPITAL + total_pnl
+    _state["peak_capital"] = max(STARTING_CAPITAL, _state["capital"])
 
-def strategy_linreg(candles: list[dict], period: int = 20, std_mult: float = 2.0) -> list[tuple[int, str]]:
-    closes = [c["close"] for c in candles]
-    signals = []
-    for i in range(period, len(candles)):
-        window = closes[i - period:i]
-        n = len(window)
-        sx = n * (n - 1) / 2
-        sy = sum(window)
-        sxx = sum(j * j for j in range(n))
-        sxy = sum(j * v for j, v in enumerate(window))
-        denom = n * sxx - sx * sx
-        if denom == 0:
-            continue
-        slope = (n * sxy - sx * sy) / denom
-        intercept = (sy - slope * sx) / n
-        predicted = intercept + slope * (n - 1)
-        residuals = [window[j] - (intercept + slope * j) for j in range(n)]
-        std = (sum(r ** 2 for r in residuals) / n) ** 0.5
-        if std == 0:
-            continue
-        price = closes[i]
-        if price < predicted - std_mult * std:
-            signals.append((i, "CALL"))
-        elif price > predicted + std_mult * std:
-            signals.append((i, "PUT"))
-    return signals
+    eq = 0
+    peak = 0
+    mdd = 0
+    ws = 0
+    ls = 0
+    mws = 0
+    mls = 0
+    for t in trades:
+        eq += t.get("pnl", 0)
+        peak = max(peak, eq)
+        mdd = max(mdd, peak - eq)
+        if t.get("won"):
+            ws += 1; ls = 0
+        else:
+            ls += 1; ws = 0
+        mws = max(mws, ws)
+        mls = max(mls, ls)
+    _state["max_drawdown"] = mdd
+    _state["max_win_streak"] = mws
+    _state["max_loss_streak"] = mls
+    _state["started_at"] = trades[0].get("entry_time", "")[:16] if trades else None
 
 
-# ── Trading engine ──────────────────────────────────────────────────────────
-
-def _check_signal_on_latest(candles: list[dict]) -> list[dict]:
-    """Check the second-to-last candle for signals (last candle = expiry)."""
-    if len(candles) < 30:
-        return []
-    last_idx = len(candles) - 2
-    if last_idx < 0:
-        return []
-
-    dt_utc = datetime.fromtimestamp(candles[last_idx]["time"], UTC)
-    if dt_utc.hour not in BEST_HOURS_UTC:
-        return []
-
-    results = []
-    for name, fn in [("S/R", strategy_sr), ("LinReg", strategy_linreg)]:
-        signals = fn(candles)
-        for idx, direction in signals:
-            if idx == last_idx:
-                entry_price = candles[idx]["close"]
-                expiry_price = candles[idx + 1]["close"]
-                results.append({
-                    "strategy": name,
-                    "direction": direction,
-                    "entry_price": entry_price,
-                    "expiry_price": expiry_price,
-                    "idx": idx,
-                })
-    return results
-
-
-def _execute_paper_trade(signal: dict) -> dict | None:
-    day_key = datetime.now(IST).strftime("%Y-%m-%d")
-    day_pnl = _state["daily_pnl"].get(day_key, 0)
-    if day_pnl <= -MAX_DAILY_LOSS:
-        return None
-    pair = signal.get("pair", "EUR/GBP")
-    pair_key = f"{day_key}_{pair}"
-    pair_pnl = _state["pair_daily_pnl"].get(pair_key, 0)
-    if pair_pnl <= -MAX_PAIR_DAILY_LOSS:
-        return None
-    if _state["capital"] < MIN_CAPITAL or _state["capital"] < TRADE_AMOUNT:
-        return None
-
-    entry = signal["entry_price"]
-    expiry = signal["expiry_price"]
-    direction = signal["direction"]
-
-    if entry == expiry:
-        pnl = 0
-        result = "DRAW"
-        _state["total_draws"] += 1
-        _state["streak"] = 0
-    elif (direction == "CALL" and expiry > entry) or (direction == "PUT" and expiry < entry):
-        pnl = TRADE_AMOUNT * PAYOUT_PCT
-        result = "WIN"
-        _state["total_wins"] += 1
-        _state["streak"] = _state["streak"] + 1 if _state["streak"] > 0 else 1
-    else:
-        pnl = -TRADE_AMOUNT
-        result = "LOSS"
-        _state["total_losses"] += 1
-        _state["streak"] = _state["streak"] - 1 if _state["streak"] < 0 else -1
-
-    _state["max_win_streak"] = max(_state["max_win_streak"],
-                                    _state["streak"] if _state["streak"] > 0 else 0)
-    _state["max_loss_streak"] = max(_state["max_loss_streak"],
-                                     abs(_state["streak"]) if _state["streak"] < 0 else 0)
-
-    _state["capital"] += pnl
-    _state["peak_capital"] = max(_state["peak_capital"], _state["capital"])
-    dd = _state["peak_capital"] - _state["capital"]
-    _state["max_drawdown"] = max(_state["max_drawdown"], dd)
-    _state["daily_pnl"][day_key] = day_pnl + pnl
-    _state["pair_daily_pnl"][pair_key] = pair_pnl + pnl
-
-    trade = {
-        "id": len(_state["trades"]) + 1,
-        "ts": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S"),
-        "day": day_key,
-        "pair": signal.get("pair", "EUR/GBP"),
-        "strategy": signal["strategy"],
-        "direction": direction,
-        "entry": round(entry, 5),
-        "expiry": round(expiry, 5),
-        "result": result,
-        "pnl": pnl,
-        "capital": _state["capital"],
-    }
-    _state["trades"].append(trade)
-    return trade
-
-
-# ── Price polling ───────────────────────────────────────────────────────────
-
-def _fetch_candles(symbol: str) -> list[dict]:
-    """Fetch recent 1-min candles via yfinance."""
-    import yfinance as yf
-    ticker = yf.Ticker(symbol)
-    df = ticker.history(period="1d", interval="1m")
-    if df.empty:
-        df = ticker.history(period="2d", interval="1m")
-    candles = []
-    for ts, row in df.iterrows():
-        candles.append({
-            "time": int(ts.timestamp()),
-            "open": float(row["Open"]),
-            "high": float(row["High"]),
-            "low": float(row["Low"]),
-            "close": float(row["Close"]),
-        })
-    return candles
+def _save_state() -> None:
+    pass
 
 
 def _poll_loop() -> None:
-    """Background thread: poll prices, check signals, execute paper trades."""
-    global _loop
     while not _stop_event.is_set():
-        for pair_name, symbol in PAIRS.items():
-            try:
-                candles = _fetch_candles(symbol)
-                if not candles:
-                    _state["errors"].append(f"{datetime.now(IST):%H:%M} {pair_name} no candles")
-                    continue
+        _load_state()
+        if _loop and _ws_clients:
+            asyncio.run_coroutine_threadsafe(_ws_broadcast({"type": "tick"}), _loop)
+        _stop_event.wait(30)
 
-                _state["candles"][pair_name] = candles
-                _state["last_price"][pair_name] = candles[-1]["close"]
-                _state["last_poll"] = datetime.now(IST).strftime("%H:%M:%S")
-
-                # Check if we already traded this candle for this pair
-                last_time = candles[-2]["time"] if len(candles) > 1 else 0
-                candle_key = f"{pair_name}_{last_time}"
-                already = any(t.get("_candle_key") == candle_key for t in _state["trades"][-50:])
-                if not already and len(candles) >= 30:
-                    signals = _check_signal_on_latest(candles)
-                    for sig in signals:
-                        sig["pair"] = pair_name
-                        trade = _execute_paper_trade(sig)
-                        if trade:
-                            trade["_candle_key"] = candle_key
-                            _save_state()
-                            if _loop:
-                                asyncio.run_coroutine_threadsafe(_ws_broadcast({
-                                    "type": "trade", "trade": trade,
-                                }), _loop)
-
-            except Exception as exc:
-                err = f"{datetime.now(IST):%H:%M} {pair_name}: {exc}"
-                _state["errors"] = (_state["errors"] + [err])[-20:]
-
-        # Broadcast price update
-        if _loop:
-            asyncio.run_coroutine_threadsafe(_ws_broadcast({
-                "type": "tick",
-                "prices": _state["last_price"],
-                "time": _state["last_poll"],
-                "capital": _state["capital"],
-            }), _loop)
-
-        _stop_event.wait(POLL_INTERVAL)
-
-
-# ── WebSocket ───────────────────────────────────────────────────────────────
 
 async def _ws_broadcast(data: dict) -> None:
     msg = json.dumps(data)
-    dead = []
+    dead = set()
     for ws in _ws_clients:
         try:
             await ws.send_text(msg)
         except Exception:
-            dead.append(ws)
-    for ws in dead:
-        _ws_clients.discard(ws)
-
-
-@app.websocket("/ws")
-async def ws_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    _ws_clients.add(websocket)
-    try:
-        while True:
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        _ws_clients.discard(websocket)
+            dead.add(ws)
+    _ws_clients -= dead
 
 
 # ── API ─────────────────────────────────────────────────────────────────────
-
 @app.get("/api/forex/status")
 def api_status() -> JSONResponse:
-    total = _state["total_wins"] + _state["total_losses"]
-    wr = (_state["total_wins"] / total * 100) if total else 0
+    _load_state()
+    trades = _state["trades"]
+    total = len(trades)
+    wins = _state["total_wins"]
+    wr = (wins / total * 100) if total else 0
     net = _state["capital"] - STARTING_CAPITAL
     day_key = datetime.now(IST).strftime("%Y-%m-%d")
     today_pnl = _state["daily_pnl"].get(day_key, 0)
-    today_trades = sum(1 for t in _state["trades"] if t.get("day") == day_key)
-
+    today_trades = sum(1 for t in trades if t.get("exit_time", "")[:10] == day_key)
     green_days = sum(1 for v in _state["daily_pnl"].values() if v > 0)
     red_days = sum(1 for v in _state["daily_pnl"].values() if v < 0)
-
     dd_pct = (_state["max_drawdown"] / _state["peak_capital"] * 100) if _state["peak_capital"] else 0
+
+    open_pos = _state.get("open_positions", [])
+    strat_perf = defaultdict(lambda: {"trades": 0, "wins": 0, "pnl": 0, "pips": 0})
+    for t in trades:
+        key = f"{t['strat']} {t['pair']} {t['tf']}"
+        strat_perf[key]["trades"] += 1
+        strat_perf[key]["pnl"] += t.get("pnl", 0)
+        strat_perf[key]["pips"] += t.get("pips", 0)
+        if t.get("won"):
+            strat_perf[key]["wins"] += 1
 
     return JSONResponse({
         "running": _state["running"],
-        "capital": _state["capital"],
+        "capital": round(_state["capital"]),
         "starting_capital": STARTING_CAPITAL,
-        "net_pnl": net,
+        "net_pnl": round(net),
         "net_pct": round(net / STARTING_CAPITAL * 100, 1),
-        "peak_capital": _state["peak_capital"],
-        "max_drawdown": _state["max_drawdown"],
+        "peak_capital": round(_state["peak_capital"]),
+        "max_drawdown": round(_state["max_drawdown"]),
         "max_drawdown_pct": round(dd_pct, 1),
-        "total_trades": total + _state["total_draws"],
-        "wins": _state["total_wins"],
+        "total_trades": total,
+        "wins": wins,
         "losses": _state["total_losses"],
-        "draws": _state["total_draws"],
+        "draws": 0,
         "win_rate": round(wr, 1),
         "max_win_streak": _state["max_win_streak"],
         "max_loss_streak": _state["max_loss_streak"],
-        "today_pnl": today_pnl,
+        "today_pnl": round(today_pnl),
         "today_trades": today_trades,
-        "last_price": _state["last_price"],
-        "last_poll": _state["last_poll"],
+        "last_price": _state.get("last_price", {}),
+        "last_poll": _state.get("last_poll"),
         "green_days": green_days,
         "red_days": red_days,
         "total_days": green_days + red_days,
-        "trade_amount": TRADE_AMOUNT,
-        "payout_pct": PAYOUT_PCT,
-        "daily_loss_cap": MAX_DAILY_LOSS,
-        "pair_daily_loss_cap": MAX_PAIR_DAILY_LOSS,
-        "pairs": list(PAIRS.keys()),
+        "trade_amount": "1.0 lot",
+        "payout_pct": 0,
+        "daily_loss_cap": 0,
+        "pair_daily_loss_cap": 0,
+        "pairs": ["GBP/USD", "EUR/USD", "USD/JPY", "GBP/JPY"],
         "started_at": _state["started_at"],
         "errors": _state["errors"][-5:],
         "now": datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST"),
+        "open_positions": open_pos,
+        "strategy_perf": dict(strat_perf),
+        "total_pips": round(sum(t.get("pips", 0) for t in trades), 1),
     })
 
 
 @app.get("/api/forex/trades")
 def api_trades(limit: int = 50) -> JSONResponse:
+    _load_state()
+    trades = _state["trades"][-limit:][::-1]
     clean = []
-    for t in _state["trades"]:
-        c = {k: v for k, v in t.items() if not k.startswith("_")}
-        clean.append(c)
-    return JSONResponse(clean[-limit:][::-1])
+    for t in trades:
+        clean.append({
+            "direction": t.get("direction", ""),
+            "strategy": f"{t.get('strat','')} {t.get('pair','')} {t.get('tf','')}",
+            "ts": (t.get("exit_time", "")[:16]).replace("T", " "),
+            "entry": str(round(t.get("entry_price", 0), 5)),
+            "expiry": str(round(t.get("exit_price", 0), 5)),
+            "pnl": round(t.get("pnl", 0)),
+            "pips": round(t.get("pips", 0), 1),
+            "result": "WIN" if t.get("won") else "LOSS",
+            "reason": t.get("reason", ""),
+            "day": t.get("exit_time", "")[:10],
+            "candles_held": t.get("candles_held", 0),
+        })
+    return JSONResponse(clean)
 
 
 @app.get("/api/forex/daily")
 def api_daily() -> JSONResponse:
+    _load_state()
     daily = []
+    trades = _state["trades"]
     for day in sorted(_state["daily_pnl"].keys()):
         pnl = _state["daily_pnl"][day]
-        day_trades = [t for t in _state["trades"] if t.get("day") == day]
-        wins = sum(1 for t in day_trades if t["result"] == "WIN")
-        losses = sum(1 for t in day_trades if t["result"] == "LOSS")
+        day_trades = [t for t in trades if t.get("exit_time", "")[:10] == day]
+        wins = sum(1 for t in day_trades if t.get("won"))
+        losses = len(day_trades) - wins
         wr = (wins / (wins + losses) * 100) if (wins + losses) else 0
-        daily.append({
-            "day": day,
-            "pnl": pnl,
-            "trades": len(day_trades),
-            "wins": wins,
-            "losses": losses,
-            "win_rate": round(wr, 1),
-        })
+        daily.append({"day": day, "pnl": round(pnl), "trades": len(day_trades),
+                      "wins": wins, "losses": losses, "win_rate": round(wr, 1)})
     return JSONResponse(daily[::-1])
 
 
 @app.get("/api/forex/equity")
 def api_equity() -> JSONResponse:
+    _load_state()
     curve = []
     running = STARTING_CAPITAL
     for day in sorted(_state["daily_pnl"].keys()):
         running += _state["daily_pnl"][day]
-        curve.append({"day": day, "capital": running})
+        curve.append({"day": day, "capital": round(running)})
     return JSONResponse(curve)
 
 
 @app.post("/api/forex/start")
 def api_start() -> JSONResponse:
-    global _poll_thread
-    if _state["running"]:
-        return JSONResponse({"ok": False, "reason": "already running"})
-    _state["running"] = True
-    _state["started_at"] = _state["started_at"] or datetime.now(IST).strftime("%Y-%m-%d %H:%M")
-    _stop_event.clear()
-    _poll_thread = threading.Thread(target=_poll_loop, daemon=True)
-    _poll_thread.start()
-    _save_state()
-    return JSONResponse({"ok": True})
-
+    return JSONResponse({"ok": True, "msg": "v3 bot runs independently — check logs/forex_v3.log"})
 
 @app.post("/api/forex/stop")
 def api_stop() -> JSONResponse:
-    _state["running"] = False
-    _stop_event.set()
-    _save_state()
-    return JSONResponse({"ok": True})
-
+    return JSONResponse({"ok": True, "msg": "SSH into VM and pkill -f forex_app_v3 to stop"})
 
 @app.post("/api/forex/reset")
 def api_reset() -> JSONResponse:
-    if _state["running"]:
-        return JSONResponse({"ok": False, "reason": "stop bot first"})
-    _state["capital"] = STARTING_CAPITAL
-    _state["peak_capital"] = STARTING_CAPITAL
-    _state["trades"] = []
-    _state["daily_pnl"] = {}
-    _state["total_wins"] = 0
-    _state["total_losses"] = 0
-    _state["total_draws"] = 0
-    _state["max_drawdown"] = 0
-    _state["max_win_streak"] = 0
-    _state["max_loss_streak"] = 0
-    _state["streak"] = 0
-    _state["started_at"] = None
-    _state["errors"] = []
-    _save_state()
-    return JSONResponse({"ok": True})
+    return JSONResponse({"ok": False, "reason": "Reset not available — delete data/forex_paper_trades_v3.json manually"})
 
 
-# ── Startup ─────────────────────────────────────────────────────────────────
-
-@app.on_event("startup")
-async def on_startup():
-    global _loop, _poll_thread
-    _loop = asyncio.get_event_loop()
-    _load_state()
-    # Auto-start the bot
-    if not _state["running"]:
-        _state["running"] = True
-        _state["started_at"] = _state["started_at"] or datetime.now(IST).strftime("%Y-%m-%d %H:%M")
-        _stop_event.clear()
-        _poll_thread = threading.Thread(target=_poll_loop, daemon=True)
-        _poll_thread.start()
-        _save_state()
-
-
-# ── HTML Dashboard ──────────────────────────────────────────────────────────
-
+# ── Page ────────────────────────────────────────────────────────────────────
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
     return _PAGE
@@ -505,7 +265,7 @@ def index() -> str:
 
 _PAGE = r"""<!doctype html><html lang=en><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1,user-scalable=no">
-<title>Forex Paper Trader</title>
+<title>Forex Portfolio v3</title>
 <meta name="theme-color" content="#0b0f14">
 <style>
 :root{
@@ -520,7 +280,7 @@ _PAGE = r"""<!doctype html><html lang=en><head><meta charset=utf-8>
   --mn:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
   --sn:-apple-system,system-ui,Segoe UI,Roboto,sans-serif;
 }
-@media(prefers-color-scheme:light){:root{
+@media(prefers-color-scheme:light){:root:not([data-theme=dark]){
   --bg:#f0f2f5;--sf:#fff;--el:#fff;--bd:#e2e8f0;
   --tx:#1e293b;--mt:#64748b;--ft:#cbd5e1;
   --gn:#16a34a;--gd:rgba(22,163,74,.08);
@@ -547,9 +307,7 @@ _PAGE = r"""<!doctype html><html lang=en><head><meta charset=utf-8>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:var(--sn);background:var(--bg);color:var(--tx);
   -webkit-font-smoothing:antialiased;min-height:100vh}
-.wrap{max-width:480px;margin:0 auto;padding:12px 16px 80px}
-
-/* Header */
+.wrap{max-width:520px;margin:0 auto;padding:12px 16px 80px}
 .hdr{background:var(--sf);border-bottom:1px solid var(--bd);padding:14px 16px;
   position:sticky;top:0;z-index:50;display:flex;align-items:center;justify-content:space-between}
 .hdr h1{font-size:17px;font-weight:700}
@@ -561,65 +319,34 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
 .hdr-time{font-size:11px;color:var(--mt);font-family:var(--mn)}
 .back{font-size:13px;color:var(--cy);text-decoration:none;margin-right:10px}
-
-/* Hero */
 .hero{display:flex;justify-content:space-between;align-items:center;padding:20px 0 16px}
 .hero-pnl .label{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:var(--mt)}
 .hero-pnl .val{font-size:28px;font-weight:800;font-family:var(--mn);font-variant-numeric:tabular-nums}
 .hero-pnl .sub{font-size:12px;color:var(--mt);margin-top:2px;font-family:var(--mn)}
 .pos{color:var(--gn)}.neg{color:var(--rd)}
-
-/* Ring */
 .hero-ring{position:relative;width:100px;height:100px}
 .hero-ring canvas{width:100px;height:100px}
 .ring-txt{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center}
 .ring-pct{font-size:20px;font-weight:800;font-family:var(--mn)}
 .ring-sub{font-size:9px;text-transform:uppercase;letter-spacing:.8px;color:var(--mt)}
-
-/* Chips */
 .chips{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:16px}
 .chip{background:var(--sf);border:1px solid var(--bd);border-radius:10px;padding:10px;text-align:center}
 .chip .cv{font-size:16px;font-weight:700;font-family:var(--mn);font-variant-numeric:tabular-nums}
 .chip .cl{font-size:9px;text-transform:uppercase;letter-spacing:.6px;color:var(--mt);margin-top:2px}
-
-/* Controls */
-.ctrls{display:flex;gap:8px;margin-bottom:16px}
-.btn{flex:1;padding:10px;border:none;border-radius:10px;font-size:13px;font-weight:600;cursor:pointer}
-.btn-start{background:var(--gn);color:#fff}
-.btn-start:disabled{opacity:.4;cursor:default}
-.btn-stop{background:var(--rd);color:#fff}
-.btn-stop:disabled{opacity:.4;cursor:default}
-.btn-reset{background:var(--el);color:var(--mt);border:1px solid var(--bd)}
-
-/* Sections */
 .sec{background:var(--sf);border:1px solid var(--bd);border-radius:12px;margin-bottom:12px;overflow:hidden}
 .sec-h{padding:12px 14px 8px;font-size:13px;font-weight:700;display:flex;align-items:center;gap:6px}
 .badge{background:var(--bld);color:var(--bl);font-size:10px;padding:2px 7px;border-radius:8px;font-weight:600}
 .sec-body{padding:0 14px 12px}
-
-/* Price ticker */
-.ticker{display:flex;align-items:center;gap:10px;background:var(--sf);border:1px solid var(--bd);
-  border-radius:10px;padding:12px 14px;margin-bottom:12px}
-.ticker .pair{font-size:13px;font-weight:700;color:var(--cy)}
-.ticker .price{font-size:22px;font-weight:800;font-family:var(--mn);font-variant-numeric:tabular-nums}
-.ticker .time{font-size:10px;color:var(--mt);margin-left:auto;font-family:var(--mn)}
-.ticker .status{font-size:10px;padding:3px 8px;border-radius:6px;font-weight:600}
-.ticker .status.on{background:var(--gd);color:var(--gn)}
-.ticker .status.off{background:var(--rdd);color:var(--rd)}
-
-/* Trade cards */
 .tcard{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--bd)}
 .tcard:last-child{border-bottom:none}
-.tcard .dir{font-size:10px;font-weight:700;padding:3px 8px;border-radius:6px;letter-spacing:.3px}
+.tcard .dir{font-size:10px;font-weight:700;padding:3px 8px;border-radius:6px;letter-spacing:.3px;flex-shrink:0}
 .tcard .dir.CALL{background:var(--gd);color:var(--gn)}
 .tcard .dir.PUT{background:var(--rdd);color:var(--rd)}
 .tcard .info{flex:1;min-width:0}
 .tcard .strat{font-size:12px;font-weight:600}
 .tcard .meta{font-size:10px;color:var(--mt);font-family:var(--mn)}
 .tcard .res{font-size:13px;font-weight:700;font-family:var(--mn);text-align:right}
-.tcard .res.WIN{color:var(--gn)}.tcard .res.LOSS{color:var(--rd)}.tcard .res.DRAW{color:var(--mt)}
-
-/* Daily rows */
+.tcard .res.WIN{color:var(--gn)}.tcard .res.LOSS{color:var(--rd)}
 .drow{display:flex;align-items:center;padding:8px 14px;border-bottom:1px solid var(--bd);font-size:12px}
 .drow:last-child{border-bottom:none}
 .drow .day{width:90px;font-weight:600;font-family:var(--mn)}
@@ -627,30 +354,40 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);
 .drow .bar-fill{height:100%;border-radius:3px}
 .drow .dpnl{width:80px;text-align:right;font-weight:700;font-family:var(--mn);font-variant-numeric:tabular-nums}
 .drow .dwr{width:40px;text-align:right;color:var(--mt);font-family:var(--mn)}
-
-/* Equity chart */
 .chart-wrap{padding:8px 14px 14px}
 .chart-wrap canvas{width:100%;height:160px}
-
-/* Errors */
-.errs{padding:8px 14px 12px;font-size:11px;color:var(--rd);font-family:var(--mn)}
-
 .empty{color:var(--mt);font-size:13px;padding:16px 14px;text-align:center}
-
-/* Bottom nav */
 .bnav{position:fixed;bottom:0;left:0;right:0;background:var(--sf);border-top:1px solid var(--bd);
   display:flex;justify-content:center;padding:8px 0 max(8px,env(safe-area-inset-bottom));z-index:50}
 .bnav a{color:var(--mt);text-decoration:none;font-size:10px;text-align:center;padding:4px 16px}
 .bnav a.active{color:var(--cy)}
 .bnav .nav-ico{font-size:18px;display:block}
 
-@media(min-width:600px){.wrap{max-width:520px}.hero-pnl .val{font-size:36px}}
+/* Open positions */
+.opos{padding:8px 14px;border-bottom:1px solid var(--bd);font-size:12px;font-family:var(--mn)}
+.opos:last-child{border-bottom:none}
+.opos .op-pair{font-weight:700;color:var(--cy)}
+.opos .op-dir{font-size:10px;font-weight:700;padding:2px 6px;border-radius:4px;margin-left:6px}
+.opos .op-dir.CALL{background:var(--gd);color:var(--gn)}
+.opos .op-dir.PUT{background:var(--rdd);color:var(--rd)}
+.opos .op-meta{color:var(--mt);margin-top:2px;font-size:10px}
+
+/* Strategy perf table */
+.srow{display:flex;align-items:center;padding:8px 14px;border-bottom:1px solid var(--bd);font-size:11px;font-family:var(--mn)}
+.srow:last-child{border-bottom:none}
+.srow .sname{flex:1;font-weight:600;font-size:12px}
+.srow .spnl{width:80px;text-align:right;font-weight:700}
+.srow .swr{width:40px;text-align:right;color:var(--mt)}
+.srow .str{width:30px;text-align:right;color:var(--mt)}
+.srow .spips{width:50px;text-align:right;color:var(--mt)}
+
+@media(min-width:600px){.wrap{max-width:560px}.hero-pnl .val{font-size:36px}}
 </style></head><body>
 
 <div class=hdr>
   <div style="display:flex;align-items:center;gap:8px">
     <a href="/" class=back>&larr; Dashboard</a>
-    <h1>Forex <span>Paper Trader</span></h1>
+    <h1>Forex <span>Portfolio v3</span></h1>
   </div>
   <div class=hdr-right>
     <div class=live-dot id=sd></div>
@@ -660,32 +397,17 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);
 
 <div class=wrap>
 
-<!-- Price ticker -->
-<div class=ticker>
-  <span class=pair>EUR/GBP</span>
-  <span class=price id=lp>—</span>
-  <span class=time id=lt></span>
-  <span class=status id=st>OFF</span>
-</div>
-
-<!-- Controls -->
-<div class=ctrls>
-  <button class="btn btn-start" id=bstart onclick="ctl('start')">▶ Start</button>
-  <button class="btn btn-stop" id=bstop onclick="ctl('stop')">⏸ Stop</button>
-  <button class="btn btn-reset" onclick="if(confirm('Reset all paper trades?'))ctl('reset')">↺ Reset</button>
-</div>
-
 <!-- Hero P&L -->
 <div class=hero>
   <div class=hero-pnl>
     <div class=label>Net P&L</div>
-    <div class=val id=hv>—</div>
+    <div class=val id=hv>&mdash;</div>
     <div class=sub id=hs></div>
   </div>
   <div class=hero-ring>
     <canvas id=ring width=100 height=100></canvas>
     <div class=ring-txt>
-      <div class=ring-pct id=rp>—</div>
+      <div class=ring-pct id=rp>&mdash;</div>
       <div class=ring-sub>Win Rate</div>
     </div>
   </div>
@@ -694,22 +416,22 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);
 <!-- Stat chips -->
 <div class=chips id=chips></div>
 
-<!-- Config info -->
+<!-- Open positions -->
 <div class=sec>
-  <div class=sec-h>Config</div>
-  <div class=sec-body id=cfginfo style="font-size:12px;color:var(--mt);font-family:var(--mn)"></div>
+  <div class=sec-h>Open Positions <span class=badge id=opc>0</span></div>
+  <div id=openPos></div>
+</div>
+
+<!-- Strategy performance -->
+<div class=sec>
+  <div class=sec-h>Strategy Performance</div>
+  <div id=stratPerf></div>
 </div>
 
 <!-- Equity curve -->
 <div class=sec>
   <div class=sec-h>Equity Curve</div>
   <div class=chart-wrap><canvas id=cv></canvas></div>
-</div>
-
-<!-- Today's trades -->
-<div class=sec>
-  <div class=sec-h>Today's Trades <span class=badge id=tc>0</span></div>
-  <div id=todayTrades></div>
 </div>
 
 <!-- Daily breakdown -->
@@ -720,14 +442,8 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);
 
 <!-- Recent trades -->
 <div class=sec>
-  <div class=sec-h>All Trades <span class=badge id=ac>0</span></div>
+  <div class=sec-h>Recent Trades <span class=badge id=ac>0</span></div>
   <div id=allTrades></div>
-</div>
-
-<!-- Errors -->
-<div class=sec id=errSec style="display:none">
-  <div class=sec-h style="color:var(--rd)">Errors</div>
-  <div class=errs id=errList></div>
 </div>
 
 </div>
@@ -753,7 +469,7 @@ function drawRing(pct){
   ctx.lineWidth=lw;ctx.stroke();
   if(pct>0){
     ctx.beginPath();ctx.arc(cx,cy,r,-Math.PI/2,-Math.PI/2+Math.PI*2*pct/100);
-    ctx.strokeStyle=pct>=55?getComputedStyle(document.documentElement).getPropertyValue('--gn')
+    ctx.strokeStyle=pct>=50?getComputedStyle(document.documentElement).getPropertyValue('--gn')
       :getComputedStyle(document.documentElement).getPropertyValue('--rd');
     ctx.lineWidth=lw;ctx.lineCap='round';ctx.stroke();
   }
@@ -770,25 +486,20 @@ function drawEquity(data){
   const mn=Math.min(...vals)*0.998,mx=Math.max(...vals)*1.002;
   const x=i=>i/(data.length-1)*W;
   const y=v=>(1-(v-mn)/(mx-mn||1))*(H-30)+15;
-  // Grid
   ctx.strokeStyle=getComputedStyle(document.documentElement).getPropertyValue('--bd');
   ctx.lineWidth=0.5;
   for(let g=0;g<4;g++){const gy=15+(H-30)/3*g;ctx.beginPath();ctx.moveTo(0,gy);ctx.lineTo(W,gy);ctx.stroke()}
-  // Line
   const last=vals[vals.length-1],start=150000;
   ctx.beginPath();
   data.forEach((d,i)=>{i?ctx.lineTo(x(i),y(d.capital)):ctx.moveTo(x(i),y(d.capital))});
   ctx.strokeStyle=last>=start?getComputedStyle(document.documentElement).getPropertyValue('--gn')
     :getComputedStyle(document.documentElement).getPropertyValue('--rd');
   ctx.lineWidth=2;ctx.stroke();
-  // Fill
   ctx.lineTo(x(data.length-1),H);ctx.lineTo(0,H);ctx.closePath();
   ctx.fillStyle=last>=start?'rgba(34,197,94,.08)':'rgba(239,68,68,.08)';ctx.fill();
-  // Endpoint
   ctx.beginPath();ctx.arc(x(data.length-1),y(last),4,0,Math.PI*2);
   ctx.fillStyle=last>=start?getComputedStyle(document.documentElement).getPropertyValue('--gn')
     :getComputedStyle(document.documentElement).getPropertyValue('--rd');ctx.fill();
-  // Labels
   ctx.fillStyle=getComputedStyle(document.documentElement).getPropertyValue('--mt');
   ctx.font='10px '+getComputedStyle(document.documentElement).getPropertyValue('--mn');
   if(data.length>1){ctx.fillText(data[0].day,2,H-2);ctx.textAlign='right';ctx.fillText(data[data.length-1].day,W-2,H-2);ctx.textAlign='left'}
@@ -800,9 +511,8 @@ function renderTrades(trades, el){
   el.innerHTML=trades.map(t=>`<div class=tcard>
     <span class="dir ${t.direction}">${t.direction}</span>
     <div class=info><div class=strat>${t.strategy}</div>
-      <div class=meta>${t.ts} · ${t.entry} → ${t.expiry}</div></div>
-    <div class="res ${t.result}">${t.result==='WIN'?'+₹'+(t.pnl).toLocaleString('en-IN')
-      :t.result==='LOSS'?'-₹'+Math.abs(t.pnl).toLocaleString('en-IN'):'DRAW'}</div>
+      <div class=meta>${t.ts} · ${t.entry} → ${t.expiry} · ${t.pips}p · ${t.reason} · ${t.candles_held}c</div></div>
+    <div class="res ${t.result}">${t.result==='WIN'?'+':''}₹${Math.abs(t.pnl).toLocaleString('en-IN')}</div>
   </div>`).join('');
 }
 
@@ -819,24 +529,39 @@ function renderDaily(days){
   }).join('');
 }
 
+function renderOpenPositions(positions){
+  if(!positions||!positions.length){$('openPos').innerHTML='<div class=empty>No open positions</div>';return}
+  $('openPos').innerHTML=positions.map(p=>`<div class=opos>
+    <span class=op-pair>${p.pair}</span>
+    <span class="op-dir ${p.direction}">${p.direction}</span>
+    <span style="margin-left:6px;font-weight:600">${p.strat} ${p.tf}</span>
+    <div class=op-meta>Entry ${p.entry_price?.toFixed(5)} · SL ${p.sl_price?.toFixed(5)} · TP ${p.tp_price?.toFixed(5)} · ${p.candles_held||0} candles held</div>
+  </div>`).join('');
+}
+
+function renderStratPerf(perf){
+  if(!perf||!Object.keys(perf).length){$('stratPerf').innerHTML='<div class=empty>No data yet</div>';return}
+  const entries=Object.entries(perf).sort((a,b)=>b[1].pnl-a[1].pnl);
+  $('stratPerf').innerHTML=entries.map(([name,s])=>{
+    const wr=s.trades?Math.round(s.wins/s.trades*100):0;
+    const cls=s.pnl>=0?'pos':'neg';
+    return`<div class=srow>
+      <span class=sname>${name}</span>
+      <span class=str>${s.trades}</span>
+      <span class=swr>${wr}%</span>
+      <span class=spips>${s.pips?.toFixed(1)||0}p</span>
+      <span class="spnl ${cls}">${fmt(s.pnl)}</span>
+    </div>`
+  }).join('');
+}
+
 let ws;
 function connectWS(){
   const proto=location.protocol==='https:'?'wss:':'ws:';
   ws=new WebSocket(proto+'//'+location.host+'/ws');
-  ws.onmessage=e=>{
-    const d=JSON.parse(e.data);
-    if(d.type==='tick'){
-      $('lp').textContent=d.price?.toFixed(5)||'—';
-      $('lt').textContent=d.time||'';
-    }
-    if(d.type==='trade'){load()}
-  };
+  ws.onmessage=e=>{const d=JSON.parse(e.data);if(d.type==='tick'||d.type==='trade')load()};
   ws.onclose=()=>setTimeout(connectWS,3000);
-}
-
-async function ctl(action){
-  await fetch('/api/forex/'+action,{method:'POST'});
-  load();
+  ws.onerror=()=>{};
 }
 
 async function load(){
@@ -848,73 +573,41 @@ async function load(){
       fetch('/api/forex/equity').then(r=>r.json()),
     ]);
     const s=status;
-
-    // Status dot
     $('sd').className='live-dot '+(s.running?'on':'off');
-    $('st').textContent=s.running?'LIVE':'OFF';
-    $('st').className='status '+(s.running?'on':'off');
     $('ck').textContent=s.now?.split(' ').slice(1).join(' ')||'';
 
-    // Buttons
-    $('bstart').disabled=s.running;
-    $('bstop').disabled=!s.running;
-
-    // Price
-    if(s.last_price)$('lp').textContent=s.last_price.toFixed(5);
-    if(s.last_poll)$('lt').textContent=s.last_poll;
-
-    // Hero
     const net=s.net_pnl;
     $('hv').className='val '+(net>=0?'pos':'neg');
     $('hv').textContent=fmt(net);
-    $('hs').textContent=fmtC(s.capital)+' capital · '+s.net_pct+'%';
+    $('hs').textContent=fmtC(s.capital)+' capital · '+s.net_pct+'% · '+s.total_pips+'p total';
 
-    // Win rate ring
     $('rp').textContent=s.win_rate+'%';
-    $('rp').className='ring-pct '+(s.win_rate>=55?'pos':'neg');
+    $('rp').className='ring-pct '+(s.win_rate>=50?'pos':'neg');
     drawRing(s.win_rate);
 
-    // Chips
     $('chips').innerHTML=[
       ['Today P&L',fmt(s.today_pnl),s.today_pnl>=0?'pos':'neg'],
       ['Trades',s.total_trades,''],
       ['Today',s.today_trades,''],
       ['Green Days',s.green_days+'/'+s.total_days,'pos'],
       ['Max DD',fmtC(s.max_drawdown),'neg'],
-      ['Best Streak',s.max_win_streak+'W / '+s.max_loss_streak+'L',''],
+      ['Streaks',s.max_win_streak+'W / '+s.max_loss_streak+'L',''],
     ].map(([l,v,c])=>`<div class=chip><div class="cv ${c}">${v}</div><div class=cl>${l}</div></div>`).join('');
 
-    // Config
-    $('cfginfo').innerHTML=`₹${s.trade_amount.toLocaleString('en-IN')}/trade · ${s.payout_pct*100}% payout · ₹${(s.daily_loss_cap/1000)}K loss cap · ${s.pair}`
-      +(s.started_at?` · started ${s.started_at}`:'');
+    $('opc').textContent=s.open_positions?.length||0;
+    renderOpenPositions(s.open_positions);
+    renderStratPerf(s.strategy_perf);
 
-    // Today's trades
-    const today=s.now?.split(' ')[0];
-    const todayTrades=trades.filter(t=>t.day===today);
-    $('tc').textContent=todayTrades.length;
-    renderTrades(todayTrades,$('todayTrades'));
-
-    // Daily
     $('dc').textContent=daily.length;
     renderDaily(daily);
-
-    // Equity
     drawEquity(equity);
 
-    // All trades
     $('ac').textContent=s.total_trades;
     renderTrades(trades,$('allTrades'));
-
-    // Errors
-    if(s.errors&&s.errors.length){
-      $('errSec').style.display='';
-      $('errList').textContent=s.errors.join('\n');
-    }else{$('errSec').style.display='none'}
-
   }catch(e){console.error(e)}
 }
 
-connectWS();
+try{connectWS()}catch(e){}
 load();
 setInterval(load,30000);
 </script></body></html>"""
