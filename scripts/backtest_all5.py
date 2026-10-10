@@ -734,7 +734,7 @@ def _run_strategy_sim(strategy_name, ref_date, ud, opt_master, lot_sizes,
         print(f"  {'-'*95}")
 
     # Use prefetched cache if available, fall back to lazy fetch
-    _opt_candle_cache: dict[str, dict[str, dict]] = dict(prefetched_opt_cache) if prefetched_opt_cache else {}
+    _opt_candle_cache: dict[str, dict[str, dict]] = prefetched_opt_cache if prefetched_opt_cache else {}
     _opt_resolve_cache: dict[tuple, tuple] = {}
     # Seed resolve cache from prefetched resolved data
     if prefetched_resolved:
@@ -1013,32 +1013,15 @@ def run_day(ud, ref_date, eq_keys, universe, opt_master, lot_sizes, verbose=True
             scan_interval_min=5, hard_exit_time=None,
         )))
 
-    # Run strategies in parallel (each has its own capital pool + candle cache)
-    if _strat_jobs:
-        from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _ac
-        import io as _io, sys as _sys
-
-        def _run_one(name_kwargs):
-            name, kwargs = name_kwargs
-            buf = _io.StringIO()
-            old_stdout = _sys.stdout
-            _sys.stdout = buf
-            print(f"\n  --- {name} ---")
-            res = _run_strategy_sim(
-                name, ref_date, ud, opt_master, lot_sizes, candles_5m,
-                verbose=verbose,
-                prefetched_opt_cache=opt_cache, prefetched_resolved=opt_resolved,
-                **kwargs,
-            )
-            _sys.stdout = old_stdout
-            return name, res, buf.getvalue()
-
-        with _TPE(max_workers=len(_strat_jobs)) as _ex:
-            futs = {_ex.submit(_run_one, j): j[0] for j in _strat_jobs}
-            for fut in _ac(futs):
-                name, res, output = fut.result()
-                print(output, end="")
-                day_results[name] = res
+    # Run strategies sequentially (VM has limited RAM)
+    for name, kwargs in _strat_jobs:
+        print(f"\n  --- {name} ---")
+        day_results[name] = _run_strategy_sim(
+            name, ref_date, ud, opt_master, lot_sizes, candles_5m,
+            verbose=verbose,
+            prefetched_opt_cache=opt_cache, prefetched_resolved=opt_resolved,
+            **kwargs,
+        )
 
     for label in ["OEH", "OEL", "ORB"]:
         if label not in day_results:
