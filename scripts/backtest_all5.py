@@ -248,6 +248,36 @@ def _prefetch_equity_candles(ud, eq_keys, universe, from_dt, to_dt, interval):
     return _parallel_fetch(ud, jobs)
 
 
+def _prefetch_option_candles(ud, candles_5m, universe, opt_master, lot_sizes, ref_date, from_dt, to_dt):
+    """Prefetch 1-min option candles for ATM CE+PE of every stock upfront in parallel."""
+    jobs = []
+    resolved = {}
+    for sym in universe:
+        if sym in BLOCKLIST:
+            continue
+        eq = candles_5m.get(sym)
+        if not eq:
+            continue
+        spot = eq[0]["open"]
+        if spot <= 0:
+            continue
+        for ot in ("CE", "PE"):
+            opt_key, strike, lot = _resolve_option(sym, spot, ot, ref_date, opt_master, lot_sizes)
+            if opt_key:
+                cache_key = f"{sym}_{strike}_{ot}"
+                resolved[cache_key] = (opt_key, strike, lot)
+                jobs.append((cache_key, opt_key, from_dt, to_dt, "1minute"))
+    result = _parallel_fetch(ud, jobs, max_workers=12)
+    opt_cache = {}
+    for cache_key, candles in result.items():
+        if candles and len(candles) >= 5:
+            cmap = {_candle_time(cn): cn for cn in candles}
+            opt_cache[cache_key] = cmap
+        else:
+            opt_cache[cache_key] = {}
+    return opt_cache, resolved
+
+
 # ---------------------------------------------------------------------------
 # Time-stepped trade simulation engine
 # ---------------------------------------------------------------------------
@@ -671,7 +701,8 @@ def scan_aft_at_tick(candles_5m, universe, tick_time):
 def _run_strategy_sim(strategy_name, ref_date, ud, opt_master, lot_sizes,
                       candles_eq, scan_fn, loss_cap, profit_cap,
                       scan_start, scan_end, scan_interval_min,
-                      hard_exit_time, verbose, candles_1m=None):
+                      hard_exit_time, verbose, candles_1m=None,
+                      prefetched_opt_cache=None, prefetched_resolved=None):
     """Run a single strategy through the day using time-stepped simulation.
 
     scan_fn(tick_time) -> list of candidates at that tick.
@@ -684,7 +715,6 @@ def _run_strategy_sim(strategy_name, ref_date, ud, opt_master, lot_sizes,
     realized_pnl = 0.0
     results = []
     active_syms: set[tuple[str, str]] = set()
-    # cooldown: (sym, opt_type) -> earliest re-entry time (HH:MM)
     sym_cooldown: dict[tuple[str, str], str] = {}
     cap_stopped = False
 
@@ -693,10 +723,19 @@ def _run_strategy_sim(strategy_name, ref_date, ud, opt_master, lot_sizes,
               f" {'P&L':>9s} {'Peak':>8s} {'Reason':<12s} {'ETime':>5s} {'XTime':>5s}")
         print(f"  {'-'*95}")
 
-    # pre-resolve and cache option candles for any candidate we might encounter
-    # We'll do this lazily as candidates appear
-    _opt_candle_cache: dict[str, dict[str, dict]] = {}  # "SYM_STRIKE_TYPE" -> {time: candle}
-    _opt_resolve_cache: dict[tuple, tuple] = {}  # (sym, spot, opt_type) -> (opt_key, strike, lot)
+    # Use prefetched cache if available, fall back to lazy fetch
+    _opt_candle_cache: dict[str, dict[str, dict]] = dict(prefetched_opt_cache) if prefetched_opt_cache else {}
+    _opt_resolve_cache: dict[tuple, tuple] = {}
+    # Seed resolve cache from prefetched resolved data
+    if prefetched_resolved:
+        for cache_key, (opt_key, strike, lot) in prefetched_resolved.items():
+            parts = cache_key.rsplit("_", 2)
+            if len(parts) == 3:
+                sym, strike_str, ot = parts
+                try:
+                    _opt_resolve_cache[(sym, float(strike_str), ot)] = (opt_key, strike, lot)
+                except ValueError:
+                    pass
 
     def _get_opt_candles(sym, spot, opt_type):
         """Resolve option + fetch/cache 1-min candles, return (strike, lot, candle_map) or None."""
@@ -930,6 +969,12 @@ def run_day(ud, ref_date, eq_keys, universe, opt_master, lot_sizes, verbose=True
     day_results = {}
     _en = lambda s: enabled is None or s in enabled
 
+    # Prefetch ALL option candles for the day (ATM CE+PE for every stock)
+    t1 = _t.time()
+    opt_cache, opt_resolved = _prefetch_option_candles(
+        ud, candles_5m, universe, opt_master, lot_sizes, ref_date, from_dt, to_dt)
+    print(f"  Prefetched {len(opt_cache)} option series in {_t.time()-t1:.1f}s")
+
     # Fetch prev day data for PDHL
     prev_day_hl = _fetch_prev_day_hl(ud, eq_keys, universe, ref_date) if _en("PDHL") else {}
 
@@ -971,7 +1016,9 @@ def run_day(ud, ref_date, eq_keys, universe, opt_master, lot_sizes, verbose=True
             print(f"\n  --- {name} ---")
             res = _run_strategy_sim(
                 name, ref_date, ud, opt_master, lot_sizes, candles_5m,
-                verbose=verbose, **kwargs,
+                verbose=verbose,
+                prefetched_opt_cache=opt_cache, prefetched_resolved=opt_resolved,
+                **kwargs,
             )
             _sys.stdout = old_stdout
             return name, res, buf.getvalue()
@@ -998,6 +1045,7 @@ def run_day(ud, ref_date, eq_keys, universe, opt_master, lot_sizes, verbose=True
             loss_cap=PDHL_LOSS_CAP, profit_cap=PDHL_PROFIT_CAP,
             scan_start=PDHL_SCAN_START, scan_end=PDHL_SCAN_END,
             scan_interval_min=5, hard_exit_time=None, verbose=verbose,
+            prefetched_opt_cache=opt_cache, prefetched_resolved=opt_resolved,
         )
 
     # 4. ORF
@@ -1014,6 +1062,7 @@ def run_day(ud, ref_date, eq_keys, universe, opt_master, lot_sizes, verbose=True
             loss_cap=ORF_LOSS_CAP, profit_cap=ORF_PROFIT_CAP,
             scan_start=ORF_SCAN_START, scan_end=ORF_SCAN_END,
             scan_interval_min=5, hard_exit_time=ORF_TIME_EXIT, verbose=verbose,
+            prefetched_opt_cache=opt_cache, prefetched_resolved=opt_resolved,
         )
 
     # 5. AFT
@@ -1027,6 +1076,7 @@ def run_day(ud, ref_date, eq_keys, universe, opt_master, lot_sizes, verbose=True
             loss_cap=AFT_LOSS_CAP, profit_cap=AFT_PROFIT_CAP,
             scan_start=AFT_SCAN_START, scan_end=AFT_SCAN_END,
             scan_interval_min=5, hard_exit_time=AFT_HARD_EXIT, verbose=verbose,
+            prefetched_opt_cache=opt_cache, prefetched_resolved=opt_resolved,
         )
 
     # Day summary
