@@ -933,44 +933,59 @@ def run_day(ud, ref_date, eq_keys, universe, opt_master, lot_sizes, verbose=True
     # Fetch prev day data for PDHL
     prev_day_hl = _fetch_prev_day_hl(ud, eq_keys, universe, ref_date) if _en("PDHL") else {}
 
-    # 1. OEH — rescans every 5 min from 09:20 to 15:20
-    if not _en("OEH"):
-        day_results["OEH"] = []
-    else:
-        print(f"\n  --- OEH ---")
-        day_results["OEH"] = _run_strategy_sim(
-        "OEH", ref_date, ud, opt_master, lot_sizes, candles_5m,
-        scan_fn=lambda tick: scan_oeh_at_tick(candles_5m, universe, tick),
-        loss_cap=OEH_LOSS_CAP, profit_cap=OEH_PROFIT_CAP,
-        scan_start=OEH_SCAN_START, scan_end=OEH_SCAN_END,
-        scan_interval_min=5, hard_exit_time=None, verbose=verbose,
-    )
+    # Build jobs for enabled strategies — run them in parallel
+    _strat_jobs = []
 
-    # 1b. OEL — mirror of OEH, bullish (Open=Low, buy CE)
-    if not _en("OEL"):
-        day_results["OEL"] = []
-    else:
-        print(f"\n  --- OEL ---")
-        day_results["OEL"] = _run_strategy_sim(
-            "OEL", ref_date, ud, opt_master, lot_sizes, candles_5m,
+    if _en("OEH"):
+        _strat_jobs.append(("OEH", dict(
+            scan_fn=lambda tick: scan_oeh_at_tick(candles_5m, universe, tick),
+            loss_cap=OEH_LOSS_CAP, profit_cap=OEH_PROFIT_CAP,
+            scan_start=OEH_SCAN_START, scan_end=OEH_SCAN_END,
+            scan_interval_min=5, hard_exit_time=None,
+        )))
+    if _en("OEL"):
+        _strat_jobs.append(("OEL", dict(
             scan_fn=lambda tick: scan_oel_at_tick(candles_5m, universe, tick),
             loss_cap=OEL_LOSS_CAP, profit_cap=OEL_PROFIT_CAP,
             scan_start=OEL_SCAN_START, scan_end=OEL_SCAN_END,
-            scan_interval_min=5, hard_exit_time=None, verbose=verbose,
-        )
-
-    # 2. ORB
-    if not _en("ORB"):
-        day_results["ORB"] = []
-    else:
-        print(f"\n  --- ORB ---")
-        day_results["ORB"] = _run_strategy_sim(
-            "ORB", ref_date, ud, opt_master, lot_sizes, candles_5m,
+            scan_interval_min=5, hard_exit_time=None,
+        )))
+    if _en("ORB"):
+        _strat_jobs.append(("ORB", dict(
             scan_fn=lambda tick: scan_orb_at_tick(candles_5m, universe, tick),
             loss_cap=ORB_LOSS_CAP, profit_cap=ORB_PROFIT_CAP,
             scan_start=ORB_SCAN_START, scan_end=ORB_SCAN_END,
-            scan_interval_min=5, hard_exit_time=None, verbose=verbose,
-        )
+            scan_interval_min=5, hard_exit_time=None,
+        )))
+
+    # Run strategies in parallel (each has its own capital pool + candle cache)
+    if _strat_jobs:
+        from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _ac
+        import io as _io, sys as _sys
+
+        def _run_one(name_kwargs):
+            name, kwargs = name_kwargs
+            buf = _io.StringIO()
+            old_stdout = _sys.stdout
+            _sys.stdout = buf
+            print(f"\n  --- {name} ---")
+            res = _run_strategy_sim(
+                name, ref_date, ud, opt_master, lot_sizes, candles_5m,
+                verbose=verbose, **kwargs,
+            )
+            _sys.stdout = old_stdout
+            return name, res, buf.getvalue()
+
+        with _TPE(max_workers=len(_strat_jobs)) as _ex:
+            futs = {_ex.submit(_run_one, j): j[0] for j in _strat_jobs}
+            for fut in _ac(futs):
+                name, res, output = fut.result()
+                print(output, end="")
+                day_results[name] = res
+
+    for label in ["OEH", "OEL", "ORB"]:
+        if label not in day_results:
+            day_results[label] = []
 
     # 3. PDHL
     if not _en("PDHL"):
