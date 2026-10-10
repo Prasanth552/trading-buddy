@@ -216,16 +216,26 @@ def _load_master_data(ud, master):
     return eq_keys, sorted(universe), opt_master, lot_sizes
 
 
+_opt_index: dict[tuple, list[tuple]] = {}
+
+def _build_opt_index(opt_master):
+    global _opt_index
+    _opt_index.clear()
+    for k, v in opt_master.items():
+        idx_key = (k[0], k[3])  # (sym, opt_type)
+        _opt_index.setdefault(idx_key, []).append((k[1], k[2], v))  # (expiry, strike, inst_key)
+
 def _resolve_option(sym, spot, opt_type, ref_date, opt_master, lot_sizes):
-    sym_opts = {k: v for k, v in opt_master.items() if k[0] == sym and k[3] == opt_type}
-    if not sym_opts:
+    entries = _opt_index.get((sym, opt_type))
+    if not entries:
         return None, None, None
-    expiries = sorted({k[1] for k in sym_opts if k[1] >= ref_date})
+    expiries = sorted({e for e, s, v in entries if e >= ref_date})
     if not expiries:
         return None, None, None
-    strikes = sorted({k[2] for k in sym_opts if k[1] == expiries[0]})
+    nearest_exp = expiries[0]
+    strikes = [s for e, s, v in entries if e == nearest_exp]
     strike = min(strikes, key=lambda s: abs(s - spot))
-    opt_key = opt_master.get((sym, expiries[0], strike, opt_type))
+    opt_key = opt_master.get((sym, nearest_exp, strike, opt_type))
     lot = lot_sizes.get(sym, 1) * LOT_MULT
     return opt_key, strike, lot
 
@@ -1147,6 +1157,7 @@ def main():
     ud = UpstoxData(access_token=token)
     master = ud._load_master()
     eq_keys, universe, opt_master, lot_sizes = _load_master_data(ud, master)
+    _build_opt_index(opt_master)
 
     verbose = not args.quiet
 
