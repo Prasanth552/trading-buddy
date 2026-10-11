@@ -426,10 +426,11 @@ def api_feed_status() -> JSONResponse:
     feed = get_feed()
     if not feed:
         return JSONResponse({"connected": False, "reason": "not started"})
+    age = feed.last_tick_age
     return JSONResponse({
         "connected": feed.connected,
         "subscribed": feed.subscribed_count,
-        "last_tick_age": round(feed.last_tick_age, 1),
+        "last_tick_age": round(age, 1) if age < 1e9 else None,
         "cached_instruments": len(feed.get_all_ltp()),
     })
 
