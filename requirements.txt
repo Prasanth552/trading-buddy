@@ -28,5 +28,8 @@ scikit-learn==1.6.1
 xgboost==2.1.4
 # Config / secrets
 python-dotenv==1.0.1
+# Live market data feed (Upstox WebSocket v3)
+protobuf>=5.27.0
+websockets>=13.0
 # Timezone (stdlib zoneinfo used; tzdata needed on Windows)
 tzdata==2024.2

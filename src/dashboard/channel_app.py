@@ -60,8 +60,8 @@ async def websocket_endpoint(websocket: WebSocket):
         _ws_clients.discard(websocket)
 
 
-async def _ws_push_loop():
-    """Background task: push fresh data to WebSocket clients every 3s."""
+async def _ws_stats_loop():
+    """Background task: push trade stats to WebSocket clients every 3s."""
     while True:
         await asyncio.sleep(3)
         if not _ws_clients:
@@ -95,7 +95,6 @@ async def _ws_push_loop():
                         "closed": closed,
                         "win_rate": round(wins / closed * 100, 1) if closed > 0 else 0,
                     }
-            # Include live strategy positions if any are OPEN
             live_data = None
             try:
                 from src.strategy.intraday_tracker import get_live_summary
@@ -113,9 +112,83 @@ async def _ws_push_loop():
             pass
 
 
+async def _ws_ltp_loop():
+    """Background task: push live LTP for open trades every 1s via Upstox WS feed."""
+    from src.broker.live_feed import get_feed
+    while True:
+        await asyncio.sleep(1)
+        if not _ws_clients:
+            continue
+        feed = get_feed()
+        if not feed or not feed.connected:
+            continue
+        try:
+            _ensure_db()
+            open_trades: list[dict] = []
+            for ch in ("oeh", "oel", "orb", "ch3", "pdhl", "orf", "aft"):
+                cf = _ch_filter(ch)
+                with db.get_conn() as conn:
+                    rows = conn.execute(
+                        f"SELECT id, price, qty, broker_key, channel FROM trades "
+                        f"WHERE {cf} AND status = 'OPEN' AND broker_key IS NOT NULL"
+                    ).fetchall()
+                    open_trades.extend(dict(r) for r in rows)
+            if not open_trades:
+                continue
+            needed_keys = {t["broker_key"] for t in open_trades}
+            current_subs = feed._subscribed
+            new_keys = needed_keys - current_subs
+            stale_keys = current_subs - needed_keys
+            if new_keys:
+                feed.subscribe(list(new_keys))
+            if stale_keys:
+                feed.unsubscribe(list(stale_keys))
+            ltp_data: dict[str, dict] = {}
+            for t in open_trades:
+                ltp = feed.get_ltp(t["broker_key"])
+                if ltp is not None:
+                    upnl = round((ltp - t["price"]) * t["qty"], 2)
+                    pnl_pct = round((ltp - t["price"]) / t["price"] * 100, 2) if t["price"] else 0
+                    ltp_data[str(t["id"])] = {
+                        "ltp": round(ltp, 2),
+                        "upnl": upnl,
+                        "pnl_pct": pnl_pct,
+                        "ch": t["channel"],
+                    }
+            if ltp_data:
+                await _ws_broadcast({
+                    "type": "tick_ltp",
+                    "ltp": ltp_data,
+                    "now": mc.now_ist().strftime("%H:%M:%S"),
+                    "feed_age": round(feed.last_tick_age, 1),
+                })
+        except Exception:
+            pass
+
+
+async def _start_live_feed():
+    """Start the Upstox WebSocket feed for live market data."""
+    try:
+        from src.broker.upstox_data import load_cached_token
+        from src.broker.live_feed import start_feed
+        token = load_cached_token()
+        if token:
+            await start_feed(token)
+            log_msg = "LiveFeed WebSocket started"
+        else:
+            log_msg = "LiveFeed skipped — no token (will retry when token available)"
+        import logging
+        logging.getLogger("channel_app").info(log_msg)
+    except Exception as e:
+        import logging
+        logging.getLogger("channel_app").warning("LiveFeed startup failed: %s", e)
+
+
 @app.on_event("startup")
 async def _start_ws_push():
-    asyncio.create_task(_ws_push_loop())
+    asyncio.create_task(_ws_stats_loop())
+    asyncio.create_task(_ws_ltp_loop())
+    asyncio.create_task(_start_live_feed())
 
 _CHANNEL_FILTER_BASE = "(symbol LIKE '% % CE' OR symbol LIKE '% % PE')"
 
@@ -285,7 +358,7 @@ def api_all(channel: str = "ch1") -> JSONResponse:
 
 @app.get("/api/ltp")
 def api_ltp(channel: str = "ch1") -> JSONResponse:
-    """Fetch live LTP for all open channel trades that have a broker_key."""
+    """Fetch live LTP for all open channel trades — uses WebSocket feed first, REST fallback."""
     _ensure_db()
     cf = _ch_filter(channel)
     with db.get_conn() as conn:
@@ -295,27 +368,57 @@ def api_ltp(channel: str = "ch1") -> JSONResponse:
         ).fetchall()
     if not rows:
         return JSONResponse({})
-    try:
-        import requests as _req
-        keys = {r["broker_key"]: r["id"] for r in rows}
-        url = "https://api.upstox.com/v2/market-quote/ltp"
-        from src.broker.upstox_data import load_cached_token
-        token = load_cached_token()
-        if not token:
-            return JSONResponse({"error": "no token"}, status_code=503)
-        resp = _req.get(url, params={"instrument_key": ",".join(keys.keys())},
-                        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-                        timeout=10)
-        data = resp.json().get("data", {})
-        result: dict[str, float] = {}
-        for item in data.values():
-            ikey = item.get("instrument_token", "")
-            tid = keys.get(ikey)
-            if tid is not None:
-                result[str(tid)] = item.get("last_price", 0)
-        return JSONResponse(result)
-    except Exception as exc:
-        return JSONResponse({"error": str(exc)}, status_code=500)
+
+    keys = {r["broker_key"]: r["id"] for r in rows}
+    result: dict[str, float] = {}
+    missing_keys: dict[str, int] = {}
+
+    # Try live feed cache first (instant, no API call)
+    from src.broker.live_feed import get_feed
+    feed = get_feed()
+    for bkey, tid in keys.items():
+        ltp = feed.get_ltp(bkey) if feed else None
+        if ltp is not None:
+            result[str(tid)] = ltp
+        else:
+            missing_keys[bkey] = tid
+
+    # REST fallback for any instruments not in the feed
+    if missing_keys:
+        try:
+            import requests as _req
+            from src.broker.upstox_data import load_cached_token
+            token = load_cached_token()
+            if token:
+                resp = _req.get("https://api.upstox.com/v2/market-quote/ltp",
+                                params={"instrument_key": ",".join(missing_keys.keys())},
+                                headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+                                timeout=10)
+                data = resp.json().get("data", {})
+                for item in data.values():
+                    ikey = item.get("instrument_token", "")
+                    tid = missing_keys.get(ikey)
+                    if tid is not None:
+                        result[str(tid)] = item.get("last_price", 0)
+        except Exception:
+            pass
+
+    return JSONResponse(result)
+
+
+@app.get("/api/feed-status")
+def api_feed_status() -> JSONResponse:
+    """Live feed diagnostics."""
+    from src.broker.live_feed import get_feed
+    feed = get_feed()
+    if not feed:
+        return JSONResponse({"connected": False, "reason": "not started"})
+    return JSONResponse({
+        "connected": feed.connected,
+        "subscribed": feed.subscribed_count,
+        "last_tick_age": round(feed.last_tick_age, 1),
+        "cached_instruments": len(feed.get_all_ltp()),
+    })
 
 
 @app.get("/api/ml")
@@ -894,6 +997,9 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
 .live-dot.off{background:var(--rd);box-shadow:none;animation:none}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
 .hdr-time{font-size:10px;color:var(--mt);font-family:var(--mn)}
+.feed-status{font-size:9px;font-weight:700;font-family:var(--mn);padding:1px 6px;border-radius:4px;margin-left:6px}
+.feed-status.live{color:#0a0;background:#0a02}.feed-status.stale{color:var(--rd);background:rgba(255,0,0,.1)}
+.ltp-val{transition:color .3s}.ltp-val.flash{color:var(--ac)!important;text-shadow:0 0 4px var(--ac)}
 
 /* Channel tabs — horizontal scroll on mobile */
 .tabs{display:flex;gap:0;overflow-x:auto;-webkit-overflow-scrolling:touch;
@@ -1128,6 +1234,8 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
     <h1>Trading <span>Buddy</span></h1>
     <div class="live-dot" id=sd></div>
     <span class=hdr-time id=ck></span>
+    <span id=feed-age class="feed-status"></span>
+    <span id=ltp-time style="font-size:9px;color:var(--mt);margin-left:4px;font-family:var(--mn)"></span>
   </div>
 </div>
 
@@ -1347,7 +1455,6 @@ function wsConnect(){
     try{
       const d=JSON.parse(e.data);
       if(d.type==='tick'){
-        // Live strategy position updates via WS
         if(d.live_strategies&&CH==='strat'){
           renderLive({summary:d.live_strategies,positions:[]});
         }
@@ -1370,6 +1477,26 @@ function wsConnect(){
             else{const sp=document.createElement('span');sp.className='ws-badge '+(pnl>=0?'pos':'neg');sp.textContent=txt;tab.appendChild(sp)}
           }
         }
+        }
+      }
+      // Live LTP updates — 1/sec from Upstox WebSocket feed
+      if(d.type==='tick_ltp'&&d.ltp){
+        const lt=$('ltp-time');if(lt)lt.textContent=d.now;
+        const fa=$('feed-age');if(fa){fa.textContent=d.feed_age<3?'LIVE':'⚠ '+d.feed_age.toFixed(0)+'s';fa.className='feed-status '+(d.feed_age<3?'live':'stale')}
+        for(const[tid,info]of Object.entries(d.ltp)){
+          LTP[tid]=info.ltp;
+          // Update open position cards in-place
+          const card=document.querySelector('[data-tid="'+tid+'"]');
+          if(card){
+            const cmpEl=card.querySelector('.ltp-val');
+            const pnlEl=card.querySelector('.pos-pnl');
+            if(cmpEl){
+              const prev=parseFloat(cmpEl.dataset.v||0);
+              cmpEl.textContent=info.ltp.toFixed(2);cmpEl.dataset.v=info.ltp;
+              if(prev&&info.ltp!==prev){cmpEl.classList.add('flash');setTimeout(()=>cmpEl.classList.remove('flash'),400)}
+            }
+            if(pnlEl){pnlEl.textContent=inr(info.upnl);pnlEl.className='pos-pnl '+(info.upnl>=0?'pos':'neg')}
+          }
         }
       }
     }catch(err){}
@@ -1482,11 +1609,11 @@ function rO(T){
     const upnl=cmp!=null?(cmp-t.price)*t.qty:null;
     const upnlStr=upnl!=null?inr(upnl):'--';
     const cls=upnl!=null?pc(upnl):'';
-    return '<div class=pos-card>'+
+    return '<div class=pos-card data-tid="'+t.id+'">'+
       '<div class=pos-top><span class=pos-sym>'+t.symbol+'</span><span class="pos-pnl '+cls+'">'+upnlStr+'</span></div>'+
       '<div class=pos-row>'+
         '<span class=pos-tag>Entry <b>'+t.price+'</b></span>'+
-        '<span class=pos-tag>CMP <b>'+cmpStr+'</b></span>'+
+        '<span class=pos-tag>CMP <b class="ltp-val" data-v="'+(cmp||0)+'">'+cmpStr+'</b></span>'+
         '<span class=pos-tag>SL <b>'+t.stop_price+'</b></span>'+
         '<span class=pos-tag>TGT <b>'+(t.target_price||'-')+'</b></span>'+
         '<span class=pos-tag>Qty <b>'+t.qty+'</b></span>'+
