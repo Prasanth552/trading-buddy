@@ -1642,7 +1642,7 @@ function rRing(s){
     x.beginPath();x.arc(cx,cy,r,start,wEnd);x.strokeStyle=gn;x.lineWidth=lw;x.lineCap='round';x.stroke();
     if(wr<1){x.beginPath();x.arc(cx,cy,r,wEnd,start+Math.PI*2);x.strokeStyle=rd;x.lineWidth=lw;x.lineCap='round';x.stroke()}
   }
-  $('rp').textContent=s.closed>0?s.win_rate+'%':'--';
+  $('rp').textContent=s.closed>0?Math.round(s.win_rate)+'%':'--';
   $('rp').className='ring-pct '+(s.win_rate>=50?'pos':'neg');
 }
 
