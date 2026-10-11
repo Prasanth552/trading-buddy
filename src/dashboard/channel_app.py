@@ -114,14 +114,27 @@ async def _ws_stats_loop():
 
 async def _ws_ltp_loop():
     """Background task: push live LTP for open trades every 1s via Upstox WS feed."""
-    from src.broker.live_feed import get_feed
+    from src.broker.live_feed import get_feed, start_feed
+    from src.broker.upstox_data import load_cached_token
+    _feed_retry_ts = 0
     while True:
         await asyncio.sleep(1)
         if not _ws_clients:
             continue
         feed = get_feed()
         if not feed or not feed.connected:
-            continue
+            now = _time.time()
+            if now - _feed_retry_ts > 60:
+                _feed_retry_ts = now
+                token = load_cached_token()
+                if token:
+                    try:
+                        await start_feed(token)
+                        feed = get_feed()
+                    except Exception:
+                        pass
+            if not feed or not feed.connected:
+                continue
         try:
             _ensure_db()
             open_trades: list[dict] = []
