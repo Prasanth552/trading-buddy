@@ -1513,7 +1513,6 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
 <!-- Bottom nav -->
 <div class=bnav>
   <button class=active id=nav-trades onclick="switchView('trades')"><span class=nav-ico>&#9776;</span>Trades</button>
-  <button id=nav-scan onclick="switchView('scan')"><span class=nav-ico>&#9881;</span>Scanner</button>
   <button id=nav-forex onclick="switchView('forex')"><span class=nav-ico>&#128177;</span>Forex</button>
   <button id=nav-refresh onclick="_stratCacheTs=0;_scanCacheTs=0;_stocksCacheTs=0;load()"><span class=nav-ico>&#8635;</span>Refresh</button>
 </div>
