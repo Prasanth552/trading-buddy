@@ -1615,6 +1615,9 @@ function switchView(v){
   }
   $('forexView').style.display='none';
   document.querySelector('.tabs').style.display='';
+  document.querySelector('.hero').style.display='';
+  document.querySelector('.chips').style.display='';
+  document.querySelector('.wrap:not(#stratView):not(#stocksView):not(#forexView)').style.display='';
   if(v==='scan'){switchCh('ch5')}
   else{switchCh(CH)}
 }
