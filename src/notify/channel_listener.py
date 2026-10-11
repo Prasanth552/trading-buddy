@@ -129,7 +129,7 @@ OEH_PROFIT_CAP = 999999
 # OEL Scanner (Open=Low) — bullish counterpart to OEH
 # ---------------------------------------------------------------------------
 OEL_ENABLED = True
-OEL_RUN_TIME = "09:20"          # IST — same as OEH
+OEL_RUN_TIME = "09:22"          # IST — staggered 2 min after OEH to avoid API contention
 OEL_LIST_TIME = "09:16"         # IST — early list using 1-min candle
 OEL_CAPITAL = 300000            # ₹3 lakh capital pool — no trade limit, capital-gated
 OEL_SL_PCT = 0.30               # 30% of premium as stop-loss
@@ -3222,7 +3222,38 @@ async def _run_oel_scan():
         if sym not in OEL_BLOCKLIST and sym in eq_keys
     ]
 
-    all_candles = await _parallel_fetch_candles(ud, sym_key_pairs, from_dt, to_dt, "5minute",
+    # --- FAST PRE-FILTER: bulk OHLC in 1-2 API calls (same pattern as OEH) ---
+    all_eq_keys = [key for _, key in sym_key_pairs]
+    key_to_sym = {key: sym for sym, key in sym_key_pairs}
+    try:
+        bulk_ohlc = ud.market_quote_ohlc(all_eq_keys)
+    except Exception as exc:
+        log.warning("[OEL] Bulk OHLC failed (%s), falling back to full candle fetch", exc)
+        bulk_ohlc = {}
+
+    if bulk_ohlc:
+        pre_filtered = []
+        for key, ohlc in bulk_ohlc.items():
+            sym = key_to_sym.get(key)
+            if not sym:
+                continue
+            opn, low = ohlc["open"], ohlc["low"]
+            if opn <= 0:
+                continue
+            if low < opn - OEL_TOLERANCE:
+                continue
+            ltp = ohlc["ltp"] or ohlc["close"]
+            rise_pct = (ltp - opn) / opn * 100
+            if rise_pct < OEL_MIN_RISE_PCT:
+                continue
+            pre_filtered.append((sym, eq_keys[sym]))
+        log.info("[OEL] Bulk OHLC pre-filter: %d/%d pass OEL criteria",
+                 len(pre_filtered), len(sym_key_pairs))
+        fetch_pairs = pre_filtered
+    else:
+        fetch_pairs = sym_key_pairs
+
+    all_candles = await _parallel_fetch_candles(ud, fetch_pairs, from_dt, to_dt, "5minute",
                                                 batch_size=20, label="OEL")
 
     candidates = []
