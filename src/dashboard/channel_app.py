@@ -1068,8 +1068,8 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
   transition:color .4s ease}
 .hero-pnl .val.pos{text-shadow:var(--glow-gn)}.hero-pnl .val.neg{text-shadow:var(--glow-rd)}
 .hero-pnl .sub{font-size:10px;color:var(--mt);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.hero-ring{width:72px;height:72px;position:relative;flex-shrink:0}
-.hero-ring canvas{width:72px;height:72px;display:block}
+.hero-ring{width:80px;height:80px;position:relative;flex-shrink:0}
+.hero-ring canvas{width:80px;height:80px;display:block}
 .hero-ring .ring-txt{position:absolute;inset:0;display:flex;flex-direction:column;
   align-items:center;justify-content:center;font-family:var(--mn)}
 .hero-ring .ring-pct{font-size:14px;font-weight:800;line-height:1}
@@ -1630,12 +1630,12 @@ function rHero(s){
 
 function rRing(s){
   const c=$('ring'),x=c.getContext('2d'),dp=devicePixelRatio||1;
-  c.width=144*dp;c.height=144*dp;x.scale(dp,dp);
+  c.width=160*dp;c.height=160*dp;x.scale(dp,dp);
   const cs=getComputedStyle(document.documentElement);
   const gn=cs.getPropertyValue('--gn').trim(),rd=cs.getPropertyValue('--rd').trim();
   const bd=cs.getPropertyValue('--bd').trim();
   const wr=s.closed>0?s.wins/s.closed:0;
-  const cx=72,cy=72,r=30,lw=6;
+  const cx=80,cy=80,r=34,lw=6;
   x.beginPath();x.arc(cx,cy,r,0,Math.PI*2);x.strokeStyle=bd;x.lineWidth=lw;x.stroke();
   if(s.closed>0){
     const start=-Math.PI/2,wEnd=start+wr*Math.PI*2;
