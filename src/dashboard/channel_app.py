@@ -1545,7 +1545,7 @@ function wsConnect(){
         $('hv').className='val '+(s.today_pnl>=0?'pos':'neg');
         $('hs').textContent=s.today_count+' trades today | Total: '+inr(s.total_pnl);
         const wr=s.closed>0?s.win_rate:0;
-        $('rp').textContent=s.closed>0?wr+'%':'--';
+        $('rp').textContent=s.closed>0?Math.round(wr)+'%':'--';
         $('rp').className='ring-pct '+(wr>=50?'pos':'neg');
         for(const[ch,cs]of Object.entries(d.channels)){
           const tab=$('tab-'+ch);
