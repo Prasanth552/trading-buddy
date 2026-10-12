@@ -3859,8 +3859,8 @@ async def start_listener() -> None:
                 scheduled = now.replace(hour=h, minute=m, second=0, microsecond=0)
                 if now > scheduled:
                     mins_late = (now - scheduled).total_seconds() / 60
-                    if mins_late > 30:
-                        log.info("[OEH] Missed scheduled %s by %.0f min — too stale, skipping", OEH_RUN_TIME, mins_late)
+                    if mins_late > 300:
+                        log.info("[OEH] Missed scheduled %s by %.0f min — market likely closed, skipping", OEH_RUN_TIME, mins_late)
                         continue
                     log.info("[OEH] Missed scheduled %s run — catching up now", OEH_RUN_TIME)
                     try:
