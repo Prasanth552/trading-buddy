@@ -384,42 +384,63 @@ async def main():
         exit_price = None
         exit_time = None
         exit_reason = None
+        is_entry_candle = True
 
         for c in candles_after:
-            # Check SL (low touches SL)
             current_low_pnl = (c["low"] - entry_price) * lot_qty
             current_high_pnl = (c["high"] - entry_price) * lot_qty
             current_close_pnl = (c["close"] - entry_price) * lot_qty
 
-            # Update peak
-            peak_pnl = max(peak_pnl, current_high_pnl)
-
-            # Check floor
-            new_floor = get_stepped_floor(peak_pnl)
-            if new_floor > locked_floor:
-                locked_floor = new_floor
-
-            # SL hit
+            # 1) SL hit — check low touches SL price
             if c["low"] <= sl:
                 exit_price = sl
                 exit_time = c["time"]
                 exit_reason = "max_loss_cap"
                 break
 
-            # Floor exit: close drops to or below locked floor
-            if locked_floor > 0 and current_close_pnl <= locked_floor:
-                exit_price = c["close"]
-                exit_time = c["time"]
-                exit_reason = f"floor_{locked_floor}"
-                break
+            # 2) Floor exit — but NOT on entry candle (bot needs time to lock floor)
+            #    Check if pnl dropped below locked floor using the LOW (worst case in candle)
+            if not is_entry_candle and locked_floor > 0:
+                low_pnl_check = current_low_pnl
+                if low_pnl_check <= locked_floor:
+                    # Exit at close (approx — bot would exit at the moment it crosses)
+                    exit_price = c["close"]
+                    exit_time = c["time"]
+                    exit_reason = f"floor_{locked_floor}"
+                    break
 
-        # If no exit, close at 15:25 (EOD)
+            # 3) Update peak and floor AFTER exit checks (so floor locks from previous candles)
+            peak_pnl = max(peak_pnl, current_high_pnl)
+            new_floor = get_stepped_floor(peak_pnl)
+            if new_floor > locked_floor:
+                locked_floor = new_floor
+
+            is_entry_candle = False
+
+        # If no exit and we have full-day data (last candle after 15:20), close at EOD
         if exit_price is None:
             last = candles_after[-1] if candles_after else None
             if last:
-                exit_price = last["close"]
-                exit_time = last["time"]
-                exit_reason = "eod_close"
+                last_time = last["time"]
+                if hasattr(last_time, "hour") and last_time.hour >= 15 and last_time.minute >= 20:
+                    exit_price = last["close"]
+                    exit_time = last["time"]
+                    exit_reason = "eod_close"
+                else:
+                    # Data is truncated (script ran mid-day) — mark as STILL OPEN
+                    return {
+                        "symbol": f"{sym} {int(strike)} {otype}",
+                        "entry_price": round(entry_price, 2),
+                        "exit_price": round(last["close"], 2),
+                        "qty": lot_qty,
+                        "gross_pnl": round((last["close"] - entry_price) * lot_qty, 2),
+                        "net_pnl": round((last["close"] - entry_price) * lot_qty, 2),
+                        "peak_pnl": round(peak_pnl, 2),
+                        "locked_floor": locked_floor,
+                        "entry_time": entry_time.strftime("%H:%M"),
+                        "exit_time": last_time.strftime("%H:%M") if hasattr(last_time, "strftime") else str(last_time),
+                        "exit_reason": "STILL_OPEN",
+                    }
 
         if exit_price is None:
             return None
@@ -443,6 +464,20 @@ async def main():
         }
 
     # ── Run simulation ──
+    # Check if data covers full day
+    sample_candles = next(iter(equity_candles.values()), [])
+    if sample_candles:
+        last_c = sample_candles[-1]
+        last_ts = last_c.get("ts") or last_c.get("date") or last_c.get("timestamp")
+        if isinstance(last_ts, str):
+            last_ts = datetime.fromisoformat(last_ts.replace("Z", "+00:00"))
+        if hasattr(last_ts, "astimezone"):
+            last_ts = last_ts.astimezone(IST)
+        if last_ts.hour < 15 or (last_ts.hour == 15 and last_ts.minute < 20):
+            print(f"\n⚠️  WARNING: Data only goes up to {last_ts.strftime('%H:%M')} IST")
+            print(f"   Run this script AFTER 15:30 for accurate full-day results.")
+            print(f"   Trades without SL/floor exit will be marked STILL_OPEN.\n")
+
     print("\n" + "=" * 80)
     print("  OEH BACKTEST — 12 Oct 2026 — WITH RE-ENTRIES")
     print("=" * 80)
@@ -508,26 +543,36 @@ async def main():
     oeh_wins = 0
     oeh_losses = 0
     oeh_reentry_count = 0
+    oeh_open_count = 0
+    oeh_open_pnl = 0
 
     for t in oeh_trades:
         re_tag = "RE" if t.get("is_reentry") else ""
+        still = "***" if t["exit_reason"] == "STILL_OPEN" else ""
         print(f"{t['symbol']:<25} {t['entry_price']:>7.2f} {t['exit_price']:>7.2f} {t['qty']:>5} "
               f"{t['gross_pnl']:>+8.0f} {t['net_pnl']:>+8.0f} {t['peak_pnl']:>+7.0f} "
               f"{t['locked_floor']:>6} {t['scan_time']:>5} {t['exit_time']:>5} "
-              f"{t['exit_reason']:<15} {re_tag}")
-        oeh_total_net += t["net_pnl"]
-        oeh_total_gross += t["gross_pnl"]
-        if t["net_pnl"] > 0:
-            oeh_wins += 1
+              f"{t['exit_reason']:<15} {re_tag} {still}")
+        if t["exit_reason"] == "STILL_OPEN":
+            oeh_open_count += 1
+            oeh_open_pnl += t["net_pnl"]
         else:
-            oeh_losses += 1
+            oeh_total_net += t["net_pnl"]
+            oeh_total_gross += t["gross_pnl"]
+            if t["net_pnl"] > 0:
+                oeh_wins += 1
+            else:
+                oeh_losses += 1
         if t.get("is_reentry"):
             oeh_reentry_net += t["net_pnl"]
             oeh_reentry_count += 1
 
     print("-" * 120)
-    print(f"OEH TOTAL: {len(oeh_trades)} trades | Gross: ₹{oeh_total_gross:+,.0f} | "
+    closed = len(oeh_trades) - oeh_open_count
+    print(f"OEH CLOSED: {closed} trades | Gross: ₹{oeh_total_gross:+,.0f} | "
           f"Net: ₹{oeh_total_net:+,.0f} | Wins: {oeh_wins} | Losses: {oeh_losses}")
+    if oeh_open_count:
+        print(f"OEH STILL OPEN: {oeh_open_count} trades | Unrealized: ₹{oeh_open_pnl:+,.0f}")
     print(f"OEH RE-ENTRIES: {oeh_reentry_count} trades | Net: ₹{oeh_reentry_net:+,.0f}")
     print(f"OEH WITHOUT RE-ENTRIES: Net: ₹{oeh_total_net - oeh_reentry_net:+,.0f}")
 
@@ -594,26 +639,36 @@ async def main():
     oel_wins = 0
     oel_losses = 0
     oel_reentry_count = 0
+    oel_open_count = 0
+    oel_open_pnl = 0
 
     for t in oel_trades:
         re_tag = "RE" if t.get("is_reentry") else ""
+        still = "***" if t["exit_reason"] == "STILL_OPEN" else ""
         print(f"{t['symbol']:<25} {t['entry_price']:>7.2f} {t['exit_price']:>7.2f} {t['qty']:>5} "
               f"{t['gross_pnl']:>+8.0f} {t['net_pnl']:>+8.0f} {t['peak_pnl']:>+7.0f} "
               f"{t['locked_floor']:>6} {t['scan_time']:>5} {t['exit_time']:>5} "
-              f"{t['exit_reason']:<15} {re_tag}")
-        oel_total_net += t["net_pnl"]
-        oel_total_gross += t["gross_pnl"]
-        if t["net_pnl"] > 0:
-            oel_wins += 1
+              f"{t['exit_reason']:<15} {re_tag} {still}")
+        if t["exit_reason"] == "STILL_OPEN":
+            oel_open_count += 1
+            oel_open_pnl += t["net_pnl"]
         else:
-            oel_losses += 1
+            oel_total_net += t["net_pnl"]
+            oel_total_gross += t["gross_pnl"]
+            if t["net_pnl"] > 0:
+                oel_wins += 1
+            else:
+                oel_losses += 1
         if t.get("is_reentry"):
             oel_reentry_net += t["net_pnl"]
             oel_reentry_count += 1
 
     print("-" * 120)
-    print(f"OEL TOTAL: {len(oel_trades)} trades | Gross: ₹{oel_total_gross:+,.0f} | "
+    closed = len(oel_trades) - oel_open_count
+    print(f"OEL CLOSED: {closed} trades | Gross: ₹{oel_total_gross:+,.0f} | "
           f"Net: ₹{oel_total_net:+,.0f} | Wins: {oel_wins} | Losses: {oel_losses}")
+    if oel_open_count:
+        print(f"OEL STILL OPEN: {oel_open_count} trades | Unrealized: ₹{oel_open_pnl:+,.0f}")
     print(f"OEL RE-ENTRIES: {oel_reentry_count} trades | Net: ₹{oel_reentry_net:+,.0f}")
     print(f"OEL WITHOUT RE-ENTRIES: Net: ₹{oel_total_net - oel_reentry_net:+,.0f}")
 
@@ -621,15 +676,21 @@ async def main():
     print("\n" + "=" * 80)
     print("  GRAND SUMMARY")
     print("=" * 80)
-    total_trades = len(oeh_trades) + len(oel_trades)
+    total_closed = (len(oeh_trades) - oeh_open_count) + (len(oel_trades) - oel_open_count)
+    total_open = oeh_open_count + oel_open_count
     total_net = oeh_total_net + oel_total_net
+    total_open_pnl = oeh_open_pnl + oel_open_pnl
     total_reentry_net = oeh_reentry_net + oel_reentry_net
     total_reentry_count = oeh_reentry_count + oel_reentry_count
-    print(f"Total trades: {total_trades} | Total Net PnL: ₹{total_net:+,.0f}")
+    print(f"Closed trades: {total_closed} | Closed Net PnL: ₹{total_net:+,.0f}")
+    if total_open:
+        print(f"Still open: {total_open} | Unrealized: ₹{total_open_pnl:+,.0f}")
     print(f"Re-entry trades: {total_reentry_count} | Re-entry Net PnL: ₹{total_reentry_net:+,.0f}")
-    print(f"Without re-entries: ₹{total_net - total_reentry_net:+,.0f}")
+    print(f"Without re-entries (closed only): ₹{total_net - total_reentry_net:+,.0f}")
     print(f"\nVerdict: Re-entries {'HELPED' if total_reentry_net > 0 else 'HURT'} "
           f"by ₹{abs(total_reentry_net):,.0f}")
+    if total_open:
+        print(f"\n⚠️  {total_open} trades still open — re-run after 15:30 for final numbers.")
 
 
 if __name__ == "__main__":
