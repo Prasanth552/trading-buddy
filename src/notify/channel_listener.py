@@ -124,6 +124,9 @@ OEH_MIN_DROP_PCT = 0.3          # skip candidates with <0.3% drop (weak signal)
 OEH_BLOCKLIST = {"GODREJCP", "GRASIM"}  # repeat losers — skip these
 OEH_LOSS_CAP = 999999
 OEH_PROFIT_CAP = 999999
+OEH_MAX_ENTRIES_PER_SYM = 3     # guardrail: max entries per stock per day
+OEH_TIME_CUTOFF = "13:00"       # guardrail: no new entries after this time
+OEH_SL_COOLDOWN = True          # guardrail: block stock for rest of day after SL hit
 
 # ---------------------------------------------------------------------------
 # OEL Scanner (Open=Low) — bullish counterpart to OEH
@@ -141,13 +144,16 @@ OEL_MIN_RISE_PCT = 0.3          # skip candidates with <0.3% rise (weak signal)
 OEL_BLOCKLIST = {"GODREJCP", "GRASIM"}  # same as OEH
 OEL_LOSS_CAP = 999999
 OEL_PROFIT_CAP = 999999
+OEL_MAX_ENTRIES_PER_SYM = 1     # guardrail: no re-entries for OEL (they hurt)
+OEL_TIME_CUTOFF = "14:00"       # guardrail: no new entries after this time
+OEL_SL_COOLDOWN = True          # guardrail: block stock for rest of day after SL hit
 
 # ---------------------------------------------------------------------------
 # ORB (Opening Range Breakout) scanner
 # ---------------------------------------------------------------------------
 ORB_ENABLED = True
 ORB_RUN_TIME = "09:25"          # IST — 5 min after first candle closes (9:20)
-ORB_CAPITAL = 150000             # ₹1.5 lakh capital pool — no trade limit, capital-gated
+ORB_CAPITAL = 300000             # ₹3 lakh capital pool — no trade limit, capital-gated
 ORB_SL_PCT = 0.30
 ORB_MAX_SL_RS = 5000
 ORB_FLOOR_LEVELS = [500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5500, 6000]
@@ -156,6 +162,9 @@ ORB_MAX_RANGE_PCT = 3.0         # skip if range is too wide
 ORB_BLOCKLIST = {"GODREJCP", "GRASIM"}
 ORB_LOSS_CAP = 20000
 ORB_PROFIT_CAP = 25000
+ORB_MAX_ENTRIES_PER_SYM = 3     # guardrail: max entries per stock per day
+ORB_TIME_CUTOFF = "13:00"       # guardrail: no new entries after this time
+ORB_SL_COOLDOWN = True          # guardrail: block stock for rest of day after SL hit
 
 # PDH/PDL Breakout config
 PDHL_ENABLED = False
@@ -233,6 +242,8 @@ def _oeh_free(trade_id: int, pnl: float):
 
 _oeh_daily_pnl: float = 0.0
 _oeh_daily_date: str = ""
+_oeh_sym_entry_count: dict[str, int] = {}   # guardrail: per-stock entry count
+_oeh_sl_blocked: set[str] = set()            # guardrail: SL cooldown
 
 def _oeh_record_pnl(pnl: float):
     global _oeh_daily_pnl, _oeh_daily_date
@@ -286,6 +297,8 @@ def _oel_free(trade_id: int, pnl: float):
 
 _oel_daily_pnl: float = 0.0
 _oel_daily_date: str = ""
+_oel_sym_entry_count: dict[str, int] = {}
+_oel_sl_blocked: set[str] = set()
 
 def _oel_record_pnl(pnl: float):
     global _oel_daily_pnl, _oel_daily_date
@@ -339,6 +352,8 @@ def _orb_free(trade_id: int, pnl: float):
 
 _orb_daily_pnl: float = 0.0
 _orb_daily_date: str = ""
+_orb_sym_entry_count: dict[str, int] = {}
+_orb_sl_blocked: set[str] = set()
 
 def _orb_record_pnl(pnl: float):
     global _orb_daily_pnl, _orb_daily_date
@@ -1058,16 +1073,28 @@ def _close_trade_by_id(trade_id: int, exit_price: float, reason: str) -> None:
                 (status, exit_price, net_pnl, charges["total"], peak, row["id"]),
             )
 
+            # Extract base symbol for guardrail tracking (e.g. "TECHM 1460 PE" → "TECHM")
+            _base_sym = (row["symbol"] or "").split()[0]
+
             # Free capital if this was an OEH/ORB trade
             if row["id"] in _oeh_capital_locked:
                 _oeh_free(row["id"], net_pnl)
                 _oeh_record_pnl(net_pnl)
+                if reason in ("max_loss_cap", "sl_hit") and OEH_SL_COOLDOWN:
+                    _oeh_sl_blocked.add(_base_sym)
+                    log.info("[OEH] SL cooldown: %s blocked for rest of day", _base_sym)
             if row["id"] in _oel_capital_locked:
                 _oel_free(row["id"], net_pnl)
                 _oel_record_pnl(net_pnl)
+                if reason in ("max_loss_cap", "sl_hit") and OEL_SL_COOLDOWN:
+                    _oel_sl_blocked.add(_base_sym)
+                    log.info("[OEL] SL cooldown: %s blocked for rest of day", _base_sym)
             if row["id"] in _orb_capital_locked:
                 _orb_free(row["id"], net_pnl)
                 _orb_record_pnl(net_pnl)
+                if reason in ("max_loss_cap", "sl_hit") and ORB_SL_COOLDOWN:
+                    _orb_sl_blocked.add(_base_sym)
+                    log.info("[ORB] SL cooldown: %s blocked for rest of day", _base_sym)
             if row["id"] in _pdhl_capital_locked:
                 _pdhl_free(row["id"], net_pnl)
                 _pdhl_record_pnl(net_pnl)
@@ -2185,9 +2212,18 @@ async def _run_oeh_scan():
     if not _oeh_capital_locked:
         _oeh_init_capital()
 
+    # Guardrail: time cutoff
+    from zoneinfo import ZoneInfo
+    _now_ist = datetime.now(ZoneInfo(config.TIMEZONE))
+    _cutoff_h, _cutoff_m = map(int, OEH_TIME_CUTOFF.split(":"))
+    if _now_ist.hour > _cutoff_h or (_now_ist.hour == _cutoff_h and _now_ist.minute > _cutoff_m):
+        log.info("[OEH] Past time cutoff %s, skipping scan", OEH_TIME_CUTOFF)
+        return
+
     summary_lines = []
     executed = 0
     skipped_capital = 0
+    skipped_guardrail = 0
 
     for c in candidates:
         if _oeh_daily_cap_hit():
@@ -2197,12 +2233,24 @@ async def _run_oeh_scan():
             skipped_capital += len(candidates) - candidates.index(c)
             break
 
-        parsed = _resolve_atm_strike(c["symbol"], "PE")
-        if parsed is None:
-            summary_lines.append(f"SKIP {c['symbol']} PE — could not resolve ATM")
+        sym = c["symbol"]
+
+        # Guardrail: per-stock entry limit
+        if _oeh_sym_entry_count.get(sym, 0) >= OEH_MAX_ENTRIES_PER_SYM:
+            skipped_guardrail += 1
             continue
 
-        oeh_lot = lot_sizes.get(c["symbol"], 1) * 2
+        # Guardrail: SL cooldown
+        if OEH_SL_COOLDOWN and sym in _oeh_sl_blocked:
+            skipped_guardrail += 1
+            continue
+
+        parsed = _resolve_atm_strike(sym, "PE")
+        if parsed is None:
+            summary_lines.append(f"SKIP {sym} PE — could not resolve ATM")
+            continue
+
+        oeh_lot = lot_sizes.get(sym, 1) * 2
         sl_pct_price = parsed.trigger_price * (1 - OEH_SL_PCT)
         sl_cap_price = parsed.trigger_price - (OEH_MAX_SL / oeh_lot)
         parsed.stop_loss = round(max(sl_pct_price, sl_cap_price), 2)
@@ -2217,6 +2265,7 @@ async def _run_oeh_scan():
         if result["placed"]:
             actual_capital = result["entry"] * result["qty"]
             _oeh_allocate(result["trade_id"], actual_capital)
+            _oeh_sym_entry_count[sym] = _oeh_sym_entry_count.get(sym, 0) + 1
             executed += 1
             summary_lines.append(
                 f"BUY {result['symbol']} x{result['qty']} @ {result['entry']:.2f} "
@@ -2229,11 +2278,11 @@ async def _run_oeh_scan():
                 f"Capital: ₹{actual_capital:,.0f} locked | ₹{_oeh_capital_avail:,.0f} available"
             )
         else:
-            summary_lines.append(f"FAIL {c['symbol']} PE — {result['reason']}")
+            summary_lines.append(f"FAIL {sym} PE — {result['reason']}")
 
     summary = "\n".join(summary_lines[:20])
-    log.info("[OEH] Scan done: %d executed, %d skipped (capital)\n%s",
-             executed, skipped_capital, summary)
+    log.info("[OEH] Scan done: %d executed, %d skipped (capital), %d skipped (guardrail)\n%s",
+             executed, skipped_capital, skipped_guardrail, summary)
     _notify(
         f"*[OEH] Scan complete: {executed} trades placed*\n"
         f"Candidates: {len(candidates)} | Skipped (capital): {skipped_capital}\n"
@@ -2394,9 +2443,18 @@ async def _run_orb_scan():
     if not _orb_capital_locked:
         _orb_init_capital()
 
+    # Guardrail: time cutoff
+    from zoneinfo import ZoneInfo
+    _now_ist = datetime.now(ZoneInfo(config.TIMEZONE))
+    _cutoff_h, _cutoff_m = map(int, ORB_TIME_CUTOFF.split(":"))
+    if _now_ist.hour > _cutoff_h or (_now_ist.hour == _cutoff_h and _now_ist.minute > _cutoff_m):
+        log.info("[ORB] Past time cutoff %s, skipping scan", ORB_TIME_CUTOFF)
+        return
+
     summary_lines = []
     executed = 0
     skipped_capital = 0
+    skipped_guardrail = 0
 
     for c in candidates:
         if _orb_daily_cap_hit():
@@ -2407,6 +2465,17 @@ async def _run_orb_scan():
             break
 
         sym = c["symbol"]
+
+        # Guardrail: per-stock entry limit
+        if _orb_sym_entry_count.get(sym, 0) >= ORB_MAX_ENTRIES_PER_SYM:
+            skipped_guardrail += 1
+            continue
+
+        # Guardrail: SL cooldown
+        if ORB_SL_COOLDOWN and sym in _orb_sl_blocked:
+            skipped_guardrail += 1
+            continue
+
         opt_type = "CE" if c["direction"] == "bullish" else "PE"
 
         parsed = _resolve_atm_strike(sym, opt_type)
@@ -2426,9 +2495,9 @@ async def _run_orb_scan():
 
         result = execute_signal(parsed, channel="orb", max_lots=2)
         if result["placed"]:
-            # Allocate capital using actual entry price and qty
             actual_capital = result["entry"] * result["qty"]
             _orb_allocate(result["trade_id"], actual_capital)
+            _orb_sym_entry_count[sym] = _orb_sym_entry_count.get(sym, 0) + 1
             executed += 1
             dir_tag = "▲" if c["direction"] == "bullish" else "▼"
             summary_lines.append(
@@ -2445,8 +2514,8 @@ async def _run_orb_scan():
             summary_lines.append(f"FAIL {sym} {opt_type} — {result['reason']}")
 
     summary = "\n".join(summary_lines[:20])  # limit summary to 20 lines
-    log.info("[ORB] Scan done: %d executed, %d skipped (capital)\n%s",
-             executed, skipped_capital, summary)
+    log.info("[ORB] Scan done: %d executed, %d skipped (capital), %d skipped (guardrail)\n%s",
+             executed, skipped_capital, skipped_guardrail, summary)
     _notify(
         f"*[ORB] Scan complete*\n"
         f"Executed: {executed} | Skipped (capital): {skipped_capital}\n"
@@ -3285,13 +3354,22 @@ async def _run_oel_scan():
 
     candidates.sort(key=lambda x: x["rise_pct"], reverse=True)
 
-    # Initialize capital pool (only on first scan of the day)
-    if _oel_capital_avail <= 0 and not _oel_capital_locked:
+    # Reset capital pool when no trades are active
+    if not _oel_capital_locked:
         _oel_init_capital()
+
+    # Guardrail: time cutoff
+    from zoneinfo import ZoneInfo
+    _now_ist = datetime.now(ZoneInfo(config.TIMEZONE))
+    _cutoff_h, _cutoff_m = map(int, OEL_TIME_CUTOFF.split(":"))
+    if _now_ist.hour > _cutoff_h or (_now_ist.hour == _cutoff_h and _now_ist.minute > _cutoff_m):
+        log.info("[OEL] Past time cutoff %s, skipping scan", OEL_TIME_CUTOFF)
+        return
 
     summary_lines = []
     executed = 0
     skipped_capital = 0
+    skipped_guardrail = 0
 
     lot_sizes = {}
     for inst in master:
@@ -3311,12 +3389,24 @@ async def _run_oel_scan():
             skipped_capital += len(candidates) - candidates.index(c)
             break
 
-        parsed = _resolve_atm_strike(c["symbol"], "CE")
-        if parsed is None:
-            summary_lines.append(f"SKIP {c['symbol']} CE — could not resolve ATM")
+        sym = c["symbol"]
+
+        # Guardrail: per-stock entry limit
+        if _oel_sym_entry_count.get(sym, 0) >= OEL_MAX_ENTRIES_PER_SYM:
+            skipped_guardrail += 1
             continue
 
-        oel_lot = lot_sizes.get(c["symbol"], 1) * 2
+        # Guardrail: SL cooldown
+        if OEL_SL_COOLDOWN and sym in _oel_sl_blocked:
+            skipped_guardrail += 1
+            continue
+
+        parsed = _resolve_atm_strike(sym, "CE")
+        if parsed is None:
+            summary_lines.append(f"SKIP {sym} CE — could not resolve ATM")
+            continue
+
+        oel_lot = lot_sizes.get(sym, 1) * 2
         sl_pct_price = parsed.trigger_price * (1 - OEL_SL_PCT)
         sl_cap_price = parsed.trigger_price - (OEL_MAX_SL / oel_lot)
         parsed.stop_loss = round(max(sl_pct_price, sl_cap_price), 2)
@@ -3331,6 +3421,7 @@ async def _run_oel_scan():
         if result["placed"]:
             actual_capital = result["entry"] * result["qty"]
             _oel_allocate(result["trade_id"], actual_capital)
+            _oel_sym_entry_count[sym] = _oel_sym_entry_count.get(sym, 0) + 1
             executed += 1
             summary_lines.append(
                 f"BUY {result['symbol']} x{result['qty']} @ {result['entry']:.2f} "
@@ -3343,11 +3434,11 @@ async def _run_oel_scan():
                 f"Capital: ₹{actual_capital:,.0f} locked | ₹{_oel_capital_avail:,.0f} available"
             )
         else:
-            summary_lines.append(f"FAIL {c['symbol']} CE — {result['reason']}")
+            summary_lines.append(f"FAIL {sym} CE — {result['reason']}")
 
     summary = "\n".join(summary_lines)
-    log.info("[OEL] Scan done: %d/%d executed (skipped %d capital)\n%s",
-             executed, len(candidates), skipped_capital, summary)
+    log.info("[OEL] Scan done: %d/%d executed (skipped %d capital, %d guardrail)\n%s",
+             executed, len(candidates), skipped_capital, skipped_guardrail, summary)
     _notify(
         f"*[OEL] Scan complete: {executed} trades placed*\n"
         f"Candidates: {len(candidates)} | Skipped (capital): {skipped_capital}\n"
