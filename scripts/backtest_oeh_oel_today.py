@@ -255,6 +255,23 @@ async def main():
         mins = t.hour * 60 + t.minute + RESCAN_INTERVAL_MINS
         t = dtime(mins // 60, mins % 60)
 
+    # ── Helper: find ATM strike ──
+    def find_atm_strike(sym, ltp, otype):
+        """Find the ATM strike for sym closest to ltp using strike step."""
+        step = strike_steps.get(sym, 50)
+        atm = round(ltp / step) * step
+        strikes = option_keys.get(sym, {})
+        if not strikes:
+            return None
+        for offset in [0, step, -step, 2*step, -2*step]:
+            s = atm + offset
+            if s in strikes and otype in strikes[s]:
+                return s
+        valid = [s for s in strikes if otype in strikes[s]]
+        if not valid:
+            return None
+        return min(valid, key=lambda s: abs(s - ltp))
+
     # ── Step 3: Fetch option candles for candidates ──
     # First pass: identify all candidate symbols across all scan times
     print("\n=== Identifying candidates at each scan time... ===")
@@ -348,24 +365,6 @@ async def main():
         return result
 
     # ── Step 5: Simulate trades with SL + floor logic ──
-    def find_atm_strike(sym, ltp, otype):
-        """Find the ATM strike for sym closest to ltp using strike step."""
-        step = strike_steps.get(sym, 50)
-        atm = round(ltp / step) * step
-        strikes = option_keys.get(sym, {})
-        if not strikes:
-            return None
-        # Try ATM first, then nearby strikes
-        for offset in [0, step, -step, 2*step, -2*step]:
-            s = atm + offset
-            if s in strikes and otype in strikes[s]:
-                return s
-        # Fallback: closest valid strike
-        valid = [s for s in strikes if otype in strikes[s]]
-        if not valid:
-            return None
-        return min(valid, key=lambda s: abs(s - ltp))
-
     def simulate_trade(sym, strike, otype, entry_time, lot_qty):
         """Simulate a trade from entry_time, return exit info."""
         entry_price = get_option_price_at(sym, strike, otype, entry_time)
