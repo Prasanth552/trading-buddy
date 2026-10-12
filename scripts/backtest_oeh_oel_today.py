@@ -89,30 +89,46 @@ async def main():
 
     # Build option key lookup: sym → {strike → {CE: key, PE: key}}
     option_keys = defaultdict(lambda: defaultdict(dict))
+    strike_steps = {}  # sym → smallest gap between adjacent strikes
+    sym_strikes = defaultdict(set)
     for inst in master:
         if inst.get("segment") != "NSE_FO":
             continue
         tsym = (inst.get("trading_symbol") or "").upper()
         if not tsym:
             continue
-        otype = inst.get("option_type", "").upper()
+        otype = inst.get("instrument_type", "").upper()
         if otype not in ("CE", "PE"):
             continue
         expiry = inst.get("expiry")
         strike = float(inst.get("strike_price") or 0)
-        base = _re.match(r'^([A-Z&]+)', tsym)
-        if not base:
+        if strike <= 0:
             continue
-        sym = base.group(1)
+        asset_sym = (inst.get("asset_symbol") or inst.get("name") or "").upper()
+        if not asset_sym:
+            base = _re.match(r'^([A-Z&]+)', tsym)
+            if base:
+                asset_sym = base.group(1)
+        if not asset_sym:
+            continue
         ikey = inst.get("instrument_key")
-        # We want the nearest weekly/monthly expiry
-        if sym not in option_keys or strike not in option_keys[sym]:
-            option_keys[sym][strike][otype] = {"key": ikey, "expiry": expiry}
+        sym_strikes[asset_sym].add(strike)
+
+        existing = option_keys[asset_sym][strike].get(otype)
+        if existing is None or (expiry and existing.get("expiry") and expiry < existing["expiry"]):
+            option_keys[asset_sym][strike][otype] = {"key": ikey, "expiry": expiry}
+
+    # Compute strike steps
+    for sym, strikes in sym_strikes.items():
+        ss = sorted(strikes)
+        if len(ss) >= 2:
+            step = min(ss[j+1] - ss[j] for j in range(min(20, len(ss)-1)))
+            strike_steps[sym] = step
         else:
-            # Keep the nearest expiry
-            existing = option_keys[sym][strike].get(otype, {}).get("expiry")
-            if existing and expiry and expiry < existing:
-                option_keys[sym][strike][otype] = {"key": ikey, "expiry": expiry}
+            strike_steps[sym] = 50
+
+    print(f"Option keys for {len(option_keys)} symbols, e.g. strike steps: "
+          f"{dict(list(strike_steps.items())[:5])}")
 
     # ── Step 1: Fetch equity 1-min candles for all universe stocks (9:15–15:30) ──
     print("\n=== Fetching equity intraday data (this takes a minute)... ===")
@@ -254,25 +270,16 @@ async def main():
             c = is_oeh_at_time(sym, st)
             if c:
                 oeh_cands.append(c)
-                # Find ATM PE strike
-                strike = round(c["ltp"] / 10) * 10  # round to nearest 10
-                # Try multiple strike intervals
-                for s_try in [round(c["ltp"]), round(c["ltp"] / 5) * 5,
-                              round(c["ltp"] / 10) * 10, round(c["ltp"] / 20) * 20,
-                              round(c["ltp"] / 50) * 50, round(c["ltp"] / 100) * 100]:
-                    if s_try in option_keys.get(sym, {}) and "PE" in option_keys[sym][s_try]:
-                        all_option_syms.add((sym, s_try, "PE"))
-                        break
+                s = find_atm_strike(sym, c["ltp"], "PE")
+                if s is not None:
+                    all_option_syms.add((sym, s, "PE"))
 
             c = is_oel_at_time(sym, st)
             if c:
                 oel_cands.append(c)
-                for s_try in [round(c["ltp"]), round(c["ltp"] / 5) * 5,
-                              round(c["ltp"] / 10) * 10, round(c["ltp"] / 20) * 20,
-                              round(c["ltp"] / 50) * 50, round(c["ltp"] / 100) * 100]:
-                    if s_try in option_keys.get(sym, {}) and "CE" in option_keys[sym][s_try]:
-                        all_option_syms.add((sym, s_try, "CE"))
-                        break
+                s = find_atm_strike(sym, c["ltp"], "CE")
+                if s is not None:
+                    all_option_syms.add((sym, s, "CE"))
 
         oeh_cands.sort(key=lambda x: x["drop_pct"], reverse=True)
         oel_cands.sort(key=lambda x: x["rise_pct"], reverse=True)
@@ -342,10 +349,18 @@ async def main():
 
     # ── Step 5: Simulate trades with SL + floor logic ──
     def find_atm_strike(sym, ltp, otype):
-        """Find the ATM strike for sym closest to ltp."""
+        """Find the ATM strike for sym closest to ltp using strike step."""
+        step = strike_steps.get(sym, 50)
+        atm = round(ltp / step) * step
         strikes = option_keys.get(sym, {})
         if not strikes:
             return None
+        # Try ATM first, then nearby strikes
+        for offset in [0, step, -step, 2*step, -2*step]:
+            s = atm + offset
+            if s in strikes and otype in strikes[s]:
+                return s
+        # Fallback: closest valid strike
         valid = [s for s in strikes if otype in strikes[s]]
         if not valid:
             return None
