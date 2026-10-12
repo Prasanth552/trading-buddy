@@ -28,7 +28,7 @@ IST = ZoneInfo(config.TIMEZONE)
 TODAY = datetime(2026, 10, 12, tzinfo=IST).date()
 
 # Strategy params (mirror channel_listener.py)
-ORB_CAPITAL = 150000
+ORB_CAPITAL = 300000
 ORB_SL_PCT = 0.30
 ORB_MAX_SL_RS = 5000
 FLOOR_LEVELS = [500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5500, 6000]
@@ -392,34 +392,150 @@ async def main():
     print("=" * 80)
 
     def run_orb_sim(use_guardrails):
-        trades = []
-        open_symbols = set()
+        """Realistic simulation with concurrent capital locking.
+
+        Trades stay open and lock capital until they exit via SL/floor/EOD.
+        New trades can only be placed with remaining free capital.
+        Capital is freed only when a trade actually closes.
+        """
+        completed_trades = []
+        # Open positions: list of dicts with trade state
+        open_positions = []  # {sym, strike, otype, lot, entry_price, sl, peak_pnl, locked_floor, entry_time, cost, direction, is_entry_candle, is_reentry}
         capital = ORB_CAPITAL
+        capital_locked = {}  # sym → locked amount
         sym_entry_count = defaultdict(int)
         sl_blocked = set()
         daily_pnl = 0
 
+        # Build minute-by-minute timeline from 09:25 to 15:30
+        all_minutes = []
+        t_min = datetime.combine(TODAY, dtime(9, 25))
+        t_end = datetime.combine(TODAY, dtime(15, 30))
+        while t_min <= t_end:
+            all_minutes.append(t_min)
+            t_min += timedelta(minutes=1)
+
+        # Pre-compute which scan times exist (for placing new trades)
+        scan_time_set = set()
         for st in scan_times:
-            if use_guardrails and st > ORB_TIME_CUTOFF:
+            scan_time_set.add(datetime.combine(TODAY, st))
+
+        # Track which breakouts we've already entered (sym → True)
+        entered_syms = set()
+
+        for current_dt in all_minutes:
+            current_time = current_dt.time()
+
+            # ── Step 1: Check exits on all open positions ──
+            to_close = []
+            for pos in open_positions:
+                key = (pos["sym"], pos["strike"], pos["otype"])
+                candles = option_candles.get(key, [])
+                # Find the candle at current_dt
+                candle = None
+                for c_raw in candles:
+                    ct = parse_ts(c_raw.get("ts") or c_raw.get("date") or c_raw.get("timestamp"))
+                    if ct.hour == current_dt.hour and ct.minute == current_dt.minute:
+                        candle = c_raw
+                        break
+                if candle is None:
+                    continue
+
+                entry_price = pos["entry_price"]
+                lot_qty = pos["lot"]
+                current_low_pnl = (candle["low"] - entry_price) * lot_qty
+                current_high_pnl = (candle["high"] - entry_price) * lot_qty
+
+                # SL check
+                if candle["low"] <= pos["sl"]:
+                    gross = (pos["sl"] - entry_price) * lot_qty
+                    charges = max(100, abs(gross) * 0.02)
+                    to_close.append((pos, pos["sl"], current_dt, "max_loss_cap", gross, gross - charges))
+                    continue
+
+                # Floor exit (not on entry candle)
+                if not pos["is_entry_candle"] and pos["locked_floor"] > 0:
+                    if current_low_pnl <= pos["locked_floor"]:
+                        gross = (candle["close"] - entry_price) * lot_qty
+                        charges = max(100, abs(gross) * 0.02)
+                        to_close.append((pos, candle["close"], current_dt, f"floor_{pos['locked_floor']}", gross, gross - charges))
+                        continue
+
+                # Update peak/floor AFTER exit checks
+                pos["peak_pnl"] = max(pos["peak_pnl"], current_high_pnl)
+                new_floor = get_stepped_floor(pos["peak_pnl"])
+                if new_floor > pos["locked_floor"]:
+                    pos["locked_floor"] = new_floor
+
+                pos["is_entry_candle"] = False
+
+            # EOD close at 15:29
+            if current_dt.hour == 15 and current_dt.minute >= 29:
+                for pos in open_positions:
+                    already_closing = any(p[0] is pos for p in to_close)
+                    if already_closing:
+                        continue
+                    key = (pos["sym"], pos["strike"], pos["otype"])
+                    candles = option_candles.get(key, [])
+                    last_price = pos["entry_price"]
+                    for c_raw in candles:
+                        last_price = c_raw["close"]
+                    gross = (last_price - pos["entry_price"]) * pos["lot"]
+                    charges = max(100, abs(gross) * 0.02)
+                    to_close.append((pos, last_price, current_dt, "eod_close", gross, gross - charges))
+
+            # Process closures
+            for pos, exit_price, exit_dt, exit_reason, gross, net in to_close:
+                trade = {
+                    "symbol": f"{pos['sym']} {int(pos['strike'])} {pos['otype']}",
+                    "entry_price": round(pos["entry_price"], 2),
+                    "exit_price": round(exit_price, 2),
+                    "qty": pos["lot"],
+                    "gross_pnl": round(gross, 2),
+                    "net_pnl": round(net, 2),
+                    "peak_pnl": round(pos["peak_pnl"], 2),
+                    "locked_floor": pos["locked_floor"],
+                    "entry_time": pos["entry_time"].strftime("%H:%M"),
+                    "exit_time": exit_dt.strftime("%H:%M"),
+                    "exit_reason": exit_reason,
+                    "direction": pos["direction"],
+                    "is_reentry": pos["is_reentry"],
+                    "scan_time": pos["scan_time"],
+                }
+                completed_trades.append(trade)
+                daily_pnl += net
+
+                # Free capital
+                locked = capital_locked.pop(pos["sym"], 0)
+                capital += locked + net + max(100, abs(gross) * 0.02)  # return locked + pnl (add back charges since net already subtracted them)
+
+                if pos in open_positions:
+                    open_positions.remove(pos)
+
+                if use_guardrails and exit_reason == "max_loss_cap":
+                    sl_blocked.add(pos["sym"])
+
+            # ── Step 2: Place new trades at scan times ──
+            if current_dt not in scan_time_set:
                 continue
 
-            cands = breakouts_by_time.get(st, [])
-            if not cands:
+            if use_guardrails and current_time > ORB_TIME_CUTOFF:
                 continue
 
-            # Capital reset when no open trades
-            if not open_symbols:
+            if daily_pnl <= -ORB_LOSS_CAP or daily_pnl >= ORB_PROFIT_CAP:
+                continue
+
+            # Reset capital when no trades are open
+            if not open_positions:
                 capital = ORB_CAPITAL
+                capital_locked.clear()
 
-            # Daily cap check
-            if daily_pnl <= -ORB_LOSS_CAP:
-                break
-            if daily_pnl >= ORB_PROFIT_CAP:
-                break
+            cands = breakouts_by_time.get(current_time, [])
+            open_syms = {p["sym"] for p in open_positions}
 
             for c in cands:
                 sym = c["symbol"]
-                if sym in open_symbols:
+                if sym in open_syms:
                     continue
 
                 if use_guardrails:
@@ -436,7 +552,7 @@ async def main():
                     continue
 
                 lot = lot_sizes.get(sym, 1) * 2
-                entry_premium = get_option_price_at(sym, strike, otype, st)
+                entry_premium = get_option_price_at(sym, strike, otype, current_time)
                 if not entry_premium or entry_premium < 2:
                     continue
 
@@ -445,29 +561,52 @@ async def main():
                     continue
 
                 is_reentry = sym_entry_count[sym] > 0
-                trade = simulate_trade(sym, strike, otype, st, lot)
-                if trade is None:
-                    continue
 
-                trade["is_reentry"] = is_reentry
-                trade["scan_time"] = st.strftime("%H:%M")
-                trade["direction"] = c["direction"]
-                trades.append(trade)
+                sl_price = entry_premium * (1 - ORB_SL_PCT)
+                sl_cap = entry_premium - (ORB_MAX_SL_RS / lot)
+                sl = max(sl_price, sl_cap)
+
+                pos = {
+                    "sym": sym, "strike": strike, "otype": otype,
+                    "lot": lot, "entry_price": entry_premium, "sl": sl,
+                    "peak_pnl": 0, "locked_floor": 0,
+                    "entry_time": current_dt, "cost": trade_cost,
+                    "direction": c["direction"], "is_entry_candle": True,
+                    "is_reentry": is_reentry,
+                    "scan_time": current_time.strftime("%H:%M"),
+                }
+                open_positions.append(pos)
                 capital -= trade_cost
-                open_symbols.add(sym)
+                capital_locked[sym] = trade_cost
                 sym_entry_count[sym] += 1
 
-                # Process exit
-                capital += trade["exit_price"] * lot
-                open_symbols.discard(sym)
+        # Any still open at end
+        for pos in open_positions:
+            key = (pos["sym"], pos["strike"], pos["otype"])
+            candles = option_candles.get(key, [])
+            last_price = pos["entry_price"]
+            if candles:
+                last_price = candles[-1]["close"]
+            gross = (last_price - pos["entry_price"]) * pos["lot"]
+            completed_trades.append({
+                "symbol": f"{pos['sym']} {int(pos['strike'])} {pos['otype']}",
+                "entry_price": round(pos["entry_price"], 2),
+                "exit_price": round(last_price, 2),
+                "qty": pos["lot"],
+                "gross_pnl": round(gross, 2),
+                "net_pnl": round(gross, 2),
+                "peak_pnl": round(pos["peak_pnl"], 2),
+                "locked_floor": pos["locked_floor"],
+                "entry_time": pos["entry_time"].strftime("%H:%M"),
+                "exit_time": "15:30",
+                "exit_reason": "STILL_OPEN",
+                "direction": pos["direction"],
+                "is_reentry": pos["is_reentry"],
+                "scan_time": pos["scan_time"],
+            })
 
-                if trade["exit_reason"] != "STILL_OPEN":
-                    daily_pnl += trade["net_pnl"]
-
-                if use_guardrails and trade["exit_reason"] == "max_loss_cap":
-                    sl_blocked.add(sym)
-
-        return trades, sl_blocked, sym_entry_count
+        completed_trades.sort(key=lambda t: t["entry_time"])
+        return completed_trades, sl_blocked, sym_entry_count
 
     def print_results(trades, label, sl_blocked=None, sym_entry_count=None):
         print(f"\n{'Symbol':<25} {'Dir':>4} {'Entry':>7} {'Exit':>7} {'Qty':>5} {'Gross':>8} {'Net':>8} "
