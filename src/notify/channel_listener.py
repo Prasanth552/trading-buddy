@@ -4067,26 +4067,27 @@ async def start_listener() -> None:
                             log.error("[ORB] Catch-up rescan failed: %s", exc, exc_info=True)
                     else:
                         log.info("[ORB] Missed scheduled %s by %.0f min — too stale, skipping", ORB_RUN_TIME, mins_late)
-                    continue
-            first_run = False
+                    # Fall through to rescan loop (don't skip to next day)
+                else:
+                    first_run = False
 
-            target = now.replace(hour=h, minute=m, second=0, microsecond=0)
-            if now >= target:
-                target += timedelta(days=1)
+                    target = now.replace(hour=h, minute=m, second=0, microsecond=0)
+                    if now >= target:
+                        target += timedelta(days=1)
 
-            wait_secs = (target - now).total_seconds()
-            log.info("[ORB] Next scan at %s IST (in %.0f min)",
-                     target.strftime("%Y-%m-%d %H:%M"), wait_secs / 60)
-            await asyncio.sleep(wait_secs)
+                    wait_secs = (target - now).total_seconds()
+                    log.info("[ORB] Next scan at %s IST (in %.0f min)",
+                             target.strftime("%Y-%m-%d %H:%M"), wait_secs / 60)
+                    await asyncio.sleep(wait_secs)
 
-            if not mc.is_trading_day():
-                log.info("[ORB] Not a trading day, skipping scan")
-                continue
+                    if not mc.is_trading_day():
+                        log.info("[ORB] Not a trading day, skipping scan")
+                        continue
 
-            try:
-                await _run_orb_scan()
-            except Exception as exc:
-                log.error("[ORB] Scheduler scan failed: %s", exc, exc_info=True)
+                    try:
+                        await _run_orb_scan()
+                    except Exception as exc:
+                        log.error("[ORB] Scheduler scan failed: %s", exc, exc_info=True)
 
             # Rescan every 5 min until market close, whenever capital is freed
             while True:
