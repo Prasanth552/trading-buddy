@@ -2391,7 +2391,7 @@ async def _run_orb_scan():
     candidates.sort(key=lambda x: x["range_pct"], reverse=True)
 
     # Initialize capital pool (only on first scan of the day, not rescans)
-    if _orb_capital_avail <= 0 and not _orb_capital_locked:
+    if not _orb_capital_locked:
         _orb_init_capital()
 
     summary_lines = []
