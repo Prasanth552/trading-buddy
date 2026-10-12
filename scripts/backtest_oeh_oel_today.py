@@ -7,6 +7,11 @@ Uses real intraday candle data to simulate:
 - OEL: Open=Low stocks → buy CEs, rescan every 60s with re-entries
 
 Mirrors live bot logic exactly: ATM strike, SL, floor levels.
+
+GUARDRAILS (new):
+1. Per-stock daily trade limit: max 3 entries per symbol per day
+2. Time cutoff: no new OEH entries after 13:00 (theta trap)
+3. Cooldown after SL: if a stock hits SL, block it for the rest of the day
 """
 
 import asyncio
@@ -36,11 +41,11 @@ OEL_TOLERANCE = 0.05
 OEL_MIN_RISE_PCT = 0.3
 SL_PCT = 0.30  # 30% SL on premium
 
-SCAN_TIMES_OEH = ["09:20"]  # initial, then every 1 min until 15:15
-SCAN_TIMES_OEL = ["09:22"]  # initial, then every 1 min until 15:15
+# GUARDRAIL PARAMS
+MAX_ENTRIES_PER_SYMBOL = 3       # max trades per stock per day
+OEH_TIME_CUTOFF = dtime(13, 0)  # no new OEH entries after 13:00
+OEL_TIME_CUTOFF = dtime(14, 0)  # no new OEL entries after 14:00
 
-# We'll simulate scans at 09:20, 09:30, 09:45, 10:00, 10:15, 10:30, 10:45, 11:00, ... 15:00
-# to keep it manageable
 RESCAN_INTERVAL_MINS = 15  # check every 15 min for re-entry test
 
 
@@ -89,7 +94,7 @@ async def main():
 
     # Build option key lookup: sym → {strike → {CE: key, PE: key}}
     option_keys = defaultdict(lambda: defaultdict(dict))
-    strike_steps = {}  # sym → smallest gap between adjacent strikes
+    strike_steps = {}
     sym_strikes = defaultdict(set)
     for inst in master:
         if inst.get("segment") != "NSE_FO":
@@ -135,7 +140,7 @@ async def main():
     from_dt = datetime.combine(TODAY, dtime(9, 15))
     to_dt = datetime.combine(TODAY, dtime(15, 30))
 
-    equity_candles = {}  # sym → list of {ts, open, high, low, close}
+    equity_candles = {}
     batch_size = 20
     syms_with_keys = [(sym, eq_keys[sym]) for sym in universe if sym in eq_keys]
 
@@ -150,13 +155,12 @@ async def main():
                 pass
         pct = min(100, (i + batch_size) / len(syms_with_keys) * 100)
         print(f"  Fetched {min(i + batch_size, len(syms_with_keys))}/{len(syms_with_keys)} ({pct:.0f}%)", end="\r")
-        await asyncio.sleep(0.3)  # rate limit
+        await asyncio.sleep(0.3)
 
     print(f"\nGot candles for {len(equity_candles)} stocks")
 
     # ── Helper: get equity price at a given time ──
     def get_price_at(sym, target_time):
-        """Get the close price of the candle at or just before target_time."""
         candles = equity_candles.get(sym, [])
         if not candles:
             return None
@@ -176,20 +180,10 @@ async def main():
         return best
 
     def get_open_price(sym):
-        """Get the opening price (first candle open)."""
         candles = equity_candles.get(sym, [])
         return candles[0]["open"] if candles else None
 
-    def get_day_high(sym):
-        candles = equity_candles.get(sym, [])
-        return max(c["high"] for c in candles) if candles else None
-
-    def get_day_low(sym):
-        candles = equity_candles.get(sym, [])
-        return min(c["low"] for c in candles) if candles else None
-
     def is_oeh_at_time(sym, scan_time):
-        """Check if stock is Open=High at given scan time."""
         opn = get_open_price(sym)
         if not opn or opn <= 0:
             return None
@@ -218,7 +212,6 @@ async def main():
         return {"symbol": sym, "open": opn, "ltp": ltp, "drop_pct": drop_pct}
 
     def is_oel_at_time(sym, scan_time):
-        """Check if stock is Open=Low at given scan time."""
         opn = get_open_price(sym)
         if not opn or opn <= 0:
             return None
@@ -246,8 +239,7 @@ async def main():
             return None
         return {"symbol": sym, "open": opn, "ltp": ltp, "rise_pct": rise_pct}
 
-    # ── Step 2: For each scan time, find candidates ──
-    # Build scan times: 09:20, 09:35, 09:50, 10:05, ... 15:00 (every 15 min)
+    # ── Build scan times ──
     scan_times = []
     t = dtime(9, 20)
     while t <= dtime(15, 0):
@@ -257,7 +249,6 @@ async def main():
 
     # ── Helper: find ATM strike ──
     def find_atm_strike(sym, ltp, otype):
-        """Find the ATM strike for sym closest to ltp using strike step."""
         step = strike_steps.get(sym, 50)
         atm = round(ltp / step) * step
         strikes = option_keys.get(sym, {})
@@ -272,13 +263,12 @@ async def main():
             return None
         return min(valid, key=lambda s: abs(s - ltp))
 
-    # ── Step 3: Fetch option candles for candidates ──
-    # First pass: identify all candidate symbols across all scan times
+    # ── Identify candidates at each scan time ──
     print("\n=== Identifying candidates at each scan time... ===")
 
     oeh_candidates_by_time = {}
     oel_candidates_by_time = {}
-    all_option_syms = set()  # (sym, strike, otype) to fetch
+    all_option_syms = set()
 
     for st in scan_times:
         oeh_cands = []
@@ -305,9 +295,9 @@ async def main():
         if oeh_cands or oel_cands:
             print(f"  {st.strftime('%H:%M')} — OEH: {len(oeh_cands)} candidates, OEL: {len(oel_cands)} candidates")
 
-    # ── Step 4: Fetch option 1-min candles for all needed options ──
+    # ── Fetch option 1-min candles ──
     print(f"\n=== Fetching option candles for {len(all_option_syms)} options... ===")
-    option_candles = {}  # (sym, strike, otype) → list of candles
+    option_candles = {}
 
     opt_list = list(all_option_syms)
     for i in range(0, len(opt_list), batch_size):
@@ -348,7 +338,6 @@ async def main():
         return best
 
     def get_option_candles_after(sym, strike, otype, entry_time):
-        """Get all option candles from entry_time onwards (for SL/floor simulation)."""
         key = (sym, strike, otype)
         candles = option_candles.get(key, [])
         result = []
@@ -364,9 +353,8 @@ async def main():
                 result.append({"time": ct, **{k: c[k] for k in ("open", "high", "low", "close")}})
         return result
 
-    # ── Step 5: Simulate trades with SL + floor logic ──
+    # ── Simulate trade ──
     def simulate_trade(sym, strike, otype, entry_time, lot_qty):
-        """Simulate a trade from entry_time, return exit info."""
         entry_price = get_option_price_at(sym, strike, otype, entry_time)
         if not entry_price or entry_price <= 0:
             return None
@@ -391,25 +379,22 @@ async def main():
             current_high_pnl = (c["high"] - entry_price) * lot_qty
             current_close_pnl = (c["close"] - entry_price) * lot_qty
 
-            # 1) SL hit — check low touches SL price
+            # 1) SL hit
             if c["low"] <= sl:
                 exit_price = sl
                 exit_time = c["time"]
                 exit_reason = "max_loss_cap"
                 break
 
-            # 2) Floor exit — but NOT on entry candle (bot needs time to lock floor)
-            #    Check if pnl dropped below locked floor using the LOW (worst case in candle)
+            # 2) Floor exit (not on entry candle)
             if not is_entry_candle and locked_floor > 0:
-                low_pnl_check = current_low_pnl
-                if low_pnl_check <= locked_floor:
-                    # Exit at close (approx — bot would exit at the moment it crosses)
+                if current_low_pnl <= locked_floor:
                     exit_price = c["close"]
                     exit_time = c["time"]
                     exit_reason = f"floor_{locked_floor}"
                     break
 
-            # 3) Update peak and floor AFTER exit checks (so floor locks from previous candles)
+            # 3) Update peak and floor AFTER exit checks
             peak_pnl = max(peak_pnl, current_high_pnl)
             new_floor = get_stepped_floor(peak_pnl)
             if new_floor > locked_floor:
@@ -417,7 +402,6 @@ async def main():
 
             is_entry_candle = False
 
-        # If no exit and we have full-day data (last candle after 15:20), close at EOD
         if exit_price is None:
             last = candles_after[-1] if candles_after else None
             if last:
@@ -427,7 +411,6 @@ async def main():
                     exit_time = last["time"]
                     exit_reason = "eod_close"
                 else:
-                    # Data is truncated (script ran mid-day) — mark as STILL OPEN
                     return {
                         "symbol": f"{sym} {int(strike)} {otype}",
                         "entry_price": round(entry_price, 2),
@@ -446,7 +429,7 @@ async def main():
             return None
 
         gross_pnl = (exit_price - entry_price) * lot_qty
-        charges = max(100, abs(gross_pnl) * 0.02)  # rough 2% charges estimate
+        charges = max(100, abs(gross_pnl) * 0.02)
         net_pnl = gross_pnl - charges
 
         return {
@@ -463,8 +446,7 @@ async def main():
             "exit_reason": exit_reason,
         }
 
-    # ── Run simulation ──
-    # Check if data covers full day
+    # ── Check data coverage ──
     sample_candles = next(iter(equity_candles.values()), [])
     if sample_candles:
         last_c = sample_candles[-1]
@@ -478,32 +460,49 @@ async def main():
             print(f"   Run this script AFTER 15:30 for accurate full-day results.")
             print(f"   Trades without SL/floor exit will be marked STILL_OPEN.\n")
 
+    # ════════════════════════════════════════════════════════════════
+    #   OEH BACKTEST
+    # ════════════════════════════════════════════════════════════════
     print("\n" + "=" * 80)
-    print("  OEH BACKTEST — 12 Oct 2026 — WITH RE-ENTRIES")
+    print("  OEH BACKTEST — 12 Oct 2026 — WITH GUARDRAILS")
+    print(f"  Max {MAX_ENTRIES_PER_SYMBOL} entries/stock | Cutoff {OEH_TIME_CUTOFF.strftime('%H:%M')} | SL cooldown")
     print("=" * 80)
 
     oeh_trades = []
-    oeh_exited_symbols = set()  # track symbols that already exited (for re-entry)
-    oeh_open_symbols = set()    # currently open
+    oeh_open_symbols = set()
     oeh_capital = OEH_CAPITAL
-    oeh_all_entries = set()     # (sym, scan_time) to avoid duplicate processing
+    oeh_sym_entry_count = defaultdict(int)    # GUARDRAIL 1: per-stock count
+    oeh_sl_blocked = set()                     # GUARDRAIL 3: SL cooldown
 
     for st in scan_times:
+        # GUARDRAIL 2: time cutoff
+        if st > OEH_TIME_CUTOFF:
+            continue
+
         cands = oeh_candidates_by_time.get(st, [])
         if not cands:
             continue
 
+        # Reset capital when no trades are open (same fix as live)
+        if not oeh_open_symbols:
+            oeh_capital = OEH_CAPITAL
+
         for c in cands:
             sym = c["symbol"]
             if sym in oeh_open_symbols:
-                continue  # already have an open position
+                continue
 
-            # Find ATM strike
+            # GUARDRAIL 1: per-stock limit
+            if oeh_sym_entry_count[sym] >= MAX_ENTRIES_PER_SYMBOL:
+                continue
+
+            # GUARDRAIL 3: SL cooldown
+            if sym in oeh_sl_blocked:
+                continue
+
             strike = find_atm_strike(sym, c["ltp"], "PE")
             if strike is None:
                 continue
-
-            # Check if we have option candle data
             if (sym, strike, "PE") not in option_candles:
                 continue
 
@@ -516,7 +515,7 @@ async def main():
             if trade_cost > oeh_capital:
                 continue
 
-            is_reentry = sym in oeh_exited_symbols
+            is_reentry = oeh_sym_entry_count[sym] > 0
             trade = simulate_trade(sym, strike, "PE", st, lot)
             if trade is None:
                 continue
@@ -526,11 +525,15 @@ async def main():
             oeh_trades.append(trade)
             oeh_capital -= trade_cost
             oeh_open_symbols.add(sym)
+            oeh_sym_entry_count[sym] += 1
 
             # Process exit
             oeh_capital += trade["exit_price"] * lot
             oeh_open_symbols.discard(sym)
-            oeh_exited_symbols.add(sym)
+
+            # GUARDRAIL 3: if SL hit, block for rest of day
+            if trade["exit_reason"] == "max_loss_cap":
+                oeh_sl_blocked.add(sym)
 
     # Print OEH results
     print(f"\n{'Symbol':<25} {'Entry':>7} {'Exit':>7} {'Qty':>5} {'Gross':>8} {'Net':>8} "
@@ -575,31 +578,48 @@ async def main():
         print(f"OEH STILL OPEN: {oeh_open_count} trades | Unrealized: ₹{oeh_open_pnl:+,.0f}")
     print(f"OEH RE-ENTRIES: {oeh_reentry_count} trades | Net: ₹{oeh_reentry_net:+,.0f}")
     print(f"OEH WITHOUT RE-ENTRIES: Net: ₹{oeh_total_net - oeh_reentry_net:+,.0f}")
+    print(f"\nGUARDRAIL STATS:")
+    print(f"  Stocks blocked by SL cooldown: {len(oeh_sl_blocked)} {oeh_sl_blocked}")
+    print(f"  Stocks hit entry limit ({MAX_ENTRIES_PER_SYMBOL}): {[s for s,c in oeh_sym_entry_count.items() if c >= MAX_ENTRIES_PER_SYMBOL]}")
+    print(f"  Trades blocked by time cutoff (>{OEH_TIME_CUTOFF.strftime('%H:%M')}): N/A (filtered at scan level)")
 
-    # ── OEL ──
+    # ════════════════════════════════════════════════════════════════
+    #   OEL BACKTEST
+    # ════════════════════════════════════════════════════════════════
     print("\n" + "=" * 80)
-    print("  OEL BACKTEST — 12 Oct 2026 — WITH RE-ENTRIES")
+    print("  OEL BACKTEST — 12 Oct 2026 — WITH GUARDRAILS")
+    print(f"  Max {MAX_ENTRIES_PER_SYMBOL} entries/stock | Cutoff {OEL_TIME_CUTOFF.strftime('%H:%M')} | SL cooldown")
     print("=" * 80)
 
     oel_trades = []
-    oel_exited_symbols = set()
     oel_open_symbols = set()
     oel_capital = OEL_CAPITAL
+    oel_sym_entry_count = defaultdict(int)
+    oel_sl_blocked = set()
 
     for st in scan_times:
+        if st > OEL_TIME_CUTOFF:
+            continue
+
         cands = oel_candidates_by_time.get(st, [])
         if not cands:
             continue
+
+        if not oel_open_symbols:
+            oel_capital = OEL_CAPITAL
 
         for c in cands:
             sym = c["symbol"]
             if sym in oel_open_symbols:
                 continue
+            if oel_sym_entry_count[sym] >= MAX_ENTRIES_PER_SYMBOL:
+                continue
+            if sym in oel_sl_blocked:
+                continue
 
             strike = find_atm_strike(sym, c["ltp"], "CE")
             if strike is None:
                 continue
-
             if (sym, strike, "CE") not in option_candles:
                 continue
 
@@ -612,7 +632,7 @@ async def main():
             if trade_cost > oel_capital:
                 continue
 
-            is_reentry = sym in oel_exited_symbols
+            is_reentry = oel_sym_entry_count[sym] > 0
             trade = simulate_trade(sym, strike, "CE", st, lot)
             if trade is None:
                 continue
@@ -622,11 +642,13 @@ async def main():
             oel_trades.append(trade)
             oel_capital -= trade_cost
             oel_open_symbols.add(sym)
+            oel_sym_entry_count[sym] += 1
 
-            # Process exit
             oel_capital += trade["exit_price"] * lot
             oel_open_symbols.discard(sym)
-            oel_exited_symbols.add(sym)
+
+            if trade["exit_reason"] == "max_loss_cap":
+                oel_sl_blocked.add(sym)
 
     # Print OEL results
     print(f"\n{'Symbol':<25} {'Entry':>7} {'Exit':>7} {'Qty':>5} {'Gross':>8} {'Net':>8} "
@@ -671,10 +693,14 @@ async def main():
         print(f"OEL STILL OPEN: {oel_open_count} trades | Unrealized: ₹{oel_open_pnl:+,.0f}")
     print(f"OEL RE-ENTRIES: {oel_reentry_count} trades | Net: ₹{oel_reentry_net:+,.0f}")
     print(f"OEL WITHOUT RE-ENTRIES: Net: ₹{oel_total_net - oel_reentry_net:+,.0f}")
+    print(f"\nGUARDRAIL STATS:")
+    print(f"  Stocks blocked by SL cooldown: {len(oel_sl_blocked)} {oel_sl_blocked}")
+    print(f"  Stocks hit entry limit ({MAX_ENTRIES_PER_SYMBOL}): {[s for s,c in oel_sym_entry_count.items() if c >= MAX_ENTRIES_PER_SYMBOL]}")
 
     # ── Grand Summary ──
     print("\n" + "=" * 80)
-    print("  GRAND SUMMARY")
+    print("  GRAND SUMMARY (WITH GUARDRAILS)")
+    print(f"  Rules: max {MAX_ENTRIES_PER_SYMBOL}/stock | OEH cutoff {OEH_TIME_CUTOFF.strftime('%H:%M')} | OEL cutoff {OEL_TIME_CUTOFF.strftime('%H:%M')} | SL → block")
     print("=" * 80)
     total_closed = (len(oeh_trades) - oeh_open_count) + (len(oel_trades) - oel_open_count)
     total_open = oeh_open_count + oel_open_count
