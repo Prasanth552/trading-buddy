@@ -87,6 +87,9 @@ def pick_upstox_option(
 class UpstoxClient:
     """Thin Upstox order client (sandbox token-based)."""
 
+    _shared_instruments: list[dict[str, Any]] | None = None
+    _shared_instruments_date: str | None = None
+
     def __init__(self, sandbox_token: str | None = None) -> None:
         # Prefer the fresh daily OAuth token (refreshed by the data login) over
         # the separate sandbox token, which expires unpredictably (UDAPI100050
@@ -105,7 +108,11 @@ class UpstoxClient:
                 "No Upstox token — run `python -m src.broker.upstox_data` to log in, "
                 "or set UPSTOX_SANDBOX_TOKEN in .env."
             )
-        self._instruments: list[dict[str, Any]] | None = None
+        today = datetime.now().strftime("%Y-%m-%d")
+        if UpstoxClient._shared_instruments is not None and UpstoxClient._shared_instruments_date == today:
+            self._instruments = UpstoxClient._shared_instruments
+        else:
+            self._instruments: list[dict[str, Any]] | None = None
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -116,12 +123,14 @@ class UpstoxClient:
 
     # --- instruments -------------------------------------------------------
     def load_instruments(self, url: str = config.UPSTOX_INSTRUMENTS_URL) -> list[dict[str, Any]]:
-        """Download + decompress the Upstox instrument master (cached per client)."""
+        """Download + decompress the Upstox instrument master (cached across instances per day)."""
         if self._instruments is None:
             log.info("Downloading Upstox instrument master...")
             raw = requests.get(url, timeout=60).content
             self._instruments = json.loads(gzip.decompress(raw))
             log.info("Loaded %d Upstox instruments.", len(self._instruments))
+            UpstoxClient._shared_instruments = self._instruments
+            UpstoxClient._shared_instruments_date = datetime.now().strftime("%Y-%m-%d")
         return self._instruments
 
     def resolve_option(
