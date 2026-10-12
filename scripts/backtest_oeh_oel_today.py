@@ -1,0 +1,622 @@
+#!/usr/bin/env python3
+"""
+Backtest OEH + OEL strategies for today (2026-10-12) with RE-ENTRY support.
+
+Uses real intraday candle data to simulate:
+- OEH: Open=High stocks → buy PEs, rescan every 60s with re-entries
+- OEL: Open=Low stocks → buy CEs, rescan every 60s with re-entries
+
+Mirrors live bot logic exactly: ATM strike, SL, floor levels.
+"""
+
+import asyncio
+import json
+import gzip
+import sys
+import os
+from datetime import datetime, timedelta, time as dtime
+from zoneinfo import ZoneInfo
+from collections import defaultdict
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import config
+from src.broker.upstox_data import UpstoxData, load_cached_token
+
+IST = ZoneInfo(config.TIMEZONE)
+TODAY = datetime(2026, 10, 12, tzinfo=IST).date()
+
+# Strategy params (mirror channel_listener.py exactly)
+OEH_CAPITAL = 300000
+OEL_CAPITAL = 300000
+MAX_SL = 5000
+FLOOR_LEVELS = [500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5500, 6000]
+OEH_TOLERANCE = 0.05
+OEH_MIN_DROP_PCT = 0.3
+OEL_TOLERANCE = 0.05
+OEL_MIN_RISE_PCT = 0.3
+SL_PCT = 0.30  # 30% SL on premium
+
+SCAN_TIMES_OEH = ["09:20"]  # initial, then every 1 min until 15:15
+SCAN_TIMES_OEL = ["09:22"]  # initial, then every 1 min until 15:15
+
+# We'll simulate scans at 09:20, 09:30, 09:45, 10:00, 10:15, 10:30, 10:45, 11:00, ... 15:00
+# to keep it manageable
+RESCAN_INTERVAL_MINS = 15  # check every 15 min for re-entry test
+
+
+def get_stepped_floor(net_pnl):
+    """Return the highest locked floor level, or 0."""
+    locked = 0
+    for lvl in FLOOR_LEVELS:
+        if net_pnl >= lvl:
+            locked = lvl
+        else:
+            break
+    return locked
+
+
+async def main():
+    token = load_cached_token()
+    if not token:
+        print("ERROR: No Upstox token. Run auto-login first.")
+        return
+
+    ud = UpstoxData(access_token=token)
+    master = ud._load_master()
+    print(f"Loaded {len(master)} instruments")
+
+    # Build F&O universe + equity keys + lot sizes
+    eq_keys = {}
+    lot_sizes = {}
+    fo_symbols = set()
+    import re as _re
+    for inst in master:
+        seg = inst.get("segment")
+        if seg == "NSE_EQ":
+            tsym = (inst.get("trading_symbol") or "").upper()
+            if tsym:
+                eq_keys[tsym] = inst.get("instrument_key")
+        elif seg == "NSE_FO":
+            _base = _re.match(r'^([A-Z&]+)', (inst.get("trading_symbol") or "").upper())
+            if _base:
+                fo_symbols.add(_base.group(1))
+                _ls = int(inst.get("lot_size") or 0)
+                if _ls > 0:
+                    lot_sizes[_base.group(1)] = _ls
+
+    universe = sorted(fo_symbols & set(eq_keys.keys()))
+    print(f"F&O universe: {len(universe)} stocks")
+
+    # Build option key lookup: sym → {strike → {CE: key, PE: key}}
+    option_keys = defaultdict(lambda: defaultdict(dict))
+    for inst in master:
+        if inst.get("segment") != "NSE_FO":
+            continue
+        tsym = (inst.get("trading_symbol") or "").upper()
+        if not tsym:
+            continue
+        otype = inst.get("option_type", "").upper()
+        if otype not in ("CE", "PE"):
+            continue
+        expiry = inst.get("expiry")
+        strike = float(inst.get("strike_price") or 0)
+        base = _re.match(r'^([A-Z&]+)', tsym)
+        if not base:
+            continue
+        sym = base.group(1)
+        ikey = inst.get("instrument_key")
+        # We want the nearest weekly/monthly expiry
+        if sym not in option_keys or strike not in option_keys[sym]:
+            option_keys[sym][strike][otype] = {"key": ikey, "expiry": expiry}
+        else:
+            # Keep the nearest expiry
+            existing = option_keys[sym][strike].get(otype, {}).get("expiry")
+            if existing and expiry and expiry < existing:
+                option_keys[sym][strike][otype] = {"key": ikey, "expiry": expiry}
+
+    # ── Step 1: Fetch equity 1-min candles for all universe stocks (9:15–15:30) ──
+    print("\n=== Fetching equity intraday data (this takes a minute)... ===")
+    from_dt = datetime.combine(TODAY, dtime(9, 15))
+    to_dt = datetime.combine(TODAY, dtime(15, 30))
+
+    equity_candles = {}  # sym → list of {ts, open, high, low, close}
+    batch_size = 20
+    syms_with_keys = [(sym, eq_keys[sym]) for sym in universe if sym in eq_keys]
+
+    for i in range(0, len(syms_with_keys), batch_size):
+        batch = syms_with_keys[i:i + batch_size]
+        for sym, key in batch:
+            try:
+                candles = ud.historical_data(key, from_dt, to_dt, "1minute")
+                if candles:
+                    equity_candles[sym] = candles
+            except Exception:
+                pass
+        pct = min(100, (i + batch_size) / len(syms_with_keys) * 100)
+        print(f"  Fetched {min(i + batch_size, len(syms_with_keys))}/{len(syms_with_keys)} ({pct:.0f}%)", end="\r")
+        await asyncio.sleep(0.3)  # rate limit
+
+    print(f"\nGot candles for {len(equity_candles)} stocks")
+
+    # ── Helper: get equity price at a given time ──
+    def get_price_at(sym, target_time):
+        """Get the close price of the candle at or just before target_time."""
+        candles = equity_candles.get(sym, [])
+        if not candles:
+            return None
+        best = None
+        for c in candles:
+            ts = c.get("ts") or c.get("date") or c.get("timestamp")
+            if isinstance(ts, str):
+                ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            if hasattr(ts, "astimezone"):
+                ts = ts.astimezone(IST)
+            ct = ts.replace(tzinfo=None) if ts.tzinfo else ts
+            tt = datetime.combine(TODAY, target_time)
+            if ct <= tt:
+                best = c
+            else:
+                break
+        return best
+
+    def get_open_price(sym):
+        """Get the opening price (first candle open)."""
+        candles = equity_candles.get(sym, [])
+        return candles[0]["open"] if candles else None
+
+    def get_day_high(sym):
+        candles = equity_candles.get(sym, [])
+        return max(c["high"] for c in candles) if candles else None
+
+    def get_day_low(sym):
+        candles = equity_candles.get(sym, [])
+        return min(c["low"] for c in candles) if candles else None
+
+    def is_oeh_at_time(sym, scan_time):
+        """Check if stock is Open=High at given scan time."""
+        opn = get_open_price(sym)
+        if not opn or opn <= 0:
+            return None
+        candles = equity_candles.get(sym, [])
+        if not candles:
+            return None
+        max_high = opn
+        ltp = opn
+        for c in candles:
+            ts = c.get("ts") or c.get("date") or c.get("timestamp")
+            if isinstance(ts, str):
+                ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            if hasattr(ts, "astimezone"):
+                ts = ts.astimezone(IST)
+            ct = ts.replace(tzinfo=None) if ts.tzinfo else ts
+            tt = datetime.combine(TODAY, scan_time)
+            if ct > tt:
+                break
+            max_high = max(max_high, c["high"])
+            ltp = c["close"]
+        if max_high > opn + OEH_TOLERANCE:
+            return None
+        drop_pct = (opn - ltp) / opn * 100
+        if drop_pct < OEH_MIN_DROP_PCT:
+            return None
+        return {"symbol": sym, "open": opn, "ltp": ltp, "drop_pct": drop_pct}
+
+    def is_oel_at_time(sym, scan_time):
+        """Check if stock is Open=Low at given scan time."""
+        opn = get_open_price(sym)
+        if not opn or opn <= 0:
+            return None
+        candles = equity_candles.get(sym, [])
+        if not candles:
+            return None
+        min_low = opn
+        ltp = opn
+        for c in candles:
+            ts = c.get("ts") or c.get("date") or c.get("timestamp")
+            if isinstance(ts, str):
+                ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            if hasattr(ts, "astimezone"):
+                ts = ts.astimezone(IST)
+            ct = ts.replace(tzinfo=None) if ts.tzinfo else ts
+            tt = datetime.combine(TODAY, scan_time)
+            if ct > tt:
+                break
+            min_low = min(min_low, c["low"])
+            ltp = c["close"]
+        if min_low < opn - OEL_TOLERANCE:
+            return None
+        rise_pct = (ltp - opn) / opn * 100
+        if rise_pct < OEL_MIN_RISE_PCT:
+            return None
+        return {"symbol": sym, "open": opn, "ltp": ltp, "rise_pct": rise_pct}
+
+    # ── Step 2: For each scan time, find candidates ──
+    # Build scan times: 09:20, 09:35, 09:50, 10:05, ... 15:00 (every 15 min)
+    scan_times = []
+    t = dtime(9, 20)
+    while t <= dtime(15, 0):
+        scan_times.append(t)
+        mins = t.hour * 60 + t.minute + RESCAN_INTERVAL_MINS
+        t = dtime(mins // 60, mins % 60)
+
+    # ── Step 3: Fetch option candles for candidates ──
+    # First pass: identify all candidate symbols across all scan times
+    print("\n=== Identifying candidates at each scan time... ===")
+
+    oeh_candidates_by_time = {}
+    oel_candidates_by_time = {}
+    all_option_syms = set()  # (sym, strike, otype) to fetch
+
+    for st in scan_times:
+        oeh_cands = []
+        oel_cands = []
+        for sym in universe:
+            c = is_oeh_at_time(sym, st)
+            if c:
+                oeh_cands.append(c)
+                # Find ATM PE strike
+                strike = round(c["ltp"] / 10) * 10  # round to nearest 10
+                # Try multiple strike intervals
+                for s_try in [round(c["ltp"]), round(c["ltp"] / 5) * 5,
+                              round(c["ltp"] / 10) * 10, round(c["ltp"] / 20) * 20,
+                              round(c["ltp"] / 50) * 50, round(c["ltp"] / 100) * 100]:
+                    if s_try in option_keys.get(sym, {}) and "PE" in option_keys[sym][s_try]:
+                        all_option_syms.add((sym, s_try, "PE"))
+                        break
+
+            c = is_oel_at_time(sym, st)
+            if c:
+                oel_cands.append(c)
+                for s_try in [round(c["ltp"]), round(c["ltp"] / 5) * 5,
+                              round(c["ltp"] / 10) * 10, round(c["ltp"] / 20) * 20,
+                              round(c["ltp"] / 50) * 50, round(c["ltp"] / 100) * 100]:
+                    if s_try in option_keys.get(sym, {}) and "CE" in option_keys[sym][s_try]:
+                        all_option_syms.add((sym, s_try, "CE"))
+                        break
+
+        oeh_cands.sort(key=lambda x: x["drop_pct"], reverse=True)
+        oel_cands.sort(key=lambda x: x["rise_pct"], reverse=True)
+        oeh_candidates_by_time[st] = oeh_cands
+        oel_candidates_by_time[st] = oel_cands
+        if oeh_cands or oel_cands:
+            print(f"  {st.strftime('%H:%M')} — OEH: {len(oeh_cands)} candidates, OEL: {len(oel_cands)} candidates")
+
+    # ── Step 4: Fetch option 1-min candles for all needed options ──
+    print(f"\n=== Fetching option candles for {len(all_option_syms)} options... ===")
+    option_candles = {}  # (sym, strike, otype) → list of candles
+
+    opt_list = list(all_option_syms)
+    for i in range(0, len(opt_list), batch_size):
+        batch = opt_list[i:i + batch_size]
+        for sym, strike, otype in batch:
+            info = option_keys.get(sym, {}).get(strike, {}).get(otype)
+            if not info:
+                continue
+            try:
+                candles = ud.historical_data(info["key"], from_dt, to_dt, "1minute")
+                if candles:
+                    option_candles[(sym, strike, otype)] = candles
+            except Exception:
+                pass
+        pct = min(100, (i + batch_size) / len(opt_list) * 100)
+        print(f"  Fetched {min(i + batch_size, len(opt_list))}/{len(opt_list)} ({pct:.0f}%)", end="\r")
+        await asyncio.sleep(0.3)
+
+    print(f"\nGot option candles for {len(option_candles)} options")
+
+    # ── Helper: get option price at time ──
+    def get_option_price_at(sym, strike, otype, target_time):
+        key = (sym, strike, otype)
+        candles = option_candles.get(key, [])
+        best = None
+        for c in candles:
+            ts = c.get("ts") or c.get("date") or c.get("timestamp")
+            if isinstance(ts, str):
+                ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            if hasattr(ts, "astimezone"):
+                ts = ts.astimezone(IST)
+            ct = ts.replace(tzinfo=None) if ts.tzinfo else ts
+            tt = datetime.combine(TODAY, target_time)
+            if ct <= tt:
+                best = c["close"]
+            else:
+                break
+        return best
+
+    def get_option_candles_after(sym, strike, otype, entry_time):
+        """Get all option candles from entry_time onwards (for SL/floor simulation)."""
+        key = (sym, strike, otype)
+        candles = option_candles.get(key, [])
+        result = []
+        for c in candles:
+            ts = c.get("ts") or c.get("date") or c.get("timestamp")
+            if isinstance(ts, str):
+                ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            if hasattr(ts, "astimezone"):
+                ts = ts.astimezone(IST)
+            ct = ts.replace(tzinfo=None) if ts.tzinfo else ts
+            et = datetime.combine(TODAY, entry_time)
+            if ct >= et:
+                result.append({"time": ct, **{k: c[k] for k in ("open", "high", "low", "close")}})
+        return result
+
+    # ── Step 5: Simulate trades with SL + floor logic ──
+    def find_atm_strike(sym, ltp, otype):
+        """Find the ATM strike for sym closest to ltp."""
+        strikes = option_keys.get(sym, {})
+        if not strikes:
+            return None
+        valid = [s for s in strikes if otype in strikes[s]]
+        if not valid:
+            return None
+        return min(valid, key=lambda s: abs(s - ltp))
+
+    def simulate_trade(sym, strike, otype, entry_time, lot_qty):
+        """Simulate a trade from entry_time, return exit info."""
+        entry_price = get_option_price_at(sym, strike, otype, entry_time)
+        if not entry_price or entry_price <= 0:
+            return None
+
+        sl_price = entry_price * (1 - SL_PCT)
+        sl_cap = entry_price - (MAX_SL / lot_qty)
+        sl = max(sl_price, sl_cap)
+
+        candles_after = get_option_candles_after(sym, strike, otype, entry_time)
+        if not candles_after:
+            return None
+
+        peak_pnl = 0
+        locked_floor = 0
+        exit_price = None
+        exit_time = None
+        exit_reason = None
+
+        for c in candles_after:
+            # Check SL (low touches SL)
+            current_low_pnl = (c["low"] - entry_price) * lot_qty
+            current_high_pnl = (c["high"] - entry_price) * lot_qty
+            current_close_pnl = (c["close"] - entry_price) * lot_qty
+
+            # Update peak
+            peak_pnl = max(peak_pnl, current_high_pnl)
+
+            # Check floor
+            new_floor = get_stepped_floor(peak_pnl)
+            if new_floor > locked_floor:
+                locked_floor = new_floor
+
+            # SL hit
+            if c["low"] <= sl:
+                exit_price = sl
+                exit_time = c["time"]
+                exit_reason = "max_loss_cap"
+                break
+
+            # Floor exit: close drops to or below locked floor
+            if locked_floor > 0 and current_close_pnl <= locked_floor:
+                exit_price = c["close"]
+                exit_time = c["time"]
+                exit_reason = f"floor_{locked_floor}"
+                break
+
+        # If no exit, close at 15:25 (EOD)
+        if exit_price is None:
+            last = candles_after[-1] if candles_after else None
+            if last:
+                exit_price = last["close"]
+                exit_time = last["time"]
+                exit_reason = "eod_close"
+
+        if exit_price is None:
+            return None
+
+        gross_pnl = (exit_price - entry_price) * lot_qty
+        charges = max(100, abs(gross_pnl) * 0.02)  # rough 2% charges estimate
+        net_pnl = gross_pnl - charges
+
+        return {
+            "symbol": f"{sym} {int(strike)} {otype}",
+            "entry_price": round(entry_price, 2),
+            "exit_price": round(exit_price, 2),
+            "qty": lot_qty,
+            "gross_pnl": round(gross_pnl, 2),
+            "net_pnl": round(net_pnl, 2),
+            "peak_pnl": round(peak_pnl, 2),
+            "locked_floor": locked_floor,
+            "entry_time": entry_time.strftime("%H:%M"),
+            "exit_time": exit_time.strftime("%H:%M") if hasattr(exit_time, "strftime") else str(exit_time),
+            "exit_reason": exit_reason,
+        }
+
+    # ── Run simulation ──
+    print("\n" + "=" * 80)
+    print("  OEH BACKTEST — 12 Oct 2026 — WITH RE-ENTRIES")
+    print("=" * 80)
+
+    oeh_trades = []
+    oeh_exited_symbols = set()  # track symbols that already exited (for re-entry)
+    oeh_open_symbols = set()    # currently open
+    oeh_capital = OEH_CAPITAL
+    oeh_all_entries = set()     # (sym, scan_time) to avoid duplicate processing
+
+    for st in scan_times:
+        cands = oeh_candidates_by_time.get(st, [])
+        if not cands:
+            continue
+
+        for c in cands:
+            sym = c["symbol"]
+            if sym in oeh_open_symbols:
+                continue  # already have an open position
+
+            # Find ATM strike
+            strike = find_atm_strike(sym, c["ltp"], "PE")
+            if strike is None:
+                continue
+
+            # Check if we have option candle data
+            if (sym, strike, "PE") not in option_candles:
+                continue
+
+            lot = lot_sizes.get(sym, 1) * 2
+            entry_premium = get_option_price_at(sym, strike, "PE", st)
+            if not entry_premium or entry_premium < 2:
+                continue
+
+            trade_cost = entry_premium * lot
+            if trade_cost > oeh_capital:
+                continue
+
+            is_reentry = sym in oeh_exited_symbols
+            trade = simulate_trade(sym, strike, "PE", st, lot)
+            if trade is None:
+                continue
+
+            trade["is_reentry"] = is_reentry
+            trade["scan_time"] = st.strftime("%H:%M")
+            oeh_trades.append(trade)
+            oeh_capital -= trade_cost
+            oeh_open_symbols.add(sym)
+
+            # Process exit
+            oeh_capital += trade["exit_price"] * lot
+            oeh_open_symbols.discard(sym)
+            oeh_exited_symbols.add(sym)
+
+    # Print OEH results
+    print(f"\n{'Symbol':<25} {'Entry':>7} {'Exit':>7} {'Qty':>5} {'Gross':>8} {'Net':>8} "
+          f"{'Peak':>7} {'Floor':>6} {'In':>5} {'Out':>5} {'Reason':<15} {'Re?'}")
+    print("-" * 120)
+
+    oeh_total_net = 0
+    oeh_total_gross = 0
+    oeh_reentry_net = 0
+    oeh_wins = 0
+    oeh_losses = 0
+    oeh_reentry_count = 0
+
+    for t in oeh_trades:
+        re_tag = "RE" if t.get("is_reentry") else ""
+        print(f"{t['symbol']:<25} {t['entry_price']:>7.2f} {t['exit_price']:>7.2f} {t['qty']:>5} "
+              f"{t['gross_pnl']:>+8.0f} {t['net_pnl']:>+8.0f} {t['peak_pnl']:>+7.0f} "
+              f"{t['locked_floor']:>6} {t['scan_time']:>5} {t['exit_time']:>5} "
+              f"{t['exit_reason']:<15} {re_tag}")
+        oeh_total_net += t["net_pnl"]
+        oeh_total_gross += t["gross_pnl"]
+        if t["net_pnl"] > 0:
+            oeh_wins += 1
+        else:
+            oeh_losses += 1
+        if t.get("is_reentry"):
+            oeh_reentry_net += t["net_pnl"]
+            oeh_reentry_count += 1
+
+    print("-" * 120)
+    print(f"OEH TOTAL: {len(oeh_trades)} trades | Gross: ₹{oeh_total_gross:+,.0f} | "
+          f"Net: ₹{oeh_total_net:+,.0f} | Wins: {oeh_wins} | Losses: {oeh_losses}")
+    print(f"OEH RE-ENTRIES: {oeh_reentry_count} trades | Net: ₹{oeh_reentry_net:+,.0f}")
+    print(f"OEH WITHOUT RE-ENTRIES: Net: ₹{oeh_total_net - oeh_reentry_net:+,.0f}")
+
+    # ── OEL ──
+    print("\n" + "=" * 80)
+    print("  OEL BACKTEST — 12 Oct 2026 — WITH RE-ENTRIES")
+    print("=" * 80)
+
+    oel_trades = []
+    oel_exited_symbols = set()
+    oel_open_symbols = set()
+    oel_capital = OEL_CAPITAL
+
+    for st in scan_times:
+        cands = oel_candidates_by_time.get(st, [])
+        if not cands:
+            continue
+
+        for c in cands:
+            sym = c["symbol"]
+            if sym in oel_open_symbols:
+                continue
+
+            strike = find_atm_strike(sym, c["ltp"], "CE")
+            if strike is None:
+                continue
+
+            if (sym, strike, "CE") not in option_candles:
+                continue
+
+            lot = lot_sizes.get(sym, 1) * 2
+            entry_premium = get_option_price_at(sym, strike, "CE", st)
+            if not entry_premium or entry_premium < 2:
+                continue
+
+            trade_cost = entry_premium * lot
+            if trade_cost > oel_capital:
+                continue
+
+            is_reentry = sym in oel_exited_symbols
+            trade = simulate_trade(sym, strike, "CE", st, lot)
+            if trade is None:
+                continue
+
+            trade["is_reentry"] = is_reentry
+            trade["scan_time"] = st.strftime("%H:%M")
+            oel_trades.append(trade)
+            oel_capital -= trade_cost
+            oel_open_symbols.add(sym)
+
+            # Process exit
+            oel_capital += trade["exit_price"] * lot
+            oel_open_symbols.discard(sym)
+            oel_exited_symbols.add(sym)
+
+    # Print OEL results
+    print(f"\n{'Symbol':<25} {'Entry':>7} {'Exit':>7} {'Qty':>5} {'Gross':>8} {'Net':>8} "
+          f"{'Peak':>7} {'Floor':>6} {'In':>5} {'Out':>5} {'Reason':<15} {'Re?'}")
+    print("-" * 120)
+
+    oel_total_net = 0
+    oel_total_gross = 0
+    oel_reentry_net = 0
+    oel_wins = 0
+    oel_losses = 0
+    oel_reentry_count = 0
+
+    for t in oel_trades:
+        re_tag = "RE" if t.get("is_reentry") else ""
+        print(f"{t['symbol']:<25} {t['entry_price']:>7.2f} {t['exit_price']:>7.2f} {t['qty']:>5} "
+              f"{t['gross_pnl']:>+8.0f} {t['net_pnl']:>+8.0f} {t['peak_pnl']:>+7.0f} "
+              f"{t['locked_floor']:>6} {t['scan_time']:>5} {t['exit_time']:>5} "
+              f"{t['exit_reason']:<15} {re_tag}")
+        oel_total_net += t["net_pnl"]
+        oel_total_gross += t["gross_pnl"]
+        if t["net_pnl"] > 0:
+            oel_wins += 1
+        else:
+            oel_losses += 1
+        if t.get("is_reentry"):
+            oel_reentry_net += t["net_pnl"]
+            oel_reentry_count += 1
+
+    print("-" * 120)
+    print(f"OEL TOTAL: {len(oel_trades)} trades | Gross: ₹{oel_total_gross:+,.0f} | "
+          f"Net: ₹{oel_total_net:+,.0f} | Wins: {oel_wins} | Losses: {oel_losses}")
+    print(f"OEL RE-ENTRIES: {oel_reentry_count} trades | Net: ₹{oel_reentry_net:+,.0f}")
+    print(f"OEL WITHOUT RE-ENTRIES: Net: ₹{oel_total_net - oel_reentry_net:+,.0f}")
+
+    # ── Grand Summary ──
+    print("\n" + "=" * 80)
+    print("  GRAND SUMMARY")
+    print("=" * 80)
+    total_trades = len(oeh_trades) + len(oel_trades)
+    total_net = oeh_total_net + oel_total_net
+    total_reentry_net = oeh_reentry_net + oel_reentry_net
+    total_reentry_count = oeh_reentry_count + oel_reentry_count
+    print(f"Total trades: {total_trades} | Total Net PnL: ₹{total_net:+,.0f}")
+    print(f"Re-entry trades: {total_reentry_count} | Re-entry Net PnL: ₹{total_reentry_net:+,.0f}")
+    print(f"Without re-entries: ₹{total_net - total_reentry_net:+,.0f}")
+    print(f"\nVerdict: Re-entries {'HELPED' if total_reentry_net > 0 else 'HURT'} "
+          f"by ₹{abs(total_reentry_net):,.0f}")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
