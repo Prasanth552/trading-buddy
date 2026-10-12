@@ -4051,7 +4051,7 @@ async def start_listener() -> None:
                 scheduled = now.replace(hour=h, minute=m, second=0, microsecond=0)
                 if now > scheduled:
                     mins_late = (now - scheduled).total_seconds() / 60
-                    if mins_late > 30:
+                    if mins_late > 300:
                         log.info("[OEL] Missed scheduled %s by %.0f min — too stale, skipping", OEL_RUN_TIME, mins_late)
                     else:
                         log.info("[OEL] Missed scheduled %s run — catching up now", OEL_RUN_TIME)
@@ -4137,8 +4137,8 @@ async def start_listener() -> None:
                     mins_late = (now - scheduled).total_seconds() / 60
                     rescan_t = now.replace(hour=h2, minute=m2, second=0, microsecond=0)
                     rescan_late = (now - rescan_t).total_seconds() / 60 if now > rescan_t else -1
-                    if mins_late <= 30:
-                        log.info("[ORB] Missed scheduled %s run — catching up now", ORB_RUN_TIME)
+                    if mins_late <= 300:
+                        log.info("[ORB] Missed scheduled %s run — catching up now (%.0f min late)", ORB_RUN_TIME, mins_late)
                         try:
                             await _run_orb_scan()
                         except Exception as exc:
@@ -4149,7 +4149,7 @@ async def start_listener() -> None:
                                 await _run_orb_scan()
                             except Exception as exc:
                                 log.error("[ORB] Catch-up rescan failed: %s", exc, exc_info=True)
-                    elif now > rescan_t and rescan_late <= 30:
+                    elif now > rescan_t and rescan_late <= 300:
                         log.info("[ORB] Initial %s too stale (%.0f min), but rescan %s only %.0f min late — running",
                                  ORB_RUN_TIME, mins_late, ORB_RESCAN_TIME, rescan_late)
                         try:
