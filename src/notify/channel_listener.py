@@ -2181,8 +2181,8 @@ async def _run_oeh_scan():
 
     candidates.sort(key=lambda x: x["drop_pct"], reverse=True)
 
-    # Initialize capital pool (only on first scan of the day)
-    if _oeh_capital_avail <= 0 and not _oeh_capital_locked:
+    # Reset capital pool when no trades are active (all closed/freed)
+    if not _oeh_capital_locked:
         _oeh_init_capital()
 
     summary_lines = []
