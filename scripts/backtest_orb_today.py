@@ -316,7 +316,7 @@ async def main():
             if not is_entry_candle and locked_floor > 0:
                 current_low_pnl = (c["low"] - entry_price) * lot_qty
                 if current_low_pnl <= locked_floor:
-                    exit_price = c["close"]
+                    exit_price = entry_price + (locked_floor / lot_qty)
                     exit_time = c["time"]
                     exit_reason = f"floor_{locked_floor}"
                     break

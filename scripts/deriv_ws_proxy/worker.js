@@ -1,44 +1,78 @@
 // Cloudflare Worker — WebSocket proxy to Deriv API
-// Deploy: npx wrangler deploy
-//
-// Your bot connects to: wss://YOUR_WORKER.workers.dev/websockets/v3?app_id=YOUR_APP_ID
-// The worker forwards it to: wss://ws.derivws.com/websockets/v3?app_id=YOUR_APP_ID
+// Deploy: cd scripts/deriv_ws_proxy && wrangler deploy
 
 export default {
   async fetch(request) {
     const url = new URL(request.url);
 
-    // Health check
     if (url.pathname === "/health") {
       return new Response("ok");
     }
 
-    // Only handle WebSocket upgrades
+    // Debug endpoint — test if Worker can reach Deriv
+    if (url.pathname === "/test-upstream") {
+      const targets = [
+        "https://ws.derivws.com",
+        "https://ws.binaryws.com",
+        "https://green.derivws.com",
+        "https://blue.derivws.com",
+      ];
+      const results = [];
+      for (const t of targets) {
+        try {
+          const r = await fetch(t, { headers: { "User-Agent": "Mozilla/5.0" } });
+          results.push(`${t}: ${r.status}`);
+        } catch (e) {
+          results.push(`${t}: ${e.message}`);
+        }
+      }
+      return new Response(results.join("\n"));
+    }
+
     const upgrade = request.headers.get("Upgrade");
     if (!upgrade || upgrade.toLowerCase() !== "websocket") {
       return new Response("WebSocket proxy for Deriv API. Connect via wss://", { status: 426 });
     }
 
-    // Build target URL preserving query params (app_id etc)
-    const target = `wss://ws.derivws.com${url.pathname}${url.search}`;
+    // Try multiple upstream endpoints
+    const upstreams = [
+      `https://ws.derivws.com${url.pathname}${url.search}`,
+      `https://ws.binaryws.com${url.pathname}${url.search}`,
+      `https://green.derivws.com${url.pathname}${url.search}`,
+    ];
 
-    // Connect to Deriv
-    const derivWs = new WebSocket(target);
+    let derivResp = null;
+    let derivWs = null;
 
-    // Create client-facing WebSocket pair
+    for (const target of upstreams) {
+      try {
+        derivResp = await fetch(target, {
+          headers: {
+            Upgrade: "websocket",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            Origin: "https://app.deriv.com",
+          },
+        });
+        derivWs = derivResp.webSocket;
+        if (derivWs) break;
+      } catch (_) {}
+    }
+
+    if (!derivWs) {
+      return new Response("Could not connect to Deriv upstream", { status: 502 });
+    }
+
+    derivWs.accept();
+
     const [client, server] = Object.values(new WebSocketPair());
-
-    // Wire server side to Deriv
     server.accept();
 
     derivWs.addEventListener("message", (event) => {
       try { server.send(event.data); } catch (_) {}
     });
-
     derivWs.addEventListener("close", (event) => {
-      server.close(event.code, event.reason);
+      server.close(event.code || 1000, event.reason || "upstream closed");
     });
-
     derivWs.addEventListener("error", () => {
       server.close(1011, "upstream error");
     });
@@ -46,9 +80,8 @@ export default {
     server.addEventListener("message", (event) => {
       try { derivWs.send(event.data); } catch (_) {}
     });
-
     server.addEventListener("close", (event) => {
-      derivWs.close(event.code, event.reason);
+      derivWs.close(event.code || 1000, event.reason || "client closed");
     });
 
     return new Response(null, { status: 101, webSocket: client });
