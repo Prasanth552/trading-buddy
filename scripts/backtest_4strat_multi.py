@@ -179,14 +179,17 @@ async def run_one_day(ud, DATE, universe, eq_keys, lot_sizes, option_keys, strik
         rsi = calc_rsi(closes5, RSI_PERIOD)
         avg_vol = sum(vols5) / max(1, len(vols5))
 
-        # VWAP Pullback (scan 1-min candles)
+        # VWAP Pullback (running VWAP, O(n))
+        r_cv, r_ctv = 0, 0
         for idx, c1 in enumerate(cm):
+            tp = (c1["high"] + c1["low"] + c1["close"]) / 3
+            v = c1.get("volume", 0) or 1
+            r_cv += v
+            r_ctv += tp * v
+            vwap = r_ctv / r_cv
             ct = parse_ts(c1)
             t = ct.time()
             if t < dtime(9, 45) or t > TIME_CUTOFF:
-                continue
-            vwap = calc_vwap(cm, t, DATE)
-            if not vwap or vwap <= 0:
                 continue
             p = c1["close"]
             d = (p - vwap) / vwap * 100
