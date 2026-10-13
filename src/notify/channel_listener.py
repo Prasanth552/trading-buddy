@@ -216,7 +216,7 @@ AFT_BLOCKLIST = {"GODREJCP", "GRASIM"}
 _peak_net: dict[int, float] = {}
 
 # OEH capital tracking — in-memory, resets on restart
-_oeh_capital_avail: float = 0.0
+_oeh_capital_avail: float = OEH_CAPITAL
 _oeh_capital_locked: dict[int, float] = {}
 
 def _oeh_init_capital():
@@ -271,7 +271,7 @@ def _oeh_daily_cap_hit() -> bool:
     return False
 
 # OEL capital tracking — in-memory, resets on restart (mirrors OEH)
-_oel_capital_avail: float = 0.0
+_oel_capital_avail: float = OEL_CAPITAL
 _oel_capital_locked: dict[int, float] = {}
 
 def _oel_init_capital():
@@ -326,7 +326,7 @@ def _oel_daily_cap_hit() -> bool:
     return False
 
 # ORB capital tracking — in-memory, resets on restart
-_orb_capital_avail: float = 0.0
+_orb_capital_avail: float = ORB_CAPITAL
 _orb_capital_locked: dict[int, float] = {}
 
 def _orb_init_capital():
@@ -3999,6 +3999,8 @@ async def start_listener() -> None:
                 else:
                     log.debug("[OEH] Rescan skipped — only ₹%.0f available", _oeh_capital_avail)
 
+            first_run = True  # reset so next day's scan gets scheduled
+
     asyncio.get_event_loop().create_task(_oeh_scheduler())
     log.info("OEH scanner started — runs daily at %s IST", OEH_RUN_TIME)
 
@@ -4197,6 +4199,8 @@ async def start_listener() -> None:
                         log.error("[ORB] Rescan failed: %s", exc, exc_info=True)
                 else:
                     log.debug("[ORB] Rescan skipped — only ₹%.0f available", _orb_capital_avail)
+
+            first_run = True  # reset so next day's scan gets scheduled
 
     asyncio.get_event_loop().create_task(_orb_scheduler())
     log.info("ORB scanner started — runs at %s + %s IST (capital: ₹%.0f)",
