@@ -121,7 +121,10 @@ def calc_vwap(candles_1m, up_to_time, date):
 
 async def _fetch_one(ud, sym, key, from_dt, to_dt):
     try:
-        c = await asyncio.to_thread(ud.historical_data, key, from_dt, to_dt, "1minute")
+        c = await asyncio.wait_for(
+            asyncio.to_thread(ud.historical_data, key, from_dt, to_dt, "1minute"),
+            timeout=15
+        )
         if c and len(c) > 5:
             return (sym, c)
     except Exception:
@@ -129,11 +132,19 @@ async def _fetch_one(ud, sym, key, from_dt, to_dt):
     return None
 
 
-async def _fetch_batch(ud, pairs, from_dt, to_dt, concurrency=15):
+async def _fetch_batch(ud, pairs, from_dt, to_dt, concurrency=15, label=""):
     sem = asyncio.Semaphore(concurrency)
+    done = 0
+    total = len(pairs)
     async def _wrapped(sym, key):
+        nonlocal done
         async with sem:
-            return await _fetch_one(ud, sym, key, from_dt, to_dt)
+            r = await _fetch_one(ud, sym, key, from_dt, to_dt)
+            done += 1
+            if done % 50 == 0 or done == total:
+                sys.stdout.write(f"  [{label}] {done}/{total}\n")
+                sys.stdout.flush()
+            return r
     tasks = [_wrapped(sym, key) for sym, key in pairs]
     results = await asyncio.gather(*tasks)
     return {sym: c for r in results if r for sym, c in [r]}
@@ -145,7 +156,7 @@ async def run_one_day(ud, DATE, universe, eq_keys, lot_sizes, option_keys, strik
 
     # Fetch equity 1-min candles — concurrent
     syms_with_keys = [(s, eq_keys[s]) for s in universe if s in eq_keys]
-    equity_candles = await _fetch_batch(ud, syms_with_keys, from_dt, to_dt, concurrency=15)
+    equity_candles = await _fetch_batch(ud, syms_with_keys, from_dt, to_dt, concurrency=15, label="EQ")
 
     if len(equity_candles) < 50:
         return None  # likely holiday
@@ -251,6 +262,10 @@ async def run_one_day(ud, DATE, universe, eq_keys, lot_sizes, option_keys, strik
         valid = [s for s in strikes if otype in strikes[s]]
         return min(valid, key=lambda s: abs(s - ltp)) if valid else None
 
+    sig_counts = " ".join(f"{k}={len(v)}" for k, v in signals.items())
+    sys.stdout.write(f"  signals: {sig_counts}\n")
+    sys.stdout.flush()
+
     # Collect needed options
     needed = set()
     for k, sigs in signals.items():
@@ -258,6 +273,9 @@ async def run_one_day(ud, DATE, universe, eq_keys, lot_sizes, option_keys, strik
             s = find_atm(sym, p, ot)
             if s is not None:
                 needed.add((sym, s, ot))
+
+    sys.stdout.write(f"  unique options: {len(needed)}\n")
+    sys.stdout.flush()
 
     # Fetch option candles — concurrent
     opt_pairs = []
@@ -268,7 +286,7 @@ async def run_one_day(ud, DATE, universe, eq_keys, lot_sizes, option_keys, strik
             label = f"{sym}_{strike}_{ot}"
             opt_pairs.append((label, info["key"]))
             opt_map[label] = (sym, strike, ot)
-    raw = await _fetch_batch(ud, opt_pairs, from_dt, to_dt, concurrency=15)
+    raw = await _fetch_batch(ud, opt_pairs, from_dt, to_dt, concurrency=15, label="OPT")
     opt_candles = {}
     for label, candles in raw.items():
         key = opt_map.get(label)
