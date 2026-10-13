@@ -489,8 +489,10 @@ async def main():
         g = grand[n]
         wr = g["wins"] / max(1, g["trades"]) * 100
         avg = g["pnl"] / max(1, trading_days)
-        print(f"{n:<10} {g['trades']:>6} {'₹'+f'{g[\"pnl\"]:+,}':>12} {g['wins']:>5} {g['losses']:>5} "
-              f"{wr:>4.0f}% {g['days_pos']:>5} {g['days_neg']:>5} {'₹'+f'{avg:+,.0f}':>10}")
+        pnl_str = f"₹{g['pnl']:+,}"
+        avg_str = f"₹{avg:+,.0f}"
+        print(f"{n:<10} {g['trades']:>6} {pnl_str:>12} {g['wins']:>5} {g['losses']:>5} "
+              f"{wr:>4.0f}% {g['days_pos']:>5} {g['days_neg']:>5} {avg_str:>10}")
     print("-" * 75)
     best = max(names, key=lambda n: grand[n]["pnl"])
     print(f"\n✅ Best: {best} → ₹{grand[best]['pnl']:+,} total | ₹{grand[best]['pnl']/max(1,trading_days):+,.0f}/day")
