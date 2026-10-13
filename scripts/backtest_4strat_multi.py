@@ -119,24 +119,33 @@ def calc_vwap(candles_1m, up_to_time, date):
     return ctv / cv if cv > 0 else None
 
 
+async def _fetch_one(ud, sym, key, from_dt, to_dt):
+    try:
+        c = await asyncio.to_thread(ud.historical_data, key, from_dt, to_dt, "1minute")
+        if c and len(c) > 5:
+            return (sym, c)
+    except Exception:
+        pass
+    return None
+
+
+async def _fetch_batch(ud, pairs, from_dt, to_dt, concurrency=15):
+    sem = asyncio.Semaphore(concurrency)
+    async def _wrapped(sym, key):
+        async with sem:
+            return await _fetch_one(ud, sym, key, from_dt, to_dt)
+    tasks = [_wrapped(sym, key) for sym, key in pairs]
+    results = await asyncio.gather(*tasks)
+    return {sym: c for r in results if r for sym, c in [r]}
+
+
 async def run_one_day(ud, DATE, universe, eq_keys, lot_sizes, option_keys, strike_steps):
     from_dt = datetime.combine(DATE, dtime(9, 15))
     to_dt = datetime.combine(DATE, dtime(15, 30))
 
-    # Fetch equity 1-min candles
-    equity_candles = {}
-    batch_size = 25
+    # Fetch equity 1-min candles — concurrent
     syms_with_keys = [(s, eq_keys[s]) for s in universe if s in eq_keys]
-    for i in range(0, len(syms_with_keys), batch_size):
-        batch = syms_with_keys[i:i + batch_size]
-        for sym, key in batch:
-            try:
-                c = ud.historical_data(key, from_dt, to_dt, "1minute")
-                if c and len(c) > 5:
-                    equity_candles[sym] = c
-            except Exception:
-                pass
-        await asyncio.sleep(0.1)
+    equity_candles = await _fetch_batch(ud, syms_with_keys, from_dt, to_dt, concurrency=15)
 
     if len(equity_candles) < 50:
         return None  # likely holiday
@@ -250,22 +259,21 @@ async def run_one_day(ud, DATE, universe, eq_keys, lot_sizes, option_keys, strik
             if s is not None:
                 needed.add((sym, s, ot))
 
-    # Fetch option candles
+    # Fetch option candles — concurrent
+    opt_pairs = []
+    opt_map = {}  # key_str → (sym, strike, ot)
+    for sym, strike, ot in needed:
+        info = option_keys.get(sym, {}).get(strike, {}).get(ot)
+        if info:
+            label = f"{sym}_{strike}_{ot}"
+            opt_pairs.append((label, info["key"]))
+            opt_map[label] = (sym, strike, ot)
+    raw = await _fetch_batch(ud, opt_pairs, from_dt, to_dt, concurrency=15)
     opt_candles = {}
-    ol = list(needed)
-    for i in range(0, len(ol), batch_size):
-        batch = ol[i:i + batch_size]
-        for sym, strike, ot in batch:
-            info = option_keys.get(sym, {}).get(strike, {}).get(ot)
-            if not info:
-                continue
-            try:
-                c = ud.historical_data(info["key"], from_dt, to_dt, "1minute")
-                if c:
-                    opt_candles[(sym, strike, ot)] = c
-            except Exception:
-                pass
-        await asyncio.sleep(0.1)
+    for label, candles in raw.items():
+        key = opt_map.get(label)
+        if key:
+            opt_candles[key] = candles
 
     # Simulate trade
     def sim(sym, strike, ot, entry_time, lot_qty):
