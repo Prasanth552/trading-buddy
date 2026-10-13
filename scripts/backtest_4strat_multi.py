@@ -8,7 +8,7 @@ Usage:
         --from 2026-09-01 --to 2026-09-30
 """
 
-import asyncio, sys, os, argparse
+import asyncio, sys, os, argparse, time as _time
 from datetime import datetime, timedelta, time as dtime, date as dt_date
 from zoneinfo import ZoneInfo
 from collections import defaultdict
@@ -392,7 +392,7 @@ async def main():
 
     ud = UpstoxData(access_token=token)
     master = ud._load_master()
-    print(f"Loaded {len(master)} instruments")
+    print(f"Loaded {len(master)} instruments", flush=True)
 
     import re as _re
     eq_keys, lot_sizes, fo_symbols = {}, {}, set()
@@ -438,7 +438,7 @@ async def main():
         else:
             strike_steps[sym] = 50
 
-    print(f"Universe: {len(universe)} stocks")
+    print(f"Universe: {len(universe)} stocks", flush=True)
 
     # ── Day loop ──
     names = ["VWAP", "EMA", "RSI", "MOM"]
@@ -452,17 +452,21 @@ async def main():
             d += timedelta(days=1)
             continue
 
-        print(f"\n{'='*60}")
-        print(f"  {d.strftime('%a %d %b %Y')}")
-        print(f"{'='*60}")
+        t0 = _time.time()
+        sys.stdout.write(f"\n{'='*60}\n  {d.strftime('%a %d %b %Y')} ... ")
+        sys.stdout.flush()
 
         res = await run_one_day(ud, d, universe, eq_keys, lot_sizes, option_keys, strike_steps)
+        elapsed = _time.time() - t0
         if res is None:
-            print(f"  HOLIDAY / NO DATA — skipped")
+            sys.stdout.write(f"HOLIDAY ({elapsed:.0f}s)\n")
+            sys.stdout.flush()
             d += timedelta(days=1)
             continue
 
         trading_days += 1
+        sys.stdout.write(f"done ({elapsed:.0f}s)\n")
+        sys.stdout.flush()
         row = {"date": d}
         for n in names:
             trades = res.get(n, [])
@@ -472,7 +476,7 @@ async def main():
             wr = w / max(1, len(trades)) * 100
             row[n] = tp
             row[f"{n}_t"] = len(trades)
-            print(f"  {n:<6} {len(trades):>3} trades | ₹{tp:>+8,} | W/L {w}/{l} ({wr:.0f}%)")
+            sys.stdout.write(f"  {n:<6} {len(trades):>3} trades | ₹{tp:>+8,} | W/L {w}/{l} ({wr:.0f}%)\n")
             grand[n]["pnl"] += tp
             grand[n]["trades"] += len(trades)
             grand[n]["wins"] += w
@@ -481,6 +485,7 @@ async def main():
                 grand[n]["days_pos"] += 1
             elif tp < 0:
                 grand[n]["days_neg"] += 1
+        sys.stdout.flush()
         daily_rows.append(row)
         d += timedelta(days=1)
 
