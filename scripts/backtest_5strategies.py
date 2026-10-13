@@ -253,7 +253,7 @@ async def main():
                 pass
         pct = min(100, (i + batch_size) / len(syms_with_keys) * 100)
         print(f"  {min(i+batch_size, len(syms_with_keys))}/{len(syms_with_keys)} ({pct:.0f}%)", end="  \r")
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.15)
     print(f"\nGot candles for {len(equity_candles)} stocks")
 
     # ── Helpers ──
@@ -435,7 +435,6 @@ async def main():
     for name in signals:
         seen = defaultdict(int)
         filtered = []
-        # sort by time
         signals[name].sort(key=lambda x: x[2])
         for sig in signals[name]:
             sym = sig[0]
@@ -447,7 +446,7 @@ async def main():
     for name, sigs in signals.items():
         print(f"  {name} (filtered): {len(sigs)} signals")
 
-    # ── Collect all needed option instruments ──
+    # ── Collect UNIQUE option instruments across all strategies (deduplicated) ──
     all_option_syms = set()
     for name, sigs in signals.items():
         for sym, otype, entry_time, price, reason in sigs:
@@ -472,7 +471,7 @@ async def main():
                 pass
         pct = min(100, (i + batch_size) / len(opt_list) * 100)
         print(f"  {min(i+batch_size, len(opt_list))}/{len(opt_list)} ({pct:.0f}%)", end="  \r")
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.15)  # faster: 150ms vs 300ms
     print(f"\nGot option candles for {len(option_candles)} options")
 
     # ── Simulate trade (reused from proven backtest) ──
@@ -554,21 +553,39 @@ async def main():
             "entry_time": entry_time.strftime("%H:%M"),
             "exit_time": exit_time.strftime("%H:%M") if hasattr(exit_time, "strftime") else str(exit_time),
             "exit_reason": exit_reason,
+            "_exit_dt": exit_time,
         }
 
     # ══════════════════════════════════════════════════════════════════
-    #  RUN EACH STRATEGY
+    #  RUN EACH STRATEGY — WITH CONCURRENT CAPITAL TRACKING
     # ══════════════════════════════════════════════════════════════════
 
     strategy_results = {}
 
     for strat_name, sigs in signals.items():
         trades = []
-        capital = CAPITAL_PER_STRATEGY
+        capital_avail = CAPITAL_PER_STRATEGY
+        # Track open positions: list of (exit_datetime, trade_cost, exit_price, qty)
+        open_positions = []
         sl_blocked = set()
+        open_syms = set()
 
         for sym, otype, entry_time, price, reason in sigs:
+            entry_dt = datetime.combine(DATE, entry_time)
+
+            # Free capital from positions that have exited by now
+            still_open = []
+            for pos in open_positions:
+                if pos["exit_dt"] <= entry_dt:
+                    capital_avail += pos["exit_price"] * pos["qty"]
+                    open_syms.discard(pos["sym"])
+                else:
+                    still_open.append(pos)
+            open_positions = still_open
+
             if SL_COOLDOWN and sym in sl_blocked:
+                continue
+            if sym in open_syms:
                 continue
 
             strike = find_atm_strike(sym, price, otype)
@@ -578,11 +595,10 @@ async def main():
                 continue
 
             lot = lot_sizes.get(sym, 1) * 2
-            # Check entry price
             entry_premium = None
             for c in option_candles[(sym, strike, otype)]:
                 ct = parse_ts(c)
-                if ct <= datetime.combine(DATE, entry_time):
+                if ct <= entry_dt:
                     entry_premium = c["close"]
                 else:
                     break
@@ -590,7 +606,7 @@ async def main():
                 continue
 
             trade_cost = entry_premium * lot
-            if trade_cost > capital:
+            if trade_cost > capital_avail:
                 continue
 
             trade = simulate_trade(sym, strike, otype, entry_time, lot)
@@ -599,8 +615,24 @@ async def main():
 
             trade["reason"] = reason
             trades.append(trade)
-            capital -= trade_cost
-            capital += trade["exit_price"] * trade["qty"]
+            capital_avail -= trade_cost
+            open_syms.add(sym)
+
+            # Parse exit time to track when capital frees
+            exit_dt = entry_dt  # fallback
+            if hasattr(trade.get("_exit_dt"), "hour"):
+                exit_dt = trade["_exit_dt"]
+            else:
+                try:
+                    h, m = map(int, trade["exit_time"].split(":"))
+                    exit_dt = datetime.combine(DATE, dtime(h, m))
+                except Exception:
+                    pass
+
+            open_positions.append({
+                "exit_dt": exit_dt, "exit_price": trade["exit_price"],
+                "qty": trade["qty"], "sym": sym,
+            })
 
             if trade["exit_reason"] == "max_loss_cap":
                 sl_blocked.add(sym)
