@@ -3747,7 +3747,38 @@ async def start_listener() -> None:
                         "FROM trades WHERE status = 'OPEN' AND broker_key IS NOT NULL"
                     ).fetchall()
                 if not rows:
+                    # Check for trades closed externally (e.g. from dashboard)
+                    for _cap_locked, _cap_free, _cap_pnl, _tag in [
+                        (_oeh_capital_locked, _oeh_free, _oeh_record_pnl, "OEH"),
+                        (_oel_capital_locked, _oel_free, _oel_record_pnl, "OEL"),
+                        (_orb_capital_locked, _orb_free, _orb_record_pnl, "ORB"),
+                    ]:
+                        if _cap_locked:
+                            with db.get_conn() as conn2:
+                                for tid in list(_cap_locked):
+                                    st = conn2.execute("SELECT status, pnl FROM trades WHERE id = ?", (tid,)).fetchone()
+                                    if st and st["status"] != "OPEN":
+                                        _cap_free(tid, st["pnl"] or 0)
+                                        _cap_pnl(st["pnl"] or 0)
+                                        log.info("[%s] Detected external close for trade %d, freed capital", _tag, tid)
                     continue
+
+                # Also check locked trades not in the OPEN set (closed externally while others still open)
+                open_ids = {r["id"] for r in rows}
+                for _cap_locked, _cap_free, _cap_pnl, _tag in [
+                    (_oeh_capital_locked, _oeh_free, _oeh_record_pnl, "OEH"),
+                    (_oel_capital_locked, _oel_free, _oel_record_pnl, "OEL"),
+                    (_orb_capital_locked, _orb_free, _orb_record_pnl, "ORB"),
+                ]:
+                    stale = [tid for tid in _cap_locked if tid not in open_ids]
+                    if stale:
+                        with db.get_conn() as conn2:
+                            for tid in stale:
+                                st = conn2.execute("SELECT status, pnl FROM trades WHERE id = ?", (tid,)).fetchone()
+                                if st and st["status"] != "OPEN":
+                                    _cap_free(tid, st["pnl"] or 0)
+                                    _cap_pnl(st["pnl"] or 0)
+                                    log.info("[%s] Detected external close for trade %d, freed capital", _tag, tid)
 
                 keys = {r["broker_key"]: r for r in rows}
                 from src.broker.upstox_data import UpstoxData, load_cached_token
