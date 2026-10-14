@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Debug: show MOM trade details for one day to find what inflates PnL."""
+SLIPPAGE_PER_UNIT = 0.50  # entry slippage (buy higher) + exit slippage (sell lower)
+
 import asyncio, sys, os, argparse
 from datetime import datetime, timedelta, time as dtime, date as dt_date
 from zoneinfo import ZoneInfo
@@ -184,6 +186,7 @@ async def main():
                 break
         if not ep or ep <= 0:
             return None
+        ep += SLIPPAGE_PER_UNIT  # entry slippage: buy higher
         sl = max(ep * (1 - SL_PCT), ep - MAX_SL / lot_qty)
         after = []
         for c in candles:
@@ -210,6 +213,7 @@ async def main():
         if xp is None:
             last = after[-1]
             xp, xt, xr = last["c"], last["time"], "eod"
+        xp -= SLIPPAGE_PER_UNIT  # exit slippage: sell lower
         pnl = (xp - ep) * lot_qty
         return {"pnl": round(pnl), "peak": round(peak), "ep": ep, "xp": xp,
                 "xt": xt, "xr": xr, "qty": lot_qty, "sl": sl,
@@ -256,7 +260,7 @@ async def main():
                 break
         if not ep or ep < 2:
             continue
-        cost = ep * lot
+        cost = (ep + SLIPPAGE_PER_UNIT) * lot
         if cost > cap:
             cap_rejects += 1
             continue
