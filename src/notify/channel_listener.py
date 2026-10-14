@@ -624,6 +624,100 @@ PDHL_UNIVERSE: list[str] = []
 ORF_UNIVERSE: list[str] = []
 AFT_UNIVERSE: list[str] = []
 
+# ---------------------------------------------------------------------------
+# Cached master + precomputed lookups — loaded ONCE, shared by all strategies
+# ---------------------------------------------------------------------------
+_cached_master: list[dict] | None = None
+_cached_master_date: str | None = None
+_cached_eq_keys: dict[str, str] = {}
+_cached_lot_sizes: dict[str, int] = {}
+_cached_option_keys: dict[str, dict] = {}  # {sym: {strike: {CE/PE: {key, expiry}}}}
+_cached_strike_steps: dict[str, float] = {}
+
+
+async def _ensure_master_loaded() -> list[dict]:
+    """Load instrument master in a thread (non-blocking) and cache lookups.
+
+    Returns the master list. Safe to call multiple times — only downloads once per day.
+    """
+    import re as _re
+    from collections import defaultdict
+    from src.broker.upstox_data import UpstoxData, load_cached_token
+
+    global _cached_master, _cached_master_date
+    global _cached_eq_keys, _cached_lot_sizes, _cached_option_keys, _cached_strike_steps
+    global OEH_UNIVERSE, OEL_UNIVERSE, ORB_UNIVERSE, PDHL_UNIVERSE, ORF_UNIVERSE, AFT_UNIVERSE
+
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    today = datetime.now(ZoneInfo(config.TIMEZONE)).date().isoformat()
+
+    if _cached_master is not None and _cached_master_date == today:
+        return _cached_master
+
+    token = load_cached_token()
+    if not token:
+        raise RuntimeError("No Upstox token for today")
+
+    ud = UpstoxData(access_token=token)
+    master = await asyncio.to_thread(ud._load_master)
+
+    eq_keys: dict[str, str] = {}
+    lot_sizes: dict[str, int] = {}
+    option_keys: dict[str, dict] = defaultdict(lambda: defaultdict(dict))
+    sym_strikes: dict[str, set] = defaultdict(set)
+
+    for inst in master:
+        seg = inst.get("segment")
+        if seg == "NSE_EQ":
+            tsym = (inst.get("trading_symbol") or "").upper()
+            if tsym:
+                eq_keys[tsym] = inst.get("instrument_key")
+        elif seg == "NSE_FO":
+            _base = _re.match(r'^([A-Z&]+)', (inst.get("trading_symbol") or "").upper())
+            if _base:
+                _ls = int(inst.get("lot_size") or 0)
+                if _ls > 0:
+                    lot_sizes[_base.group(1)] = _ls
+            ot = inst.get("instrument_type", "").upper()
+            if ot in ("CE", "PE"):
+                strike = float(inst.get("strike_price") or 0)
+                if strike <= 0:
+                    continue
+                asset = (inst.get("asset_symbol") or inst.get("name") or "").upper()
+                if not asset and _base:
+                    asset = _base.group(1)
+                if not asset:
+                    continue
+                ikey = inst.get("instrument_key")
+                expiry = inst.get("expiry")
+                sym_strikes[asset].add(strike)
+                ex = option_keys[asset][strike].get(ot)
+                if ex is None or (expiry and ex.get("expiry") and expiry < ex["expiry"]):
+                    option_keys[asset][strike][ot] = {"key": ikey, "expiry": expiry}
+
+    strike_steps: dict[str, float] = {}
+    for sym, strikes in sym_strikes.items():
+        ss = sorted(strikes)
+        if len(ss) >= 2:
+            strike_steps[sym] = min(ss[j+1] - ss[j] for j in range(min(10, len(ss)-1)))
+        else:
+            strike_steps[sym] = 50
+
+    _cached_master = master
+    _cached_master_date = today
+    _cached_eq_keys = eq_keys
+    _cached_lot_sizes = lot_sizes
+    _cached_option_keys = dict(option_keys)
+    _cached_strike_steps = strike_steps
+
+    universe = _build_fno_universe(master)
+    OEH_UNIVERSE = OEL_UNIVERSE = ORB_UNIVERSE = universe
+    PDHL_UNIVERSE = ORF_UNIVERSE = AFT_UNIVERSE = universe
+    log.info("[MASTER] Loaded %d instruments, %d F&O stocks, %d eq keys, precomputed in thread",
+             len(master), len(universe), len(eq_keys))
+    return master
+
 
 def _build_fno_universe(master: list[dict]) -> list[str]:
     """Extract all unique stock symbols that have NSE_FO options listed."""
@@ -1836,24 +1930,21 @@ def parse_signal_ch3(text: str) -> ParsedSignal | None:
 # Scanner (ch5) — resolve ATM strike and execute
 # ---------------------------------------------------------------------------
 def _resolve_atm_strike(symbol: str, option_type: str) -> ParsedSignal | None:
-    """Get the stock LTP, find nearest ATM strike, fetch option premium."""
-    from src.broker.upstox_client import UpstoxClient
+    """Get the stock LTP, find nearest ATM strike, fetch option premium.
+
+    Uses cached master data for eq_keys, strike steps, and option keys.
+    Only makes 2 API calls: stock LTP + option LTP (down from 4+).
+    """
     from src.broker.upstox_data import UpstoxData
 
     try:
         ud = UpstoxData()
-        uc = UpstoxClient()
-
-        # Step 1: get stock LTP
         sym_upper = symbol.replace(" ", "").upper()
+
+        # Step 1: get stock LTP — use cached eq_key
         upstox_key = config.UPSTOX_INDEX_KEYS.get(f"NSE:{sym_upper}")
         if not upstox_key:
-            upstox_key = f"NSE_EQ|{sym_upper}"
-            instruments = uc.load_instruments()
-            for inst in instruments:
-                if inst.get("segment") == "NSE_EQ" and inst.get("trading_symbol", "").upper() == sym_upper:
-                    upstox_key = inst.get("instrument_key", upstox_key)
-                    break
+            upstox_key = _cached_eq_keys.get(sym_upper, f"NSE_EQ|{sym_upper}")
 
         ltp_data = ud._get("/v2/market-quote/ltp",
                            params={"instrument_key": upstox_key}).get("data", {})
@@ -1862,33 +1953,37 @@ def _resolve_atm_strike(symbol: str, option_type: str) -> ParsedSignal | None:
             stock_ltp = item.get("last_price")
             break
         if not stock_ltp or stock_ltp <= 0:
-            log.warning("[CH5] Could not get LTP for %s", symbol)
+            log.warning("[ATM] Could not get LTP for %s", symbol)
             return None
 
-        # Step 2: find ATM strike — auto-detect strike step from master
-        strike_step = config.OPTION_SPECS.get(f"NSE:{sym_upper}", {}).get("strike_step", None)
-        if strike_step is None:
-            fo_strikes = sorted({
-                float(i.get("strike_price", 0))
-                for i in instruments
-                if (i.get("asset_symbol") or "").upper() == sym_upper
-                and i.get("segment") in ("NSE_FO", "BSE_FO")
-                and i.get("instrument_type") in ("CE", "PE")
-                and float(i.get("strike_price", 0)) > 0
-            })
-            if len(fo_strikes) >= 2:
-                strike_step = min(fo_strikes[j+1] - fo_strikes[j] for j in range(min(10, len(fo_strikes)-1)))
-            else:
-                strike_step = 50
+        # Step 2: find ATM strike — use cached strike step
+        strike_step = _cached_strike_steps.get(sym_upper, 50)
         atm_strike = round(stock_ltp / strike_step) * strike_step
 
-        # Step 3: resolve the option contract and get its premium
-        opt, lot_size = _resolve_channel_option(uc, symbol, atm_strike, option_type)
-        if opt is None:
-            log.warning("[CH5] Could not resolve %s %s %s", symbol, atm_strike, option_type)
-            return None
+        # Step 3: get option key from cached option_keys (no API call)
+        sym_options = _cached_option_keys.get(sym_upper, {})
+        opt_info = None
+        for off in [0, strike_step, -strike_step, 2*strike_step, -2*strike_step]:
+            s = atm_strike + off
+            info = sym_options.get(s, {}).get(option_type)
+            if info:
+                opt_info = info
+                if off == 0:
+                    break  # prefer exact ATM
 
-        opt_key = opt.get("instrument_key") or opt.get("instrument_token", "")
+        if not opt_info:
+            log.warning("[ATM] No cached option key for %s %s %s", symbol, atm_strike, option_type)
+            # Fallback to old method
+            from src.broker.upstox_client import UpstoxClient
+            uc = UpstoxClient()
+            opt, lot_size = _resolve_channel_option(uc, symbol, atm_strike, option_type)
+            if opt is None:
+                return None
+            opt_key = opt.get("instrument_key") or opt.get("instrument_token", "")
+        else:
+            opt_key = opt_info["key"]
+
+        # Step 4: get option premium LTP (1 API call)
         opt_ltp_data = ud._get("/v2/market-quote/ltp",
                                params={"instrument_key": opt_key}).get("data", {})
         premium = None
@@ -1896,13 +1991,13 @@ def _resolve_atm_strike(symbol: str, option_type: str) -> ParsedSignal | None:
             premium = item.get("last_price")
             break
         if not premium or premium <= 0:
-            log.warning("[CH5] Could not get premium for %s %s %s", symbol, atm_strike, option_type)
+            log.warning("[ATM] Could not get premium for %s %s %s", symbol, atm_strike, option_type)
             return None
 
         sl = round(premium * (1 - SCANNER_SL_PCT), 2)
         target = round(premium * SCANNER_TARGET_MULT, 2)
 
-        log.info("[CH5] ATM resolved: %s LTP=%.2f → strike=%d %s premium=%.2f SL=%.2f TGT=%.2f",
+        log.info("[ATM] Resolved: %s LTP=%.2f → strike=%d %s premium=%.2f SL=%.2f TGT=%.2f",
                  symbol, stock_ltp, atm_strike, option_type, premium, sl, target)
 
         return ParsedSignal(
@@ -1915,7 +2010,7 @@ def _resolve_atm_strike(symbol: str, option_type: str) -> ParsedSignal | None:
             targets=[target],
         )
     except Exception as exc:
-        log.error("[CH5] ATM resolution failed for %s: %s", symbol, exc)
+        log.error("[ATM] Resolution failed for %s: %s", symbol, exc)
         return None
 
 
@@ -2059,32 +2154,21 @@ async def _run_oeh_list():
     IST = ZoneInfo(config.TIMEZONE)
     log.info("[OEH-LIST] Early scan starting (1-min candle)...")
 
+    try:
+        await _ensure_master_loaded()
+    except Exception as exc:
+        log.error("[OEH-LIST] Master load failed: %s", exc)
+        _notify(f"[OEH] Early list error: {exc}")
+        return
+
     token = load_cached_token()
     if not token:
         log.error("[OEH-LIST] No Upstox token")
         _notify("*[OEH] Early list SKIPPED* — No Upstox token.")
         return
 
-    try:
-        ud = UpstoxData(access_token=token)
-        master = ud._load_master()
-    except Exception as exc:
-        log.error("[OEH-LIST] Master load failed: %s", exc)
-        _notify(f"[OEH] Early list error: {exc}")
-        return
-
-    eq_keys = {}
-    for inst in master:
-        if inst.get("segment") == "NSE_EQ":
-            tsym = (inst.get("trading_symbol") or "").upper()
-            if tsym:
-                eq_keys[tsym] = inst.get("instrument_key")
-
-    global OEH_UNIVERSE, OEL_UNIVERSE
-    if not OEH_UNIVERSE:
-        OEH_UNIVERSE = _build_fno_universe(master)
-        OEL_UNIVERSE = OEH_UNIVERSE
-        log.info("[OEH-LIST] Built F&O universe: %d stocks", len(OEH_UNIVERSE))
+    ud = UpstoxData(access_token=token)
+    eq_keys = _cached_eq_keys
 
     today = datetime.now(IST).date()
     from_dt = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=15)
@@ -2169,34 +2253,15 @@ async def _run_oeh_scan():
     _notify("*[OEH] Scanning for Open=High stocks...*")
 
     try:
-        ud = UpstoxData(access_token=token)
-        master = ud._load_master()
+        await _ensure_master_loaded()
     except Exception as exc:
         log.error("[OEH] Failed to load instrument master: %s", exc)
         _notify(f"[OEH] Scanner error: {exc}")
         return
 
-    eq_keys = {}
-    lot_sizes = {}
-    for inst in master:
-        seg = inst.get("segment")
-        if seg == "NSE_EQ":
-            tsym = (inst.get("trading_symbol") or "").upper()
-            if tsym:
-                eq_keys[tsym] = inst.get("instrument_key")
-        elif seg == "NSE_FO":
-            import re as _re
-            _base = _re.match(r'^([A-Z&]+)', (inst.get("trading_symbol") or "").upper())
-            if _base:
-                _ls = int(inst.get("lot_size") or 0)
-                if _ls > 0:
-                    lot_sizes[_base.group(1)] = _ls
-
-    global OEH_UNIVERSE, OEL_UNIVERSE
-    if not OEH_UNIVERSE:
-        OEH_UNIVERSE = _build_fno_universe(master)
-        OEL_UNIVERSE = OEH_UNIVERSE
-        log.info("[OEH] Built F&O universe: %d stocks", len(OEH_UNIVERSE))
+    ud = UpstoxData(access_token=token)
+    eq_keys = _cached_eq_keys
+    lot_sizes = _cached_lot_sizes
 
     today = datetime.now(IST).date()
     from_dt = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=15)
@@ -2402,28 +2467,18 @@ async def _run_orb_scan():
     _notify("*[ORB] Scanning for Opening Range Breakouts...*")
 
     try:
-        ud = UpstoxData(access_token=token)
-        master = ud._load_master()
+        master = await _ensure_master_loaded()
     except Exception as exc:
         log.error("[ORB] Failed to load instrument master: %s", exc)
         _notify(f"[ORB] Scanner error: {exc}")
         return
 
-    eq_keys = {}
-    for inst in master:
-        if inst.get("segment") == "NSE_EQ":
-            tsym = (inst.get("trading_symbol") or "").upper()
-            if tsym:
-                eq_keys[tsym] = inst.get("instrument_key")
+    ud = UpstoxData(access_token=token)
+    eq_keys = _cached_eq_keys
+    lot_sizes = _cached_lot_sizes
 
-    global ORB_UNIVERSE
-    if not ORB_UNIVERSE:
-        ORB_UNIVERSE = _build_fno_universe(master)
-        log.info("[ORB] Built F&O universe: %d stocks", len(ORB_UNIVERSE))
-
-    # Build option master + lot sizes
+    # Build option master from cached master
     opt_master = {}
-    lot_sizes = {}
     for inst in master:
         if inst.get("segment") != "NSE_FO":
             continue
@@ -3223,32 +3278,21 @@ async def _run_oel_list():
     IST = ZoneInfo(config.TIMEZONE)
     log.info("[OEL-LIST] Early scan starting (1-min candle)...")
 
+    try:
+        await _ensure_master_loaded()
+    except Exception as exc:
+        log.error("[OEL-LIST] Master load failed: %s", exc)
+        _notify(f"[OEL] Early list error: {exc}")
+        return
+
     token = load_cached_token()
     if not token:
         log.error("[OEL-LIST] No Upstox token")
         _notify("*[OEL] Early list SKIPPED* — No Upstox token.")
         return
 
-    try:
-        ud = UpstoxData(access_token=token)
-        master = ud._load_master()
-    except Exception as exc:
-        log.error("[OEL-LIST] Master load failed: %s", exc)
-        _notify(f"[OEL] Early list error: {exc}")
-        return
-
-    eq_keys = {}
-    for inst in master:
-        if inst.get("segment") == "NSE_EQ":
-            tsym = (inst.get("trading_symbol") or "").upper()
-            if tsym:
-                eq_keys[tsym] = inst.get("instrument_key")
-
-    global OEH_UNIVERSE, OEL_UNIVERSE
-    if not OEL_UNIVERSE:
-        OEL_UNIVERSE = _build_fno_universe(master)
-        OEH_UNIVERSE = OEL_UNIVERSE
-        log.info("[OEL-LIST] Built F&O universe: %d stocks", len(OEL_UNIVERSE))
+    ud = UpstoxData(access_token=token)
+    eq_keys = _cached_eq_keys
 
     today = datetime.now(IST).date()
     from_dt = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=15)
@@ -3325,25 +3369,14 @@ async def _run_oel_scan():
     _notify("*[OEL] Scanning for Open=Low stocks...*")
 
     try:
-        ud = UpstoxData(access_token=token)
-        master = ud._load_master()
+        await _ensure_master_loaded()
     except Exception as exc:
         log.error("[OEL] Failed to load instrument master: %s", exc)
         _notify(f"[OEL] Scanner error: {exc}")
         return
 
-    eq_keys = {}
-    for inst in master:
-        if inst.get("segment") == "NSE_EQ":
-            tsym = (inst.get("trading_symbol") or "").upper()
-            if tsym:
-                eq_keys[tsym] = inst.get("instrument_key")
-
-    global OEH_UNIVERSE, OEL_UNIVERSE
-    if not OEL_UNIVERSE:
-        OEL_UNIVERSE = _build_fno_universe(master)
-        OEH_UNIVERSE = OEL_UNIVERSE
-        log.info("[OEL] Built F&O universe: %d stocks", len(OEL_UNIVERSE))
+    ud = UpstoxData(access_token=token)
+    eq_keys = _cached_eq_keys
 
     today = datetime.now(IST).date()
     from_dt = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=15)
@@ -3563,32 +3596,14 @@ async def _run_mom_scan():
         return
 
     try:
-        ud = UpstoxData(access_token=token)
-        master = ud._load_master()
+        await _ensure_master_loaded()
     except Exception as exc:
         log.error("[MOM] Failed to load instrument master: %s", exc)
         return
 
-    # Build universe (reuse OEH_UNIVERSE if already built)
-    global OEH_UNIVERSE
-    if not OEH_UNIVERSE:
-        OEH_UNIVERSE = _build_fno_universe(master)
-
-    eq_keys = {}
-    lot_sizes = {}
-    for inst in master:
-        seg = inst.get("segment")
-        if seg == "NSE_EQ":
-            tsym = (inst.get("trading_symbol") or "").upper()
-            if tsym:
-                eq_keys[tsym] = inst.get("instrument_key")
-        elif seg == "NSE_FO":
-            import re
-            _base = re.match(r'^([A-Z&]+)', (inst.get("trading_symbol") or "").upper())
-            if _base:
-                _ls = int(inst.get("lot_size") or 0)
-                if _ls > 0:
-                    lot_sizes[_base.group(1)] = _ls
+    ud = UpstoxData(access_token=token)
+    eq_keys = _cached_eq_keys
+    lot_sizes = _cached_lot_sizes
 
     today = now.date()
     # Fetch 5-min candles from open to now
@@ -4220,6 +4235,13 @@ async def start_listener() -> None:
 
     # asyncio.get_event_loop().create_task(_scanner_scheduler())
     log.info("Scanner (ch5) DISABLED — only OEH + OEL + ORB active")
+
+    # --- Pre-warm: load master + build universe in background thread ---
+    try:
+        await _ensure_master_loaded()
+        log.info("[STARTUP] Master pre-warmed: %d instruments, universe ready", len(_cached_master or []))
+    except Exception as exc:
+        log.warning("[STARTUP] Master pre-warm failed (will retry at scan time): %s", exc)
 
     # --- OEH Scanner: run once daily at OEH_RUN_TIME ---
     async def _oeh_scheduler():
