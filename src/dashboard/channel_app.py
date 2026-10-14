@@ -70,7 +70,7 @@ async def _ws_stats_loop():
             _ensure_db()
             today_iso = mc.now_ist().date().isoformat()
             payload: dict[str, dict] = {}
-            for ch in ("ch3", "oeh", "oel", "orb"):
+            for ch in ("ch3", "oeh", "oel", "orb", "mom"):
                 cf = _ch_filter(ch)
                 with db.get_conn() as conn:
                     row = conn.execute(f"""SELECT
@@ -138,7 +138,7 @@ async def _ws_ltp_loop():
         try:
             _ensure_db()
             open_trades: list[dict] = []
-            for ch in ("oeh", "oel", "orb", "ch3", "pdhl", "orf", "aft"):
+            for ch in ("oeh", "oel", "orb", "mom", "ch3", "pdhl", "orf", "aft"):
                 cf = _ch_filter(ch)
                 with db.get_conn() as conn:
                     rows = conn.execute(
@@ -218,6 +218,7 @@ _CH_FILTERS = {
     "pdhl": f"({_CHANNEL_FILTER_BASE} AND channel = 'pdhl')",
     "orf": f"({_CHANNEL_FILTER_BASE} AND channel = 'orf')",
     "aft": f"({_CHANNEL_FILTER_BASE} AND channel = 'aft')",
+    "mom": f"({_CHANNEL_FILTER_BASE} AND channel = 'mom')",
     "ch2f": f"({_CHANNEL_FILTER_BASE} AND channel = 'ch2f')",
     "ch1f": f"({_CHANNEL_FILTER_BASE} AND (channel IS NULL OR channel = 'ch1') AND filter_score >= 50)",
 }
@@ -1325,6 +1326,7 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
   <button class="tab active" onclick="switchCh('oeh')" id="tab-oeh"><span class=ico>O</span> OEH</button>
   <button class="tab" onclick="switchCh('oel')" id="tab-oel"><span class=ico>L</span> OEL</button>
   <button class="tab" onclick="switchCh('orb')" id="tab-orb"><span class=ico>R</span> ORB</button>
+  <button class="tab" onclick="switchCh('mom')" id="tab-mom"><span class=ico>M</span> MOM</button>
 </div>
 
 <div class=wrap>

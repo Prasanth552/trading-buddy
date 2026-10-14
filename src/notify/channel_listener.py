@@ -166,6 +166,25 @@ ORB_MAX_ENTRIES_PER_SYM = 3     # guardrail: max entries per stock per day
 ORB_TIME_CUTOFF = "13:00"       # guardrail: no new entries after this time
 ORB_SL_COOLDOWN = True          # guardrail: block stock for rest of day after SL hit
 
+# ---------------------------------------------------------------------------
+# MOM (Momentum Scalp) scanner
+# ---------------------------------------------------------------------------
+MOM_ENABLED = True
+MOM_RUN_TIME = "09:30"          # IST — first scan after 3x 5-min candles available
+MOM_CAPITAL = 300000            # ₹3 lakh capital pool
+MOM_SL_PCT = 0.30               # 30% of premium as stop-loss
+MOM_MAX_SL = 5000               # cap max SL at ₹5000
+MOM_FLOOR_LEVELS = [500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5500, 6000]
+MOM_BODY_PCT = 0.15             # min body % for momentum signal
+MOM_VOL_MULT = 1.5              # volume must be > 1.5x average
+MOM_BLOCKLIST = {"GODREJCP", "GRASIM"}
+MOM_LOSS_CAP = 20000
+MOM_PROFIT_CAP = 30000
+MOM_MAX_ENTRIES_PER_SYM = 2
+MOM_TIME_CUTOFF = "13:00"
+MOM_SL_COOLDOWN = True
+MOM_RESCAN_INTERVAL = 300       # rescan every 5 minutes
+
 # PDH/PDL Breakout config
 PDHL_ENABLED = False
 PDHL_RUN_TIME = "09:22"          # IST — staggered from OEH (09:20) to avoid API rate limit
@@ -377,6 +396,61 @@ def _orb_daily_cap_hit() -> bool:
     if _orb_daily_pnl >= ORB_PROFIT_CAP:
         return True
     if _orb_daily_pnl <= -ORB_LOSS_CAP:
+        return True
+    return False
+
+# MOM capital tracking — in-memory, resets on restart
+_mom_capital_avail: float = MOM_CAPITAL
+_mom_capital_locked: dict[int, float] = {}
+
+def _mom_init_capital():
+    global _mom_capital_avail
+    _mom_capital_avail = MOM_CAPITAL
+    _mom_capital_locked.clear()
+
+def _mom_allocate(trade_id: int, amount: float) -> bool:
+    global _mom_capital_avail
+    if amount > _mom_capital_avail:
+        return False
+    _mom_capital_avail -= amount
+    _mom_capital_locked[trade_id] = amount
+    return True
+
+def _mom_free(trade_id: int, pnl: float):
+    global _mom_capital_avail
+    locked = _mom_capital_locked.pop(trade_id, 0)
+    if locked > 0:
+        _mom_capital_avail += locked + pnl
+        log.info("[MOM-CAP] Freed ₹%.0f + PnL ₹%.0f = avail ₹%.0f (locked: %d)",
+                 locked, pnl, _mom_capital_avail, len(_mom_capital_locked))
+
+_mom_daily_pnl: float = 0.0
+_mom_daily_date: str = ""
+_mom_sym_entry_count: dict[str, int] = {}
+_mom_sl_blocked: set[str] = set()
+
+def _mom_record_pnl(pnl: float):
+    global _mom_daily_pnl, _mom_daily_date
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    today = datetime.now(ZoneInfo(config.TIMEZONE)).strftime("%Y-%m-%d")
+    if _mom_daily_date != today:
+        _mom_daily_pnl = 0.0
+        _mom_daily_date = today
+    _mom_daily_pnl += pnl
+
+def _mom_daily_cap_hit() -> bool:
+    global _mom_daily_pnl, _mom_daily_date
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    today = datetime.now(ZoneInfo(config.TIMEZONE)).strftime("%Y-%m-%d")
+    if _mom_daily_date != today:
+        _mom_daily_pnl = 0.0
+        _mom_daily_date = today
+        return False
+    if _mom_daily_pnl >= MOM_PROFIT_CAP:
+        return True
+    if _mom_daily_pnl <= -MOM_LOSS_CAP:
         return True
     return False
 
@@ -1104,6 +1178,12 @@ def _close_trade_by_id(trade_id: int, exit_price: float, reason: str) -> None:
             if row["id"] in _aft_capital_locked:
                 _aft_free(row["id"], net_pnl)
                 _aft_record_pnl(net_pnl)
+            if row["id"] in _mom_capital_locked:
+                _mom_free(row["id"], net_pnl)
+                _mom_record_pnl(net_pnl)
+                if reason in ("max_loss_cap", "sl_hit") and MOM_SL_COOLDOWN:
+                    _mom_sl_blocked.add(_base_sym)
+                    log.info("[MOM] SL cooldown: %s blocked for rest of day", _base_sym)
 
             log.info(
                 "AUTO-CLOSE (id=%d) %s: entry=%.2f exit=%.2f gross=%.2f "
@@ -1360,7 +1440,7 @@ def _loss_cap_for_channel(ch: str) -> float:
         return CH2F_MAX_LOSS
     if ch == "ch2":
         return CH2_MAX_LOSS
-    if ch in ("oeh", "oel", "orb", "pdhl", "orf", "aft"):
+    if ch in ("oeh", "oel", "orb", "pdhl", "orf", "aft", "mom"):
         return OEH_MAX_SL
     return MAX_LOSS_PER_TRADE
 
@@ -1368,7 +1448,7 @@ def _loss_cap_for_channel(ch: str) -> float:
 def _floor_for_channel(ch: str) -> float:
     if ch == "ch2f":
         return CH2F_PROFIT_FLOOR
-    if ch in ("oeh", "oel", "orb", "pdhl", "orf", "aft"):
+    if ch in ("oeh", "oel", "orb", "pdhl", "orf", "aft", "mom"):
         return OEH_FLOOR_STEP
     return PROFIT_TARGET
 
@@ -1386,6 +1466,8 @@ def _floor_levels_for_channel(ch: str) -> list[float] | None:
         return ORF_FLOOR_LEVELS
     if ch == "aft":
         return AFT_FLOOR_LEVELS
+    if ch == "mom":
+        return MOM_FLOOR_LEVELS
     return None
 
 
@@ -3447,6 +3529,184 @@ async def _run_oel_scan():
 
 
 # ---------------------------------------------------------------------------
+# MOM (Momentum Scalp) Scanner — 5-min candle momentum breakouts
+# ---------------------------------------------------------------------------
+async def _run_mom_scan():
+    """Scan F&O universe for momentum breakout signals on 5-min candles."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from src.broker.upstox_data import UpstoxData, load_cached_token
+
+    IST = ZoneInfo(config.TIMEZONE)
+    if not mc.is_market_open():
+        log.info("[MOM] Market not open, skipping scan")
+        return
+
+    if _mom_daily_cap_hit():
+        log.info("[MOM] Daily cap already hit (pnl=₹%.0f), skipping scan", _mom_daily_pnl)
+        return
+
+    # Time cutoff check
+    now = datetime.now(IST)
+    cutoff_h, cutoff_m = map(int, MOM_TIME_CUTOFF.split(":"))
+    if now.hour > cutoff_h or (now.hour == cutoff_h and now.minute > cutoff_m):
+        log.info("[MOM] Past time cutoff %s, skipping scan", MOM_TIME_CUTOFF)
+        return
+
+    if _mom_capital_avail < 5000:
+        log.debug("[MOM] Only ₹%.0f available, skipping scan", _mom_capital_avail)
+        return
+
+    token = load_cached_token()
+    if not token:
+        log.error("[MOM] No valid Upstox token")
+        return
+
+    try:
+        ud = UpstoxData(access_token=token)
+        master = ud._load_master()
+    except Exception as exc:
+        log.error("[MOM] Failed to load instrument master: %s", exc)
+        return
+
+    # Build universe (reuse OEH_UNIVERSE if already built)
+    global OEH_UNIVERSE
+    if not OEH_UNIVERSE:
+        OEH_UNIVERSE = _build_fno_universe(master)
+
+    eq_keys = {}
+    lot_sizes = {}
+    for inst in master:
+        seg = inst.get("segment")
+        if seg == "NSE_EQ":
+            tsym = (inst.get("trading_symbol") or "").upper()
+            if tsym:
+                eq_keys[tsym] = inst.get("instrument_key")
+        elif seg == "NSE_FO":
+            import re
+            _base = re.match(r'^([A-Z&]+)', (inst.get("trading_symbol") or "").upper())
+            if _base:
+                _ls = int(inst.get("lot_size") or 0)
+                if _ls > 0:
+                    lot_sizes[_base.group(1)] = _ls
+
+    today = now.date()
+    # Fetch 5-min candles from open to now
+    from_dt = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=15)
+    to_dt = now
+
+    sym_key_pairs = [
+        (sym, eq_keys[sym]) for sym in OEH_UNIVERSE
+        if sym not in MOM_BLOCKLIST and sym in eq_keys
+    ]
+
+    all_candles = await _parallel_fetch_candles(ud, sym_key_pairs, from_dt, to_dt, "5minute",
+                                                batch_size=20, label="MOM")
+
+    # Find momentum signals in the LATEST 5-min candle
+    candidates = []
+    for sym, candles in all_candles.items():
+        if not candles or len(candles) < 3:
+            continue
+
+        # Calculate average volume
+        vols = [c.get("volume", 0) or 0 for c in candles]
+        avg_vol = sum(vols) / max(1, len(vols))
+        if avg_vol <= 0:
+            continue
+
+        # Check the latest candle for momentum
+        latest = candles[-1]
+        body = latest["close"] - latest["open"]
+        body_pct = abs(body) / latest["open"] * 100 if latest["open"] > 0 else 0
+        vol = latest.get("volume", 0) or 0
+
+        if body_pct >= MOM_BODY_PCT and vol > avg_vol * MOM_VOL_MULT:
+            ot = "CE" if body > 0 else "PE"
+            candidates.append({
+                "symbol": sym,
+                "option_type": ot,
+                "body_pct": body_pct,
+                "vol_ratio": vol / avg_vol if avg_vol > 0 else 0,
+                "close": latest["close"],
+            })
+
+    if not candidates:
+        log.debug("[MOM] No momentum signals in latest 5-min candle")
+        return
+
+    # Sort by body_pct (strongest momentum first)
+    candidates.sort(key=lambda x: x["body_pct"], reverse=True)
+    log.info("[MOM] Found %d momentum candidates", len(candidates))
+
+    # Reset capital pool when no trades are active
+    if not _mom_capital_locked:
+        _mom_init_capital()
+
+    executed = 0
+    skipped_capital = 0
+    skipped_guardrail = 0
+
+    for c in candidates:
+        if _mom_daily_cap_hit():
+            break
+        if _mom_capital_avail < 5000:
+            skipped_capital += len(candidates) - candidates.index(c)
+            break
+
+        sym = c["symbol"]
+
+        # Guardrail: per-stock entry limit
+        if _mom_sym_entry_count.get(sym, 0) >= MOM_MAX_ENTRIES_PER_SYM:
+            skipped_guardrail += 1
+            continue
+
+        # Guardrail: SL cooldown
+        if MOM_SL_COOLDOWN and sym in _mom_sl_blocked:
+            skipped_guardrail += 1
+            continue
+
+        ot = c["option_type"]
+        parsed = _resolve_atm_strike(sym, ot)
+        if parsed is None:
+            continue
+
+        mom_lot = lot_sizes.get(sym, 1) * 2
+        sl_pct_price = parsed.trigger_price * (1 - MOM_SL_PCT)
+        sl_cap_price = parsed.trigger_price - (MOM_MAX_SL / mom_lot)
+        parsed.stop_loss = round(max(sl_pct_price, sl_cap_price), 2)
+        parsed.targets = []
+
+        trade_capital = parsed.trigger_price * mom_lot
+        if trade_capital > _mom_capital_avail:
+            skipped_capital += 1
+            continue
+
+        result = execute_signal(parsed, channel="mom", max_lots=2)
+        if result["placed"]:
+            actual_capital = result["entry"] * result["qty"]
+            _mom_allocate(result["trade_id"], actual_capital)
+            _mom_sym_entry_count[sym] = _mom_sym_entry_count.get(sym, 0) + 1
+            executed += 1
+            _notify(
+                f"*[MOM] Trade #{executed}*\n"
+                f"{result['symbol']} {ot} x{result['qty']}\n"
+                f"Entry: {result['entry']} | SL: {result['sl']} | Floors: ₹500→₹1000→...\n"
+                f"Body: {c['body_pct']:.2f}% | Vol: {c['vol_ratio']:.1f}x avg\n"
+                f"Capital: ₹{actual_capital:,.0f} locked | ₹{_mom_capital_avail:,.0f} available"
+            )
+
+    if executed > 0:
+        _notify(
+            f"*[MOM] Scan: {executed} trades placed*\n"
+            f"Candidates: {len(candidates)} | Skip (capital): {skipped_capital}\n"
+            f"Capital: ₹{_mom_capital_avail:,.0f}"
+        )
+    log.info("[MOM] Scan done: %d executed, %d skip(cap), %d skip(guard)",
+             executed, skipped_capital, skipped_guardrail)
+
+
+# ---------------------------------------------------------------------------
 # EOD Report — daily summary sent to Telegram
 # ---------------------------------------------------------------------------
 def _build_eod_report(target_date: str | None = None) -> str:
@@ -3752,6 +4012,7 @@ async def start_listener() -> None:
                         (_oeh_capital_locked, _oeh_free, _oeh_record_pnl, "OEH"),
                         (_oel_capital_locked, _oel_free, _oel_record_pnl, "OEL"),
                         (_orb_capital_locked, _orb_free, _orb_record_pnl, "ORB"),
+                        (_mom_capital_locked, _mom_free, _mom_record_pnl, "MOM"),
                     ]:
                         if _cap_locked:
                             with db.get_conn() as conn2:
@@ -3769,6 +4030,7 @@ async def start_listener() -> None:
                     (_oeh_capital_locked, _oeh_free, _oeh_record_pnl, "OEH"),
                     (_oel_capital_locked, _oel_free, _oel_record_pnl, "OEL"),
                     (_orb_capital_locked, _orb_free, _orb_record_pnl, "ORB"),
+                    (_mom_capital_locked, _mom_free, _mom_record_pnl, "MOM"),
                 ]:
                     stale = [tid for tid in _cap_locked if tid not in open_ids]
                     if stale:
@@ -4236,6 +4498,82 @@ async def start_listener() -> None:
     asyncio.get_event_loop().create_task(_orb_scheduler())
     log.info("ORB scanner started — runs at %s + %s IST (capital: ₹%.0f)",
              ORB_RUN_TIME, ORB_RESCAN_TIME, ORB_CAPITAL)
+
+    # --- MOM (Momentum Scalp) Scanner: runs from 09:30 every 5 min until 13:00 ---
+    async def _mom_scheduler():
+        from zoneinfo import ZoneInfo
+        from datetime import datetime, timedelta
+        IST = ZoneInfo(config.TIMEZONE)
+
+        h, m = map(int, MOM_RUN_TIME.split(":"))
+        first_run = True
+
+        while True:
+            if not MOM_ENABLED:
+                await asyncio.sleep(60)
+                continue
+
+            now = datetime.now(IST)
+
+            if first_run and mc.is_trading_day():
+                first_run = False
+                scheduled = now.replace(hour=h, minute=m, second=0, microsecond=0)
+                if now > scheduled:
+                    mins_late = (now - scheduled).total_seconds() / 60
+                    if mins_late > 300:
+                        log.info("[MOM] Missed scheduled %s by %.0f min — skipping", MOM_RUN_TIME, mins_late)
+                    else:
+                        log.info("[MOM] Missed scheduled %s run — catching up now", MOM_RUN_TIME)
+                        try:
+                            await _run_mom_scan()
+                        except Exception as exc:
+                            log.error("[MOM] Catch-up scan failed: %s", exc, exc_info=True)
+                else:
+                    target = now.replace(hour=h, minute=m, second=0, microsecond=0)
+                    if now >= target:
+                        target += timedelta(days=1)
+                    wait_secs = (target - now).total_seconds()
+                    log.info("[MOM] Next scan at %s IST (in %.0f min)",
+                             target.strftime("%Y-%m-%d %H:%M"), wait_secs / 60)
+                    await asyncio.sleep(wait_secs)
+
+                    if not mc.is_trading_day():
+                        first_run = True
+                        continue
+
+                    try:
+                        await _run_mom_scan()
+                    except Exception as exc:
+                        log.error("[MOM] Scheduler scan failed: %s", exc, exc_info=True)
+
+            # Rescan every 5 min until cutoff
+            while True:
+                await asyncio.sleep(MOM_RESCAN_INTERVAL)
+                if not mc.is_market_open():
+                    log.info("[MOM] Market closed, stopping rescans")
+                    break
+                if _mom_daily_cap_hit():
+                    log.info("[MOM] Daily cap hit, stopping rescans")
+                    break
+                now2 = datetime.now(IST)
+                ch, cm2 = map(int, MOM_TIME_CUTOFF.split(":"))
+                if now2.hour > ch or (now2.hour == ch and now2.minute > cm2):
+                    log.info("[MOM] Past cutoff %s, stopping rescans", MOM_TIME_CUTOFF)
+                    break
+                if _mom_capital_avail > 5000:
+                    log.info("[MOM] Rescan starting — ₹%.0f available", _mom_capital_avail)
+                    try:
+                        await _run_mom_scan()
+                    except Exception as exc:
+                        log.error("[MOM] Rescan failed: %s", exc, exc_info=True)
+                else:
+                    log.debug("[MOM] Rescan skipped — only ₹%.0f available", _mom_capital_avail)
+
+            first_run = True
+
+    asyncio.get_event_loop().create_task(_mom_scheduler())
+    log.info("MOM scanner started — runs from %s IST every %ds (capital: ₹%.0f)",
+             MOM_RUN_TIME, MOM_RESCAN_INTERVAL, MOM_CAPITAL)
 
     # --- PDHL Scanner: runs at 09:25 (initial) + 09:45 (rescan) ---
     PDHL_RESCAN_TIME = "09:45"
