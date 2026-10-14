@@ -1,6 +1,23 @@
 #!/usr/bin/env python3
 """Debug: show MOM trade details for one day to find what inflates PnL."""
-SLIPPAGE_PER_UNIT = 0.50  # entry slippage (buy higher) + exit slippage (sell lower)
+
+# Realistic tiered slippage based on option premium & liquidity research:
+# - Tick size: ₹0.05 for stocks ≥₹250, ₹0.01 for <₹250 (NSE Nov 2025 revision)
+# - Liquid large-caps: 0.1-0.3% of premium (half the bid-ask spread with limit orders)
+# - Mid-caps: ~0.3-0.5% of premium
+# - We use limit orders, so slippage ≈ half the bid-ask spread
+def get_slippage(premium):
+    """Return per-side slippage based on option premium level."""
+    if premium >= 100:    # high-premium, liquid (RELIANCE, TCS, INFY etc)
+        return 0.10       # ₹0.10/unit — 1-2 ticks, ~0.1%
+    elif premium >= 30:   # mid-premium
+        return 0.15       # ₹0.15/unit — 3 ticks, ~0.3%
+    elif premium >= 10:   # low-premium, higher lot sizes
+        return 0.10       # ₹0.10/unit — 2 ticks (tick=0.05)
+    else:                 # very low premium (<₹10), most illiquid
+        return 0.05       # ₹0.05/unit — 1 tick minimum
+
+SLIPPAGE_PER_UNIT = None  # now dynamic, see get_slippage()
 
 import asyncio, sys, os, argparse
 from datetime import datetime, timedelta, time as dtime, date as dt_date
@@ -186,7 +203,8 @@ async def main():
                 break
         if not ep or ep <= 0:
             return None
-        ep += SLIPPAGE_PER_UNIT  # entry slippage: buy higher
+        slip = get_slippage(ep)
+        ep += slip  # entry slippage: buy higher
         sl = max(ep * (1 - SL_PCT), ep - MAX_SL / lot_qty)
         after = []
         for c in candles:
@@ -213,7 +231,7 @@ async def main():
         if xp is None:
             last = after[-1]
             xp, xt, xr = last["c"], last["time"], "eod"
-        xp -= SLIPPAGE_PER_UNIT  # exit slippage: sell lower
+        xp -= slip  # exit slippage: sell lower
         pnl = (xp - ep) * lot_qty
         return {"pnl": round(pnl), "peak": round(peak), "ep": ep, "xp": xp,
                 "xt": xt, "xr": xr, "qty": lot_qty, "sl": sl,
@@ -260,7 +278,7 @@ async def main():
                 break
         if not ep or ep < 2:
             continue
-        cost = (ep + SLIPPAGE_PER_UNIT) * lot
+        cost = (ep + get_slippage(ep)) * lot
         if cost > cap:
             cap_rejects += 1
             continue
@@ -293,6 +311,7 @@ async def main():
     print(f"  Cap rejects: {cap_rejects}")
     print(f"  Avg cost per trade: ₹{total_cost/max(1,len(trades)):,.0f}")
     print(f"  Avg PnL per trade: ₹{total_pnl/max(1,len(trades)):+,.0f}")
+    print(f"  Slippage model: tiered (₹0.05-0.15/unit based on premium level)")
 
     # Exit reason breakdown
     reasons = defaultdict(lambda: {"count": 0, "pnl": 0})
