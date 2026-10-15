@@ -13,7 +13,7 @@ from src.storage.db import get_conn
 from src.broker.upstox_data import UpstoxData, load_cached_token
 
 IST = ZoneInfo(config.TIMEZONE)
-SLIPPAGE_PCT = 0.002  # match live slippage
+SLIPPAGE_PCT = 0.005  # match live slippage
 
 # Parameter grid to test
 SL_PCTS = [0.15, 0.20, 0.25, 0.30]
@@ -26,48 +26,67 @@ def build_floor_levels(start, step, count=12):
     return [start + step * i for i in range(count)]
 
 
+def calc_charges(entry_price, exit_price, qty):
+    buy_tv = entry_price * qty
+    sell_tv = exit_price * qty
+    total_tv = buy_tv + sell_tv
+    brokerage = 40.0
+    stt = sell_tv * 0.001
+    exchange_txn = total_tv * 0.000495
+    sebi = total_tv * 0.000001
+    stamp = buy_tv * 0.00003
+    gst = (brokerage + exchange_txn) * 0.18
+    return brokerage + stt + exchange_txn + sebi + stamp + gst
+
+
 def simulate_trade(candles, entry_price, qty, sl_price, floor_levels):
-    """Simulate a single trade through 1-min candles.
-    Returns (exit_price, pnl, reason)."""
-    peak_pnl = 0
-    current_floor = 0  # no floor active until first level hit
+    """Simulate a single trade through 1-min candles matching live behavior.
+    Uses NET pnl for peak/floor, exits at candle close, applies slippage."""
+    # Apply slippage on entry
+    entry_slip = entry_price * (1 + SLIPPAGE_PCT)
+    sl_price_adj = sl_price  # SL already calculated on raw entry by caller
+
+    peak_net = 0
+    current_floor = 0
 
     for c in candles:
         low = c["low"]
         high = c["high"]
         close = c["close"]
 
-        # Check SL hit (use low)
-        if low <= sl_price:
-            exit_p = sl_price * (1 - SLIPPAGE_PCT)
-            gross = (exit_p - entry_price) * qty
-            charges = abs(gross) * 0.04 + qty * 0.05  # rough charge estimate
+        # SL hit — exit at candle close with slippage
+        if low <= sl_price_adj:
+            exit_p = close * (1 - SLIPPAGE_PCT)
+            gross = (exit_p - entry_slip) * qty
+            charges = calc_charges(entry_slip, exit_p, qty)
             return exit_p, gross - charges, "SL"
 
-        # Calculate current PnL at high and close
-        pnl_at_high = (high - entry_price) * qty
-        pnl_at_close = (close - entry_price) * qty
+        # Floor exit: check NET pnl at close
+        if current_floor > 0:
+            close_gross = (close - entry_slip) * qty
+            close_charges = calc_charges(entry_slip, close, qty)
+            close_net = close_gross - close_charges
+            if close_net <= current_floor:
+                exit_p = close * (1 - SLIPPAGE_PCT)
+                gross = (exit_p - entry_slip) * qty
+                charges = calc_charges(entry_slip, exit_p, qty)
+                return exit_p, gross - charges, f"FLOOR_{current_floor}"
 
-        # Update peak
-        peak_pnl = max(peak_pnl, pnl_at_high)
+        # Peak uses NET pnl
+        high_gross = (high - entry_slip) * qty
+        high_charges = calc_charges(entry_slip, high, qty)
+        high_net = high_gross - high_charges
+        peak_net = max(peak_net, high_net)
 
-        # Check if we've hit a new floor level
         for fl in floor_levels:
-            if peak_pnl >= fl and fl > current_floor:
+            if peak_net >= fl and fl > current_floor:
                 current_floor = fl
 
-        # Check floor exit (current pnl drops below active floor)
-        if current_floor > 0 and pnl_at_close < current_floor:
-            exit_p = close * (1 - SLIPPAGE_PCT)
-            gross = (exit_p - entry_price) * qty
-            charges = abs(gross) * 0.04 + qty * 0.05
-            return exit_p, gross - charges, f"FLOOR_{current_floor}"
-
-    # EOD exit at last close
+    # EOD exit
     last_close = candles[-1]["close"] if candles else entry_price
     exit_p = last_close * (1 - SLIPPAGE_PCT)
-    gross = (exit_p - entry_price) * qty
-    charges = abs(gross) * 0.04 + qty * 0.05
+    gross = (exit_p - entry_slip) * qty
+    charges = calc_charges(entry_slip, exit_p, qty)
     return exit_p, gross - charges, "EOD"
 
 

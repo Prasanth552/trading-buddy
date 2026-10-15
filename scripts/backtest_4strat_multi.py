@@ -25,6 +25,20 @@ SL_PCT = 0.30
 FLOOR_LEVELS = [500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5500, 6000]
 MAX_ENTRIES_PER_SYM = 2  # reduced from 3 to cut option fetches
 TIME_CUTOFF = dtime(13, 0)
+SLIPPAGE_PCT = 0.005  # 0.5% slippage on entry and exit
+
+
+def calc_charges(entry_price, exit_price, qty):
+    buy_tv = entry_price * qty
+    sell_tv = exit_price * qty
+    total_tv = buy_tv + sell_tv
+    brokerage = 40.0
+    stt = sell_tv * 0.001
+    exchange_txn = total_tv * 0.000495
+    sebi = total_tv * 0.000001
+    stamp = buy_tv * 0.00003
+    gst = (brokerage + exchange_txn) * 0.18
+    return brokerage + stt + exchange_txn + sebi + stamp + gst
 
 EMA_FAST, EMA_SLOW = 9, 21
 RSI_PERIOD = 7
@@ -311,7 +325,6 @@ async def run_one_day(ud, DATE, universe, eq_keys, lot_sizes, option_keys, strik
                 break
         if not ep or ep <= 0:
             return None
-        sl = max(ep * (1 - SL_PCT), ep - MAX_SL / lot_qty)
         after = []
         for c in candles:
             ct = parse_ts(c)
@@ -319,26 +332,44 @@ async def run_one_day(ud, DATE, universe, eq_keys, lot_sizes, option_keys, strik
                 after.append({"time": ct, "o": c["open"], "h": c["high"], "l": c["low"], "c": c["close"]})
         if not after:
             return None
-        peak, floor, xp, xt, xr = 0, 0, None, None, None
+        # Apply slippage on entry (buy higher)
+        ep_slip = ep * (1 + SLIPPAGE_PCT)
+        sl = max(ep_slip * (1 - SL_PCT), ep_slip - MAX_SL / lot_qty)
+
+        peak_net, floor_val, xp, xt, xr = 0, 0, None, None, None
         first = True
         for c in after:
+            # SL check: exit at candle close with slippage (live catches at LTP)
             if c["l"] <= sl:
-                xp, xt, xr = sl, c["time"], "sl"
+                xp = c["c"] * (1 - SLIPPAGE_PCT)
+                xt, xr = c["time"], "sl"
                 break
-            if not first and floor > 0 and (c["l"] - ep) * lot_qty <= floor:
-                xp = ep + floor / lot_qty
-                xt, xr = c["time"], "floor"
-                break
-            peak = max(peak, (c["h"] - ep) * lot_qty)
-            nf = get_stepped_floor(peak)
-            if nf > floor:
-                floor = nf
+            # Floor exit: use NET pnl, exit at candle close
+            if not first and floor_val > 0:
+                close_gross = (c["c"] - ep_slip) * lot_qty
+                close_charges = calc_charges(ep_slip, c["c"], lot_qty)
+                close_net = close_gross - close_charges
+                if close_net <= floor_val:
+                    xp = c["c"] * (1 - SLIPPAGE_PCT)
+                    xt, xr = c["time"], "floor"
+                    break
+            # Peak uses NET pnl (matching live _monitor_positions)
+            high_gross = (c["h"] - ep_slip) * lot_qty
+            high_charges = calc_charges(ep_slip, c["h"], lot_qty)
+            high_net = high_gross - high_charges
+            peak_net = max(peak_net, high_net)
+            nf = get_stepped_floor(peak_net)
+            if nf > floor_val:
+                floor_val = nf
             first = False
         if xp is None:
             last = after[-1]
-            xp, xt, xr = last["c"], last["time"], "eod"
-        pnl = (xp - ep) * lot_qty
-        return {"pnl": round(pnl), "peak": round(peak), "ep": ep, "xp": xp,
+            xp = last["c"] * (1 - SLIPPAGE_PCT)
+            xt, xr = last["time"], "eod"
+        gross = (xp - ep_slip) * lot_qty
+        charges = calc_charges(ep_slip, xp, lot_qty)
+        net_pnl = gross - charges
+        return {"pnl": round(net_pnl), "peak": round(peak_net), "ep": ep_slip, "xp": xp,
                 "xt": xt, "xr": xr, "qty": lot_qty}
 
     # Run each strategy with capital tracking

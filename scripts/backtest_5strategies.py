@@ -32,6 +32,20 @@ MAX_SL = 5000
 SL_PCT = 0.30
 FLOOR_LEVELS = [500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5500, 6000]
 MAX_ENTRIES_PER_SYM = 3
+SLIPPAGE_PCT = 0.005
+
+
+def calc_charges(entry_price, exit_price, qty):
+    buy_tv = entry_price * qty
+    sell_tv = exit_price * qty
+    total_tv = buy_tv + sell_tv
+    brokerage = 40.0
+    stt = sell_tv * 0.001
+    exchange_txn = total_tv * 0.000495
+    sebi = total_tv * 0.000001
+    stamp = buy_tv * 0.00003
+    gst = (brokerage + exchange_txn) * 0.18
+    return brokerage + stt + exchange_txn + sebi + stamp + gst
 SL_COOLDOWN = True
 TIME_CUTOFF = dtime(13, 0)
 
@@ -492,6 +506,8 @@ async def main():
         if not entry_price or entry_price <= 0:
             return None
 
+        # Apply slippage on entry (buy higher)
+        entry_price = entry_price * (1 + SLIPPAGE_PCT)
         sl_price = entry_price * (1 - SL_PCT)
         sl_cap = entry_price - (MAX_SL / lot_qty)
         sl = max(sl_price, sl_cap)
@@ -506,7 +522,7 @@ async def main():
         if not after:
             return None
 
-        peak_pnl = 0
+        peak_net = 0
         locked_floor = 0
         exit_price = None
         exit_time = None
@@ -514,20 +530,28 @@ async def main():
         is_entry = True
 
         for c in after:
+            # SL: exit at candle close with slippage
             if c["low"] <= sl:
-                exit_price = sl
+                exit_price = c["close"] * (1 - SLIPPAGE_PCT)
                 exit_time = c["time"]
                 exit_reason = "max_loss_cap"
                 break
+            # Floor exit: NET pnl check, exit at candle close
             if not is_entry and locked_floor > 0:
-                cur_low_pnl = (c["low"] - entry_price) * lot_qty
-                if cur_low_pnl <= locked_floor:
-                    exit_price = entry_price + (locked_floor / lot_qty)
+                close_gross = (c["close"] - entry_price) * lot_qty
+                close_charges = calc_charges(entry_price, c["close"], lot_qty)
+                close_net = close_gross - close_charges
+                if close_net <= locked_floor:
+                    exit_price = c["close"] * (1 - SLIPPAGE_PCT)
                     exit_time = c["time"]
                     exit_reason = f"floor_{locked_floor}"
                     break
-            peak_pnl = max(peak_pnl, (c["high"] - entry_price) * lot_qty)
-            new_floor = get_stepped_floor(peak_pnl)
+            # Peak uses NET pnl
+            high_gross = (c["high"] - entry_price) * lot_qty
+            high_charges = calc_charges(entry_price, c["high"], lot_qty)
+            high_net = high_gross - high_charges
+            peak_net = max(peak_net, high_net)
+            new_floor = get_stepped_floor(peak_net)
             if new_floor > locked_floor:
                 locked_floor = new_floor
             is_entry = False
@@ -535,7 +559,7 @@ async def main():
         if exit_price is None:
             last = after[-1] if after else None
             if last:
-                exit_price = last["close"]
+                exit_price = last["close"] * (1 - SLIPPAGE_PCT)
                 exit_time = last["time"]
                 exit_reason = "eod_close"
 
@@ -543,13 +567,15 @@ async def main():
             return None
 
         gross_pnl = (exit_price - entry_price) * lot_qty
+        charges = calc_charges(entry_price, exit_price, lot_qty)
+        net_pnl = gross_pnl - charges
         return {
             "symbol": f"{sym} {int(strike)} {otype}",
             "entry_price": round(entry_price, 2),
             "exit_price": round(exit_price, 2),
             "qty": lot_qty,
-            "pnl": round(gross_pnl),
-            "peak_pnl": round(peak_pnl),
+            "pnl": round(net_pnl),
+            "peak_pnl": round(peak_net),
             "entry_time": entry_time.strftime("%H:%M"),
             "exit_time": exit_time.strftime("%H:%M") if hasattr(exit_time, "strftime") else str(exit_time),
             "exit_reason": exit_reason,
