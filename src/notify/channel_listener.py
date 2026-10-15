@@ -2492,7 +2492,7 @@ async def _run_orb_scan():
 
     # Build option master from cached master
     opt_master = {}
-    for inst in master:
+    for inst in (_cached_master or []):
         if inst.get("segment") != "NSE_FO":
             continue
         itype = (inst.get("instrument_type") or "").upper()
@@ -3499,15 +3499,7 @@ async def _run_oel_scan():
     skipped_capital = 0
     skipped_guardrail = 0
 
-    lot_sizes = {}
-    for inst in master:
-        if inst.get("segment") == "NSE_FO":
-            import re as _re
-            _base = _re.match(r'^([A-Z&]+)', (inst.get("trading_symbol") or "").upper())
-            if _base:
-                _ls = int(inst.get("lot_size") or 0)
-                if _ls > 0:
-                    lot_sizes[_base.group(1)] = _ls
+    lot_sizes = _cached_lot_sizes or {}
 
     for c in candidates:
         if _oel_daily_cap_hit():
