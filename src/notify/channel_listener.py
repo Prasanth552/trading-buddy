@@ -3689,7 +3689,7 @@ async def _run_mom_scan():
             })
 
     if not candidates:
-        log.debug("[MOM] No momentum signals in latest 5-min candle")
+        log.info("[MOM] No momentum signals in latest 5-min candle (%d stocks checked)", len(all_candles))
         return
 
     # Sort by body_pct (strongest momentum first)
