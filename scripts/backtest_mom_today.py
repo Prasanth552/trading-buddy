@@ -235,7 +235,7 @@ def main():
     best = results[0]
     floors = build_floor_levels(best["floor_start"], best["floor_step"])
     print(f"SL={best['sl_pct']:.0%}, MaxSL={best['max_sl']}, FloorStart={best['floor_start']}, FloorStep={best['floor_step']}")
-    print(f"{'Symbol':25s} {'Qty':>5} {'Entry':>8} {'Exit':>8} {'PnL':>+8} {'Reason':>10}")
+    print(f"{'Symbol':25s} {'Qty':>5} {'Entry':>8} {'Exit':>8} {'PnL':>8} {'Reason':>10}")
     print("-" * 75)
     for td in trade_data:
         entry = td["entry"]
