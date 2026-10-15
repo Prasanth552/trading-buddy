@@ -613,6 +613,43 @@ def _aft_daily_cap_hit() -> bool:
         return True
     return False
 
+
+def _recover_capital_from_db():
+    """On startup, read OPEN trades from DB and pre-lock capital so restarts don't double-allocate."""
+    global _oeh_capital_avail, _oel_capital_avail, _orb_capital_avail, _mom_capital_avail
+    from src.storage.db import get_conn
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT id, channel, price, qty FROM trades WHERE status='OPEN'"
+        ).fetchall()
+    if not rows:
+        log.info("[CAPITAL] No open trades in DB — full capital available")
+        return
+    for r in rows:
+        tid, ch, price, qty = r["id"], (r["channel"] or ""), r["price"] or 0, r["qty"] or 0
+        cap = price * qty
+        if cap <= 0:
+            continue
+        if ch == "oeh":
+            _oeh_capital_avail -= cap
+            _oeh_capital_locked[tid] = cap
+        elif ch == "oel":
+            _oel_capital_avail -= cap
+            _oel_capital_locked[tid] = cap
+        elif ch == "orb":
+            _orb_capital_avail -= cap
+            _orb_capital_locked[tid] = cap
+        elif ch == "mom":
+            _mom_capital_avail -= cap
+            _mom_capital_locked[tid] = cap
+    log.info("[CAPITAL] Recovered from DB: OEH=%d trades (avail=%.0f), OEL=%d (avail=%.0f), "
+             "ORB=%d (avail=%.0f), MOM=%d (avail=%.0f)",
+             len(_oeh_capital_locked), _oeh_capital_avail,
+             len(_oel_capital_locked), _oel_capital_avail,
+             len(_orb_capital_locked), _orb_capital_avail,
+             len(_mom_capital_locked), _mom_capital_avail)
+
+
 # ---------------------------------------------------------------------------
 # EOD Report — sent to Telegram at market close
 # ---------------------------------------------------------------------------
@@ -4247,6 +4284,8 @@ async def start_listener() -> None:
         log.info("[STARTUP] Master pre-warmed: %d instruments, universe ready", len(_cached_master or []))
     except Exception as exc:
         log.warning("[STARTUP] Master pre-warm failed (will retry at scan time): %s", exc)
+
+    _recover_capital_from_db()
 
     # --- OEH Scanner: run once daily at OEH_RUN_TIME ---
     async def _oeh_scheduler():
