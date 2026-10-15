@@ -633,12 +633,14 @@ _cached_eq_keys: dict[str, str] = {}
 _cached_lot_sizes: dict[str, int] = {}
 _cached_option_keys: dict[str, dict] = {}  # {sym: {strike: {CE/PE: {key, expiry}}}}
 _cached_strike_steps: dict[str, float] = {}
+_master_load_lock: asyncio.Lock | None = None
 
 
 async def _ensure_master_loaded() -> list[dict]:
     """Load instrument master in a thread (non-blocking) and cache lookups.
 
     Returns the master list. Safe to call multiple times — only downloads once per day.
+    Uses asyncio.Lock to prevent duplicate concurrent downloads.
     """
     import re as _re
     from collections import defaultdict
@@ -652,71 +654,82 @@ async def _ensure_master_loaded() -> list[dict]:
     from zoneinfo import ZoneInfo
     today = datetime.now(ZoneInfo(config.TIMEZONE)).date().isoformat()
 
+    # Fast path: already cached for today (no lock needed)
     if _cached_master is not None and _cached_master_date == today:
         return _cached_master
 
-    token = load_cached_token()
-    if not token:
-        raise RuntimeError("No Upstox token for today")
+    global _master_load_lock
+    if _master_load_lock is None:
+        _master_load_lock = asyncio.Lock()
 
-    ud = UpstoxData(access_token=token)
-    master = await asyncio.to_thread(ud._load_master)
+    async with _master_load_lock:
+        # Re-check after acquiring lock (another coroutine may have loaded it)
+        if _cached_master is not None and _cached_master_date == today:
+            log.info("[MASTER] Cache hit after lock (another coroutine loaded it)")
+            return _cached_master
 
-    eq_keys: dict[str, str] = {}
-    lot_sizes: dict[str, int] = {}
-    option_keys: dict[str, dict] = defaultdict(lambda: defaultdict(dict))
-    sym_strikes: dict[str, set] = defaultdict(set)
+        token = load_cached_token()
+        if not token:
+            raise RuntimeError("No Upstox token for today")
 
-    for inst in master:
-        seg = inst.get("segment")
-        if seg == "NSE_EQ":
-            tsym = (inst.get("trading_symbol") or "").upper()
-            if tsym:
-                eq_keys[tsym] = inst.get("instrument_key")
-        elif seg == "NSE_FO":
-            _base = _re.match(r'^([A-Z&]+)', (inst.get("trading_symbol") or "").upper())
-            if _base:
-                _ls = int(inst.get("lot_size") or 0)
-                if _ls > 0:
-                    lot_sizes[_base.group(1)] = _ls
-            ot = inst.get("instrument_type", "").upper()
-            if ot in ("CE", "PE"):
-                strike = float(inst.get("strike_price") or 0)
-                if strike <= 0:
-                    continue
-                asset = (inst.get("asset_symbol") or inst.get("name") or "").upper()
-                if not asset and _base:
-                    asset = _base.group(1)
-                if not asset:
-                    continue
-                ikey = inst.get("instrument_key")
-                expiry = inst.get("expiry")
-                sym_strikes[asset].add(strike)
-                ex = option_keys[asset][strike].get(ot)
-                if ex is None or (expiry and ex.get("expiry") and expiry < ex["expiry"]):
-                    option_keys[asset][strike][ot] = {"key": ikey, "expiry": expiry}
+        ud = UpstoxData(access_token=token)
+        master = await asyncio.to_thread(ud._load_master)
 
-    strike_steps: dict[str, float] = {}
-    for sym, strikes in sym_strikes.items():
-        ss = sorted(strikes)
-        if len(ss) >= 2:
-            strike_steps[sym] = min(ss[j+1] - ss[j] for j in range(min(10, len(ss)-1)))
-        else:
-            strike_steps[sym] = 50
+        eq_keys: dict[str, str] = {}
+        lot_sizes: dict[str, int] = {}
+        option_keys: dict[str, dict] = defaultdict(lambda: defaultdict(dict))
+        sym_strikes: dict[str, set] = defaultdict(set)
 
-    _cached_master = master
-    _cached_master_date = today
-    _cached_eq_keys = eq_keys
-    _cached_lot_sizes = lot_sizes
-    _cached_option_keys = dict(option_keys)
-    _cached_strike_steps = strike_steps
+        for inst in master:
+            seg = inst.get("segment")
+            if seg == "NSE_EQ":
+                tsym = (inst.get("trading_symbol") or "").upper()
+                if tsym:
+                    eq_keys[tsym] = inst.get("instrument_key")
+            elif seg == "NSE_FO":
+                _base = _re.match(r'^([A-Z&]+)', (inst.get("trading_symbol") or "").upper())
+                if _base:
+                    _ls = int(inst.get("lot_size") or 0)
+                    if _ls > 0:
+                        lot_sizes[_base.group(1)] = _ls
+                ot = inst.get("instrument_type", "").upper()
+                if ot in ("CE", "PE"):
+                    strike = float(inst.get("strike_price") or 0)
+                    if strike <= 0:
+                        continue
+                    asset = (inst.get("asset_symbol") or inst.get("name") or "").upper()
+                    if not asset and _base:
+                        asset = _base.group(1)
+                    if not asset:
+                        continue
+                    ikey = inst.get("instrument_key")
+                    expiry = inst.get("expiry")
+                    sym_strikes[asset].add(strike)
+                    ex = option_keys[asset][strike].get(ot)
+                    if ex is None or (expiry and ex.get("expiry") and expiry < ex["expiry"]):
+                        option_keys[asset][strike][ot] = {"key": ikey, "expiry": expiry}
 
-    universe = _build_fno_universe(master)
-    OEH_UNIVERSE = OEL_UNIVERSE = ORB_UNIVERSE = universe
-    PDHL_UNIVERSE = ORF_UNIVERSE = AFT_UNIVERSE = universe
-    log.info("[MASTER] Loaded %d instruments, %d F&O stocks, %d eq keys, precomputed in thread",
-             len(master), len(universe), len(eq_keys))
-    return master
+        strike_steps: dict[str, float] = {}
+        for sym, strikes in sym_strikes.items():
+            ss = sorted(strikes)
+            if len(ss) >= 2:
+                strike_steps[sym] = min(ss[j+1] - ss[j] for j in range(min(10, len(ss)-1)))
+            else:
+                strike_steps[sym] = 50
+
+        _cached_master = master
+        _cached_master_date = today
+        _cached_eq_keys = eq_keys
+        _cached_lot_sizes = lot_sizes
+        _cached_option_keys = dict(option_keys)
+        _cached_strike_steps = strike_steps
+
+        universe = _build_fno_universe(master)
+        OEH_UNIVERSE = OEL_UNIVERSE = ORB_UNIVERSE = universe
+        PDHL_UNIVERSE = ORF_UNIVERSE = AFT_UNIVERSE = universe
+        log.info("[MASTER] Loaded %d instruments, %d F&O stocks, %d eq keys, precomputed in thread",
+                 len(master), len(universe), len(eq_keys))
+        return master
 
 
 def _build_fno_universe(master: list[dict]) -> list[str]:
