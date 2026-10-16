@@ -102,7 +102,7 @@ def main():
     with get_conn() as c:
         trades = c.execute(
             "SELECT id, symbol, qty, price, broker_key, ts "
-            "FROM trades WHERE channel='mom' AND ts >= '2026-10-15' ORDER BY ts"
+            "FROM trades WHERE channel='mom' AND ts >= '2026-10-15' AND ts < '2026-10-16' ORDER BY ts"
         ).fetchall()
 
     if not trades:
