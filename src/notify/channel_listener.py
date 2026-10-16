@@ -160,9 +160,9 @@ OEL_SL_COOLDOWN = True          # guardrail: block stock for rest of day after S
 ORB_ENABLED = True
 ORB_RUN_TIME = "09:25"          # IST — 5 min after first candle closes (9:20)
 ORB_CAPITAL = 300000             # ₹3 lakh capital pool — no trade limit, capital-gated
-ORB_SL_PCT = 0.30
-ORB_MAX_SL_RS = 5000
-ORB_FLOOR_LEVELS = [500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5500, 6000]
+ORB_SL_PCT = 0.15
+ORB_MAX_SL_RS = 2500
+ORB_FLOOR_LEVELS = [2000, 3500, 5000, 6500, 8000, 9500, 11000, 12500]
 ORB_MIN_RANGE_PCT = 0.3         # opening range must be >= 0.3% of open
 ORB_MAX_RANGE_PCT = 3.0         # skip if range is too wide
 ORB_BLOCKLIST = {"GODREJCP", "GRASIM"}
