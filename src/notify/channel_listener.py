@@ -124,7 +124,7 @@ OEH_CAPITAL = 300000            # ₹3 lakh capital pool — no trade limit, cap
 OEH_SL_PCT = 0.30               # 30% of premium as stop-loss
 OEH_MAX_SL = 5000               # cap max SL at ₹5000
 OEH_FLOOR_STEP = 1500           # legacy — used as fallback; live uses OEH_FLOOR_LEVELS
-OEH_FLOOR_LEVELS = [500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5500, 6000]  # ₹500 steps
+OEH_FLOOR_LEVELS = [2000, 3500, 5000, 6500, 8000, 9500, 11000, 12500]  # ₹2000 start, ₹1500 step — let winners run
 OEH_TOLERANCE = 0.05            # ₹0.05 tolerance for high <= open check
 OEH_MIN_DROP_PCT = 0.3          # skip candidates with <0.3% drop (weak signal)
 OEH_BLOCKLIST = {"GODREJCP", "GRASIM"}  # repeat losers — skip these
@@ -144,7 +144,7 @@ OEL_CAPITAL = 300000            # ₹3 lakh capital pool — no trade limit, cap
 OEL_SL_PCT = 0.30               # 30% of premium as stop-loss
 OEL_MAX_SL = 5000               # cap max SL at ₹5000
 OEL_FLOOR_STEP = 1500           # legacy — used as fallback; live uses OEL_FLOOR_LEVELS
-OEL_FLOOR_LEVELS = [500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5500, 6000]  # ₹500 steps
+OEL_FLOOR_LEVELS = [2000, 3500, 5000, 6500, 8000, 9500, 11000, 12500]  # ₹2000 start, ₹1500 step — let winners run
 OEL_TOLERANCE = 0.05            # ₹0.05 tolerance for low >= open check
 OEL_MIN_RISE_PCT = 0.3          # skip candidates with <0.3% rise (weak signal)
 OEL_BLOCKLIST = {"GODREJCP", "GRASIM"}  # same as OEH
@@ -189,7 +189,7 @@ MOM_PROFIT_CAP = 30000
 MOM_MAX_ENTRIES_PER_SYM = 2
 MOM_TIME_CUTOFF = "13:00"
 MOM_SL_COOLDOWN = True
-MOM_RESCAN_INTERVAL = 300       # rescan every 5 minutes
+MOM_RESCAN_INTERVAL = 300       # rescan every 5 min (matches 5-min candle close)
 
 # PDH/PDL Breakout config
 PDHL_ENABLED = False
@@ -239,6 +239,52 @@ AFT_PROFIT_CAP = 25000
 AFT_BLOCKLIST = {"GODREJCP", "GRASIM"}
 
 _peak_net: dict[int, float] = {}
+
+# ---------------------------------------------------------------------------
+# NIFTY Regime Detection — bearish/bullish based on first 15-min candle
+# ---------------------------------------------------------------------------
+_nifty_regime: str = ""          # "BEARISH" / "BULLISH" / "" (unknown)
+_nifty_regime_date: str = ""     # date string for cache
+
+async def _detect_nifty_regime() -> str:
+    """Check NIFTY first 15-min candle to determine today's regime.
+    Returns 'BEARISH' if red, 'BULLISH' if green, '' if unknown.
+    Caches result per day — only fetches once."""
+    global _nifty_regime, _nifty_regime_date
+    from zoneinfo import ZoneInfo
+    IST = ZoneInfo(config.TIMEZONE)
+    today = datetime.now(IST).strftime("%Y-%m-%d")
+    if _nifty_regime_date == today and _nifty_regime:
+        return _nifty_regime
+
+    from src.broker.upstox_data import UpstoxData, load_cached_token
+    token = load_cached_token()
+    if not token:
+        return ""
+    ud = UpstoxData(access_token=token)
+    nifty_key = config.UPSTOX_INDEX_KEYS.get("NSE:NIFTY 50")
+    if not nifty_key:
+        return ""
+
+    try:
+        today_dt = datetime.now(IST).date()
+        from_dt = datetime.combine(today_dt, datetime.min.time()).replace(hour=9, minute=15)
+        to_dt = datetime.combine(today_dt, datetime.min.time()).replace(hour=9, minute=31)
+        candles = ud.historical_data(nifty_key, from_dt, to_dt, "1minute")
+        if candles and len(candles) >= 3:
+            nifty_open = candles[0]["open"]
+            nifty_close = candles[-1]["close"]
+            _nifty_regime = "BEARISH" if nifty_close < nifty_open else "BULLISH"
+            _nifty_regime_date = today
+            log.info("[REGIME] NIFTY first 15-min: open=%.1f close=%.1f → %s",
+                     nifty_open, nifty_close, _nifty_regime)
+            _notify(f"*[REGIME] NIFTY {_nifty_regime}* "
+                    f"(open={nifty_open:.1f} → close={nifty_close:.1f})")
+            return _nifty_regime
+    except Exception as exc:
+        log.warning("[REGIME] Could not fetch NIFTY data: %s", exc)
+    return ""
+
 
 # OEH capital tracking — in-memory, resets on restart
 _oeh_capital_avail: float = OEH_CAPITAL
@@ -434,6 +480,7 @@ _mom_daily_pnl: float = 0.0
 _mom_daily_date: str = ""
 _mom_sym_entry_count: dict[str, int] = {}
 _mom_sl_blocked: set[str] = set()
+_mom_processed_candles: set[str] = set()
 
 def _mom_record_pnl(pnl: float):
     global _mom_daily_pnl, _mom_daily_date
@@ -453,6 +500,9 @@ def _mom_daily_cap_hit() -> bool:
     if _mom_daily_date != today:
         _mom_daily_pnl = 0.0
         _mom_daily_date = today
+        _mom_sym_entry_count.clear()
+        _mom_sl_blocked.clear()
+        _mom_processed_candles.clear()
         return False
     if _mom_daily_pnl >= MOM_PROFIT_CAP:
         return True
@@ -2315,6 +2365,13 @@ async def _run_oeh_scan():
         return
     log.info("[OEH] Scanner starting...")
 
+    # Regime filter: OEH only runs on BEARISH days (NIFTY red first 15 min)
+    regime = await _detect_nifty_regime()
+    if regime == "BULLISH":
+        log.info("[OEH] Skipping — NIFTY is BULLISH (OEH only runs on bearish days)")
+        _notify("*[OEH] Scan skipped* — NIFTY is BULLISH today. OEH runs only on bearish days.")
+        return
+
     if _oeh_daily_cap_hit():
         log.info("[OEH] Daily cap already hit (pnl=₹%.0f), skipping scan", _oeh_daily_pnl)
         _notify(f"*[OEH] Scan skipped* — daily cap hit (PnL: ₹{_oeh_daily_pnl:,.0f})")
@@ -3442,6 +3499,13 @@ async def _run_oel_scan():
         _notify("*[OEL] Scanner SKIPPED* — No Upstox token for today.")
         return
 
+    # --- NIFTY regime filter: OEL runs only on BULLISH days ---
+    regime = await _detect_nifty_regime()
+    if regime == "BEARISH":
+        log.info("[OEL] Skipping — NIFTY is BEARISH (OEL only runs on bullish days)")
+        _notify("*[OEL] Scan skipped* — NIFTY is BEARISH today. OEL runs only on bullish days.")
+        return
+
     _notify("*[OEL] Scanning for Open=Low stocks...*")
 
     try:
@@ -3686,36 +3750,51 @@ async def _run_mom_scan():
     all_candles = await _parallel_fetch_candles(ud, sym_key_pairs, from_dt, to_dt, "5minute",
                                                 batch_size=20, label="MOM")
 
-    # Find momentum signals in the LATEST 5-min candle
+    # Find momentum signals in ALL unprocessed candles (not just the latest)
     candidates = []
     for sym, candles in all_candles.items():
         if not candles or len(candles) < 3:
             continue
 
-        # Calculate average volume
+        # Calculate average volume from all candles
         vols = [c.get("volume", 0) or 0 for c in candles]
         avg_vol = sum(vols) / max(1, len(vols))
         if avg_vol <= 0:
             continue
 
-        # Check the latest candle for momentum
-        latest = candles[-1]
-        body = latest["close"] - latest["open"]
-        body_pct = abs(body) / latest["open"] * 100 if latest["open"] > 0 else 0
-        vol = latest.get("volume", 0) or 0
+        # Check every candle we haven't processed yet (skip first 2 for avg)
+        for ci in range(2, len(candles)):
+            c_bar = candles[ci]
+            # Build a unique key for this candle to avoid reprocessing
+            c_ts = str(c_bar.get("date") or c_bar.get("timestamp") or ci)
+            seen_key = f"{sym}:{c_ts}"
+            if seen_key in _mom_processed_candles:
+                continue
 
-        if body_pct >= MOM_BODY_PCT and vol > avg_vol * MOM_VOL_MULT:
-            ot = "CE" if body > 0 else "PE"
-            candidates.append({
-                "symbol": sym,
-                "option_type": ot,
-                "body_pct": body_pct,
-                "vol_ratio": vol / avg_vol if avg_vol > 0 else 0,
-                "close": latest["close"],
-            })
+            body = c_bar["close"] - c_bar["open"]
+            body_pct = abs(body) / c_bar["open"] * 100 if c_bar["open"] > 0 else 0
+            vol = c_bar.get("volume", 0) or 0
+
+            if body_pct >= MOM_BODY_PCT and vol > avg_vol * MOM_VOL_MULT:
+                ot = "CE" if body > 0 else "PE"
+                candidates.append({
+                    "symbol": sym,
+                    "option_type": ot,
+                    "body_pct": body_pct,
+                    "vol_ratio": vol / avg_vol if avg_vol > 0 else 0,
+                    "close": c_bar["close"],
+                    "_seen_key": seen_key,
+                })
+
+    # Mark all checked candles as processed (even non-qualifying ones)
+    for sym, candles in all_candles.items():
+        for ci in range(2, len(candles)):
+            c_bar = candles[ci]
+            c_ts = str(c_bar.get("date") or c_bar.get("timestamp") or ci)
+            _mom_processed_candles.add(f"{sym}:{c_ts}")
 
     if not candidates:
-        log.info("[MOM] No momentum signals in latest 5-min candle (%d stocks checked)", len(all_candles))
+        log.info("[MOM] No new momentum signals (%d stocks, %d candles processed)", len(all_candles), len(_mom_processed_candles))
         return
 
     # Sort by body_pct (strongest momentum first)
