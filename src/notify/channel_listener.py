@@ -751,7 +751,7 @@ def _aft_daily_cap_hit() -> bool:
 
 def _recover_capital_from_db():
     """On startup, read OPEN trades from DB and pre-lock capital so restarts don't double-allocate."""
-    global _oeh_capital_avail, _oel_capital_avail, _orb_capital_avail, _mom_capital_avail
+    global _oeh_capital_avail, _oel_capital_avail, _orb_capital_avail, _mom_capital_avail, _bsq_capital_avail
     from src.storage.db import get_conn
     with get_conn() as conn:
         rows = conn.execute(
