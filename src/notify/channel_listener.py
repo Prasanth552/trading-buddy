@@ -191,6 +191,26 @@ MOM_TIME_CUTOFF = "13:00"
 MOM_SL_COOLDOWN = True
 MOM_RESCAN_INTERVAL = 300       # rescan every 5 min (matches 5-min candle close)
 
+# ---------------------------------------------------------------------------
+# BSQ (Bollinger Squeeze Breakout) scanner
+# ---------------------------------------------------------------------------
+BSQ_ENABLED = True
+BSQ_RUN_TIME = "09:45"          # IST — need 20+ 5-min candles for BB(20)
+BSQ_CAPITAL = 300000            # ₹3 lakh capital pool
+BSQ_SL_PCT = 0.30               # 30% of premium as stop-loss
+BSQ_MAX_SL = 5000               # cap max SL at ₹5000
+BSQ_FLOOR_LEVELS = [2000, 3500, 5000, 6500, 8000, 9500, 11000, 12500]
+BSQ_BB_PERIOD = 20              # Bollinger Band SMA period
+BSQ_BB_STD = 2.0                # Bollinger Band std deviation multiplier
+BSQ_SQUEEZE_PCTILE = 20         # bandwidth percentile threshold for squeeze
+BSQ_BLOCKLIST = {"GODREJCP", "GRASIM"}
+BSQ_LOSS_CAP = 20000
+BSQ_PROFIT_CAP = 30000
+BSQ_MAX_ENTRIES_PER_SYM = 2
+BSQ_TIME_CUTOFF = "13:00"
+BSQ_SL_COOLDOWN = True
+BSQ_RESCAN_INTERVAL = 300       # rescan every 5 min
+
 # PDH/PDL Breakout config
 PDHL_ENABLED = False
 PDHL_RUN_TIME = "09:22"          # IST — staggered from OEH (09:20) to avoid API rate limit
@@ -510,6 +530,65 @@ def _mom_daily_cap_hit() -> bool:
         return True
     return False
 
+# BSQ capital tracking — in-memory, resets on restart
+_bsq_capital_avail: float = BSQ_CAPITAL
+_bsq_capital_locked: dict[int, float] = {}
+
+def _bsq_init_capital():
+    global _bsq_capital_avail
+    _bsq_capital_avail = BSQ_CAPITAL
+    _bsq_capital_locked.clear()
+
+def _bsq_allocate(trade_id: int, amount: float) -> bool:
+    global _bsq_capital_avail
+    if amount > _bsq_capital_avail:
+        return False
+    _bsq_capital_avail -= amount
+    _bsq_capital_locked[trade_id] = amount
+    return True
+
+def _bsq_free(trade_id: int, pnl: float):
+    global _bsq_capital_avail
+    locked = _bsq_capital_locked.pop(trade_id, 0)
+    if locked > 0:
+        _bsq_capital_avail += locked + pnl
+        log.info("[BSQ-CAP] Freed ₹%.0f + PnL ₹%.0f = avail ₹%.0f (locked: %d)",
+                 locked, pnl, _bsq_capital_avail, len(_bsq_capital_locked))
+
+_bsq_daily_pnl: float = 0.0
+_bsq_daily_date: str = ""
+_bsq_sym_entry_count: dict[str, int] = {}
+_bsq_sl_blocked: set[str] = set()
+_bsq_processed_candles: set[str] = set()
+
+def _bsq_record_pnl(pnl: float):
+    global _bsq_daily_pnl, _bsq_daily_date
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    today = datetime.now(ZoneInfo(config.TIMEZONE)).strftime("%Y-%m-%d")
+    if _bsq_daily_date != today:
+        _bsq_daily_pnl = 0.0
+        _bsq_daily_date = today
+    _bsq_daily_pnl += pnl
+
+def _bsq_daily_cap_hit() -> bool:
+    global _bsq_daily_pnl, _bsq_daily_date
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    today = datetime.now(ZoneInfo(config.TIMEZONE)).strftime("%Y-%m-%d")
+    if _bsq_daily_date != today:
+        _bsq_daily_pnl = 0.0
+        _bsq_daily_date = today
+        _bsq_sym_entry_count.clear()
+        _bsq_sl_blocked.clear()
+        _bsq_processed_candles.clear()
+        return False
+    if _bsq_daily_pnl >= BSQ_PROFIT_CAP:
+        return True
+    if _bsq_daily_pnl <= -BSQ_LOSS_CAP:
+        return True
+    return False
+
 # PDHL capital tracking — in-memory, resets on restart
 _pdhl_capital_avail: float = 0.0
 _pdhl_capital_locked: dict[int, float] = {}
@@ -698,12 +777,16 @@ def _recover_capital_from_db():
         elif ch == "mom":
             _mom_capital_avail -= cap
             _mom_capital_locked[tid] = cap
+        elif ch == "bsq":
+            _bsq_capital_avail -= cap
+            _bsq_capital_locked[tid] = cap
     log.info("[CAPITAL] Recovered from DB: OEH=%d trades (avail=%.0f), OEL=%d (avail=%.0f), "
-             "ORB=%d (avail=%.0f), MOM=%d (avail=%.0f)",
+             "ORB=%d (avail=%.0f), MOM=%d (avail=%.0f), BSQ=%d (avail=%.0f)",
              len(_oeh_capital_locked), _oeh_capital_avail,
              len(_oel_capital_locked), _oel_capital_avail,
              len(_orb_capital_locked), _orb_capital_avail,
-             len(_mom_capital_locked), _mom_capital_avail)
+             len(_mom_capital_locked), _mom_capital_avail,
+             len(_bsq_capital_locked), _bsq_capital_avail)
 
 
 # ---------------------------------------------------------------------------
@@ -1404,6 +1487,12 @@ def _close_trade_by_id(trade_id: int, exit_price: float, reason: str) -> None:
                 if reason in ("max_loss_cap", "sl_hit") and MOM_SL_COOLDOWN:
                     _mom_sl_blocked.add(_base_sym)
                     log.info("[MOM] SL cooldown: %s blocked for rest of day", _base_sym)
+            if row["id"] in _bsq_capital_locked:
+                _bsq_free(row["id"], net_pnl)
+                _bsq_record_pnl(net_pnl)
+                if reason in ("max_loss_cap", "sl_hit") and BSQ_SL_COOLDOWN:
+                    _bsq_sl_blocked.add(_base_sym)
+                    log.info("[BSQ] SL cooldown: %s blocked for rest of day", _base_sym)
 
             log.info(
                 "AUTO-CLOSE (id=%d) %s: entry=%.2f exit=%.2f gross=%.2f "
@@ -1688,6 +1777,8 @@ def _floor_levels_for_channel(ch: str) -> list[float] | None:
         return AFT_FLOOR_LEVELS
     if ch == "mom":
         return MOM_FLOOR_LEVELS
+    if ch == "bsq":
+        return BSQ_FLOOR_LEVELS
     return None
 
 
@@ -3892,6 +3983,7 @@ def _build_eod_report(target_date: str | None = None) -> str:
         ("pdhl", "PDHL Scanner"),
         ("orf", "ORF Scanner"),
         ("aft", "AFT Scanner"),
+        ("bsq", "BSQ Scanner"),
     ]
 
     lines = []
@@ -4175,6 +4267,7 @@ async def start_listener() -> None:
                         (_oel_capital_locked, _oel_free, _oel_record_pnl, "OEL"),
                         (_orb_capital_locked, _orb_free, _orb_record_pnl, "ORB"),
                         (_mom_capital_locked, _mom_free, _mom_record_pnl, "MOM"),
+                        (_bsq_capital_locked, _bsq_free, _bsq_record_pnl, "BSQ"),
                     ]:
                         if _cap_locked:
                             with db.get_conn() as conn2:
@@ -4193,6 +4286,7 @@ async def start_listener() -> None:
                     (_oel_capital_locked, _oel_free, _oel_record_pnl, "OEL"),
                     (_orb_capital_locked, _orb_free, _orb_record_pnl, "ORB"),
                     (_mom_capital_locked, _mom_free, _mom_record_pnl, "MOM"),
+                    (_bsq_capital_locked, _bsq_free, _bsq_record_pnl, "BSQ"),
                 ]:
                     stale = [tid for tid in _cap_locked if tid not in open_ids]
                     if stale:
@@ -4745,6 +4839,268 @@ async def start_listener() -> None:
     asyncio.get_event_loop().create_task(_mom_scheduler())
     log.info("MOM scanner started — runs from %s IST every %ds (capital: ₹%.0f)",
              MOM_RUN_TIME, MOM_RESCAN_INTERVAL, MOM_CAPITAL)
+
+    # --- BSQ (Bollinger Squeeze Breakout) Scanner ---
+
+    async def _run_bsq_scan():
+        """Scan F&O universe for Bollinger squeeze breakout signals on 5-min candles."""
+        import math
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        from src.broker.upstox_data import UpstoxData, load_cached_token
+
+        IST = ZoneInfo(config.TIMEZONE)
+        if not mc.is_market_open():
+            log.info("[BSQ] Market not open, skipping scan")
+            return
+
+        if _bsq_daily_cap_hit():
+            log.info("[BSQ] Daily cap already hit (pnl=₹%.0f), skipping scan", _bsq_daily_pnl)
+            return
+
+        now = datetime.now(IST)
+        cutoff_h, cutoff_m = map(int, BSQ_TIME_CUTOFF.split(":"))
+        if now.hour > cutoff_h or (now.hour == cutoff_h and now.minute > cutoff_m):
+            log.info("[BSQ] Past time cutoff %s, skipping scan", BSQ_TIME_CUTOFF)
+            return
+
+        if _bsq_capital_avail < 5000:
+            log.debug("[BSQ] Only ₹%.0f available, skipping scan", _bsq_capital_avail)
+            return
+
+        token = load_cached_token()
+        if not token:
+            log.error("[BSQ] No valid Upstox token")
+            return
+
+        try:
+            await _ensure_master_loaded()
+        except Exception as exc:
+            log.error("[BSQ] Failed to load instrument master: %s", exc)
+            return
+
+        ud = UpstoxData(access_token=token)
+        eq_keys = _cached_eq_keys
+        lot_sizes = _cached_lot_sizes
+
+        today = now.date()
+        from_dt = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=15)
+        to_dt = now
+
+        sym_key_pairs = [
+            (sym, eq_keys[sym]) for sym in OEH_UNIVERSE
+            if sym not in BSQ_BLOCKLIST and sym in eq_keys
+        ]
+
+        all_candles = await _parallel_fetch_candles(ud, sym_key_pairs, from_dt, to_dt, "5minute",
+                                                    batch_size=20, label="BSQ")
+
+        candidates = []
+        for sym, candles in all_candles.items():
+            if not candles or len(candles) < 25:
+                continue
+
+            # Compute Bollinger Bands
+            closes = []
+            widths = []
+            was_squeezed = False
+
+            for ci, c_bar in enumerate(candles):
+                closes.append(c_bar["close"])
+                c_ts = str(c_bar.get("date") or c_bar.get("timestamp") or ci)
+                seen_key = f"bsq:{sym}:{c_ts}"
+
+                if len(closes) < BSQ_BB_PERIOD:
+                    continue
+
+                window = closes[-BSQ_BB_PERIOD:]
+                sma = sum(window) / BSQ_BB_PERIOD
+                var = sum((x - sma) ** 2 for x in window) / BSQ_BB_PERIOD
+                std = math.sqrt(var)
+                bb_upper = sma + BSQ_BB_STD * std
+                bb_lower = sma - BSQ_BB_STD * std
+                bb_width = (bb_upper - bb_lower) / sma if sma > 0 else 0
+                widths.append(bb_width)
+
+                # Compute bandwidth percentile
+                if len(widths) >= 20:
+                    recent_w = sorted(widths[-50:])
+                    rank = sum(1 for w in recent_w if bb_width > w)
+                    pctile = (rank / len(recent_w)) * 100
+                else:
+                    pctile = 50
+
+                if pctile <= BSQ_SQUEEZE_PCTILE:
+                    was_squeezed = True
+                    continue
+
+                if was_squeezed and seen_key not in _bsq_processed_candles:
+                    price = c_bar["close"]
+                    if price > bb_upper:
+                        candidates.append({
+                            "symbol": sym,
+                            "option_type": "CE",
+                            "breakout_strength": (price - bb_upper) / bb_upper * 100 if bb_upper > 0 else 0,
+                            "close": price,
+                            "_seen_key": seen_key,
+                        })
+                        was_squeezed = False
+                    elif price < bb_lower:
+                        candidates.append({
+                            "symbol": sym,
+                            "option_type": "PE",
+                            "breakout_strength": (bb_lower - price) / bb_lower * 100 if bb_lower > 0 else 0,
+                            "close": price,
+                            "_seen_key": seen_key,
+                        })
+                        was_squeezed = False
+                    else:
+                        was_squeezed = False
+
+            # Mark all candles as processed
+            for ci, c_bar in enumerate(candles):
+                c_ts = str(c_bar.get("date") or c_bar.get("timestamp") or ci)
+                _bsq_processed_candles.add(f"bsq:{sym}:{c_ts}")
+
+        if not candidates:
+            log.info("[BSQ] No new squeeze breakout signals (%d stocks scanned)", len(all_candles))
+            return
+
+        candidates.sort(key=lambda x: x["breakout_strength"], reverse=True)
+        log.info("[BSQ] Found %d squeeze breakout candidates", len(candidates))
+
+        if not _bsq_capital_locked:
+            _bsq_init_capital()
+
+        executed = 0
+        skipped_capital = 0
+        skipped_guardrail = 0
+
+        for c in candidates:
+            if _bsq_daily_cap_hit():
+                break
+            if _bsq_capital_avail < 5000:
+                skipped_capital += len(candidates) - candidates.index(c)
+                break
+
+            sym = c["symbol"]
+
+            if _bsq_sym_entry_count.get(sym, 0) >= BSQ_MAX_ENTRIES_PER_SYM:
+                skipped_guardrail += 1
+                continue
+
+            if BSQ_SL_COOLDOWN and sym in _bsq_sl_blocked:
+                skipped_guardrail += 1
+                continue
+
+            ot = c["option_type"]
+            parsed = _resolve_atm_strike(sym, ot)
+            if parsed is None:
+                continue
+
+            bsq_lot = lot_sizes.get(sym, 1) * 2
+            sl_pct_price = parsed.trigger_price * (1 - BSQ_SL_PCT)
+            sl_cap_price = parsed.trigger_price - (BSQ_MAX_SL / bsq_lot)
+            parsed.stop_loss = round(max(sl_pct_price, sl_cap_price), 2)
+            parsed.targets = []
+
+            trade_capital = parsed.trigger_price * bsq_lot
+            if trade_capital > _bsq_capital_avail:
+                skipped_capital += 1
+                continue
+
+            result = execute_signal(parsed, channel="bsq", max_lots=2)
+            if result["placed"]:
+                actual_capital = result["entry"] * result["qty"]
+                _bsq_allocate(result["trade_id"], actual_capital)
+                _bsq_sym_entry_count[sym] = _bsq_sym_entry_count.get(sym, 0) + 1
+                executed += 1
+                _notify(
+                    f"*[BSQ] Trade #{executed}*\n"
+                    f"{result['symbol']} {ot} x{result['qty']}\n"
+                    f"Entry: {result['entry']} | SL: {result['sl']} | Floors: ₹2K→₹3.5K→...\n"
+                    f"Squeeze breakout: {c['breakout_strength']:.2f}%\n"
+                    f"Capital: ₹{actual_capital:,.0f} locked | ₹{_bsq_capital_avail:,.0f} available"
+                )
+
+        if executed > 0:
+            _notify(
+                f"*[BSQ] Scan: {executed} trades placed*\n"
+                f"Candidates: {len(candidates)} | Skip (capital): {skipped_capital}\n"
+                f"Capital: ₹{_bsq_capital_avail:,.0f}"
+            )
+        log.info("[BSQ] Scan done: %d executed, %d skip(cap), %d skip(guard)",
+                 executed, skipped_capital, skipped_guardrail)
+
+    async def _bsq_scheduler():
+        from zoneinfo import ZoneInfo
+        from datetime import datetime, timedelta
+        IST = ZoneInfo(config.TIMEZONE)
+
+        h, m = map(int, BSQ_RUN_TIME.split(":"))
+        first_run = True
+
+        while True:
+            if first_run:
+                first_run = False
+                now = datetime.now(IST)
+                scheduled = now.replace(hour=h, minute=m, second=0, microsecond=0)
+                if now > scheduled:
+                    mins_late = (now - scheduled).total_seconds() / 60
+                    if mins_late > 300:
+                        log.info("[BSQ] Missed scheduled %s by %.0f min — skipping", BSQ_RUN_TIME, mins_late)
+                    else:
+                        log.info("[BSQ] Missed scheduled %s run — catching up now", BSQ_RUN_TIME)
+                        try:
+                            await _run_bsq_scan()
+                        except Exception as exc:
+                            log.error("[BSQ] Catch-up scan failed: %s", exc, exc_info=True)
+                else:
+                    target = now.replace(hour=h, minute=m, second=0, microsecond=0)
+                    if now >= target:
+                        target += timedelta(days=1)
+                    wait_secs = (target - now).total_seconds()
+                    log.info("[BSQ] Next scan at %s IST (in %.0f min)",
+                             target.strftime("%Y-%m-%d %H:%M"), wait_secs / 60)
+                    await asyncio.sleep(wait_secs)
+
+                    if not mc.is_trading_day():
+                        first_run = True
+                        continue
+
+                    try:
+                        await _run_bsq_scan()
+                    except Exception as exc:
+                        log.error("[BSQ] Scheduler scan failed: %s", exc, exc_info=True)
+
+            while True:
+                await asyncio.sleep(BSQ_RESCAN_INTERVAL)
+                if not mc.is_market_open():
+                    log.info("[BSQ] Market closed, stopping rescans")
+                    break
+                if _bsq_daily_cap_hit():
+                    log.info("[BSQ] Daily cap hit, stopping rescans")
+                    break
+                now2 = datetime.now(IST)
+                ch, cm2 = map(int, BSQ_TIME_CUTOFF.split(":"))
+                if now2.hour > ch or (now2.hour == ch and now2.minute > cm2):
+                    log.info("[BSQ] Past cutoff %s, stopping rescans", BSQ_TIME_CUTOFF)
+                    break
+                if _bsq_capital_avail > 5000:
+                    log.info("[BSQ] Rescan starting — ₹%.0f available", _bsq_capital_avail)
+                    try:
+                        await _run_bsq_scan()
+                    except Exception as exc:
+                        log.error("[BSQ] Rescan failed: %s", exc, exc_info=True)
+                else:
+                    log.debug("[BSQ] Rescan skipped — only ₹%.0f available", _bsq_capital_avail)
+
+            first_run = True
+
+    if BSQ_ENABLED:
+        asyncio.get_event_loop().create_task(_bsq_scheduler())
+        log.info("BSQ scanner started — runs from %s IST every %ds (capital: ₹%.0f)",
+                 BSQ_RUN_TIME, BSQ_RESCAN_INTERVAL, BSQ_CAPITAL)
 
     # --- PDHL Scanner: runs at 09:25 (initial) + 09:45 (rescan) ---
     PDHL_RESCAN_TIME = "09:45"
