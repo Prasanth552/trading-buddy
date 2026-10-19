@@ -271,6 +271,7 @@ async def _detect_nifty_regime() -> str:
     Returns 'BEARISH' if red, 'BULLISH' if green, '' if unknown.
     Caches result per day — only fetches once."""
     global _nifty_regime, _nifty_regime_date
+    from datetime import datetime
     from zoneinfo import ZoneInfo
     IST = ZoneInfo(config.TIMEZONE)
     today = datetime.now(IST).strftime("%Y-%m-%d")
