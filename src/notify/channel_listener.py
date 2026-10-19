@@ -200,9 +200,9 @@ BSQ_CAPITAL = 300000            # ₹3 lakh capital pool
 BSQ_SL_PCT = 0.30               # 30% of premium as stop-loss
 BSQ_MAX_SL = 5000               # cap max SL at ₹5000
 BSQ_FLOOR_LEVELS = [2000, 3500, 5000, 6500, 8000, 9500, 11000, 12500]
-BSQ_BB_PERIOD = 20              # Bollinger Band SMA period
+BSQ_BB_PERIOD = 14              # Bollinger Band SMA period (was 20 — fires earlier intraday)
 BSQ_BB_STD = 2.0                # Bollinger Band std deviation multiplier
-BSQ_SQUEEZE_PCTILE = 20         # bandwidth percentile threshold for squeeze
+BSQ_SQUEEZE_PCTILE = 35         # bandwidth percentile threshold for squeeze (was 20 — less strict)
 BSQ_BLOCKLIST = {"GODREJCP", "GRASIM"}
 BSQ_LOSS_CAP = 20000
 BSQ_PROFIT_CAP = 30000
@@ -4978,7 +4978,7 @@ async def start_listener() -> None:
                 widths.append(bb_width)
 
                 # Compute bandwidth percentile
-                if len(widths) >= 20:
+                if len(widths) >= 10:
                     recent_w = sorted(widths[-50:])
                     rank = sum(1 for w in recent_w if bb_width > w)
                     pctile = (rank / len(recent_w)) * 100
@@ -5150,6 +5150,13 @@ async def start_listener() -> None:
                 else:
                     log.debug("[BSQ] Rescan skipped — only ₹%.0f available", _bsq_capital_avail)
 
+            # Sleep until next trading day's scheduled time (fixes after-hours spam)
+            now3 = datetime.now(IST)
+            next_run = now3.replace(hour=h, minute=m, second=0, microsecond=0) + timedelta(days=1)
+            wait_next = (next_run - now3).total_seconds()
+            log.info("[BSQ] Done for today. Next scan at %s IST (in %.0f min)",
+                     next_run.strftime("%Y-%m-%d %H:%M"), wait_next / 60)
+            await asyncio.sleep(wait_next)
             first_run = True
 
     if BSQ_ENABLED:
