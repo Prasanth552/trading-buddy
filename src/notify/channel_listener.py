@@ -3858,10 +3858,10 @@ async def _run_mom_scan():
             if opn <= 0:
                 continue
             day_range_pct = (high - low) / opn * 100
-            if day_range_pct < 0.5:
+            if day_range_pct < 1.0:
                 continue
             sym_key_pairs.append((sym, eq_keys[sym]))
-        log.info("[MOM] Bulk OHLC pre-filter: %d/%d stocks have range > 0.5%%",
+        log.info("[MOM] Bulk OHLC pre-filter: %d/%d stocks have range > 1.0%%",
                  len(sym_key_pairs), len(sym_key_pairs_all))
     else:
         sym_key_pairs = sym_key_pairs_all
@@ -4939,10 +4939,10 @@ async def start_listener() -> None:
                 if opn <= 0:
                     continue
                 day_range_pct = (high - low) / opn * 100
-                if day_range_pct < 0.3:
+                if day_range_pct < 1.0:
                     continue
                 sym_key_pairs.append((sym, eq_keys[sym]))
-            log.info("[BSQ] Bulk OHLC pre-filter: %d/%d stocks have range > 0.3%%",
+            log.info("[BSQ] Bulk OHLC pre-filter: %d/%d stocks have range > 1.0%%",
                      len(sym_key_pairs), len(sym_key_pairs_all))
         else:
             sym_key_pairs = sym_key_pairs_all
