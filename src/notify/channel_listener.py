@@ -181,13 +181,13 @@ MOM_CAPITAL = 300000            # ₹3 lakh capital pool
 MOM_SL_PCT = 0.30               # 30% of premium as stop-loss
 MOM_MAX_SL = 5000               # cap max SL at ₹5000
 MOM_FLOOR_LEVELS = [500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5500, 6000]
-MOM_BODY_PCT = 0.15             # min body % for momentum signal
-MOM_VOL_MULT = 1.5              # volume must be > 1.5x average
+MOM_BODY_PCT = 0.30             # min body % for momentum signal (was 0.15)
+MOM_VOL_MULT = 2.0              # volume must be > 2.0x average (was 1.5)
 MOM_BLOCKLIST = {"GODREJCP", "GRASIM"}
 MOM_LOSS_CAP = 20000
 MOM_PROFIT_CAP = 30000
 MOM_MAX_ENTRIES_PER_SYM = 2
-MOM_TIME_CUTOFF = "13:00"
+MOM_TIME_CUTOFF = "10:30"       # cutoff at 10:30 AM (was 13:00)
 MOM_SL_COOLDOWN = True
 MOM_RESCAN_INTERVAL = 300       # rescan every 5 min (matches 5-min candle close)
 
