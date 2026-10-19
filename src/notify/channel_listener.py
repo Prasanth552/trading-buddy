@@ -2353,7 +2353,7 @@ async def _parallel_fetch_candles(ud, sym_key_pairs, from_dt, to_dt, interval,
             else:
                 empty_count += 1
         if i + batch_size < len(sym_key_pairs):
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.3)
     if label:
         log.info("[%s] Parallel fetch done: %d/%d ok, %d empty",
                  label, len(results), len(sym_key_pairs), empty_count)
@@ -3834,13 +3834,40 @@ async def _run_mom_scan():
     from_dt = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=15)
     to_dt = now
 
-    sym_key_pairs = [
+    sym_key_pairs_all = [
         (sym, eq_keys[sym]) for sym in OEH_UNIVERSE
         if sym not in MOM_BLOCKLIST and sym in eq_keys
     ]
 
+    # Bulk OHLC pre-filter: only fetch 5-min candles for stocks with meaningful day range
+    try:
+        all_eq_keys = [key for _, key in sym_key_pairs_all]
+        key_to_sym = {key: sym for sym, key in sym_key_pairs_all}
+        bulk_ohlc = ud.market_quote_ohlc(all_eq_keys)
+    except Exception as exc:
+        log.warning("[MOM] Bulk OHLC failed (%s), fetching all stocks", exc)
+        bulk_ohlc = {}
+
+    if bulk_ohlc:
+        sym_key_pairs = []
+        for key, ohlc in bulk_ohlc.items():
+            sym = key_to_sym.get(key)
+            if not sym:
+                continue
+            opn, high, low = ohlc.get("open", 0), ohlc.get("high", 0), ohlc.get("low", 0)
+            if opn <= 0:
+                continue
+            day_range_pct = (high - low) / opn * 100
+            if day_range_pct < 0.5:
+                continue
+            sym_key_pairs.append((sym, eq_keys[sym]))
+        log.info("[MOM] Bulk OHLC pre-filter: %d/%d stocks have range > 0.5%%",
+                 len(sym_key_pairs), len(sym_key_pairs_all))
+    else:
+        sym_key_pairs = sym_key_pairs_all
+
     all_candles = await _parallel_fetch_candles(ud, sym_key_pairs, from_dt, to_dt, "5minute",
-                                                batch_size=20, label="MOM")
+                                                batch_size=40, label="MOM")
 
     # Find momentum signals in ALL unprocessed candles (not just the latest)
     candidates = []
@@ -4888,13 +4915,40 @@ async def start_listener() -> None:
         from_dt = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=15)
         to_dt = now
 
-        sym_key_pairs = [
+        sym_key_pairs_all = [
             (sym, eq_keys[sym]) for sym in OEH_UNIVERSE
             if sym not in BSQ_BLOCKLIST and sym in eq_keys
         ]
 
+        # Bulk OHLC pre-filter: only fetch candles for stocks with some volatility
+        try:
+            all_eq_keys = [key for _, key in sym_key_pairs_all]
+            key_to_sym = {key: sym for sym, key in sym_key_pairs_all}
+            bulk_ohlc = ud.market_quote_ohlc(all_eq_keys)
+        except Exception as exc:
+            log.warning("[BSQ] Bulk OHLC failed (%s), fetching all stocks", exc)
+            bulk_ohlc = {}
+
+        if bulk_ohlc:
+            sym_key_pairs = []
+            for key, ohlc in bulk_ohlc.items():
+                sym = key_to_sym.get(key)
+                if not sym:
+                    continue
+                opn, high, low = ohlc.get("open", 0), ohlc.get("high", 0), ohlc.get("low", 0)
+                if opn <= 0:
+                    continue
+                day_range_pct = (high - low) / opn * 100
+                if day_range_pct < 0.3:
+                    continue
+                sym_key_pairs.append((sym, eq_keys[sym]))
+            log.info("[BSQ] Bulk OHLC pre-filter: %d/%d stocks have range > 0.3%%",
+                     len(sym_key_pairs), len(sym_key_pairs_all))
+        else:
+            sym_key_pairs = sym_key_pairs_all
+
         all_candles = await _parallel_fetch_candles(ud, sym_key_pairs, from_dt, to_dt, "5minute",
-                                                    batch_size=20, label="BSQ")
+                                                    batch_size=40, label="BSQ")
 
         candidates = []
         for sym, candles in all_candles.items():
