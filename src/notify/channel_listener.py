@@ -88,6 +88,8 @@ MAX_DAILY_LOSS_PER_STRATEGY = {
     "oel": 25000,
     "orb": 25000,
     "mom": 25000,
+    "mom_ce": 25000,
+    "mom_pe": 25000,
 }
 CH2_INDEX_ONLY = {"NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY"}
 
@@ -187,7 +189,7 @@ MOM_BLOCKLIST = {"GODREJCP", "GRASIM"}
 MOM_LOSS_CAP = 20000
 MOM_PROFIT_CAP = 30000
 MOM_MAX_ENTRIES_PER_SYM = 2
-MOM_TIME_CUTOFF = "10:30"       # cutoff at 10:30 AM (was 13:00)
+MOM_TIME_CUTOFF = "15:15"       # run throughout market hours
 MOM_SL_COOLDOWN = True
 MOM_RESCAN_INTERVAL = 300       # rescan every 5 min (matches 5-min candle close)
 
@@ -775,7 +777,7 @@ def _recover_capital_from_db():
         elif ch == "orb":
             _orb_capital_avail -= cap
             _orb_capital_locked[tid] = cap
-        elif ch == "mom":
+        elif ch in ("mom", "mom_ce", "mom_pe"):
             _mom_capital_avail -= cap
             _mom_capital_locked[tid] = cap
         elif ch == "bsq":
@@ -1750,7 +1752,7 @@ def _loss_cap_for_channel(ch: str) -> float:
         return CH2F_MAX_LOSS
     if ch == "ch2":
         return CH2_MAX_LOSS
-    if ch in ("oeh", "oel", "orb", "pdhl", "orf", "aft", "mom"):
+    if ch in ("oeh", "oel", "orb", "pdhl", "orf", "aft", "mom", "mom_ce", "mom_pe"):
         return OEH_MAX_SL
     return MAX_LOSS_PER_TRADE
 
@@ -1758,7 +1760,7 @@ def _loss_cap_for_channel(ch: str) -> float:
 def _floor_for_channel(ch: str) -> float:
     if ch == "ch2f":
         return CH2F_PROFIT_FLOOR
-    if ch in ("oeh", "oel", "orb", "pdhl", "orf", "aft", "mom"):
+    if ch in ("oeh", "oel", "orb", "pdhl", "orf", "aft", "mom", "mom_ce", "mom_pe"):
         return OEH_FLOOR_STEP
     return PROFIT_TARGET
 
@@ -1776,7 +1778,7 @@ def _floor_levels_for_channel(ch: str) -> list[float] | None:
         return ORF_FLOOR_LEVELS
     if ch == "aft":
         return AFT_FLOOR_LEVELS
-    if ch == "mom":
+    if ch in ("mom", "mom_ce", "mom_pe"):
         return MOM_FLOOR_LEVELS
     if ch == "bsq":
         return BSQ_FLOOR_LEVELS
@@ -4003,7 +4005,8 @@ async def _run_mom_scan():
             skipped_capital += 1
             continue
 
-        result = execute_signal(parsed, channel="mom", max_lots=2)
+        mom_ch = "mom_ce" if ot == "CE" else "mom_pe"
+        result = execute_signal(parsed, channel=mom_ch, max_lots=2)
         if result["placed"]:
             actual_capital = result["entry"] * result["qty"]
             _mom_allocate(result["trade_id"], actual_capital)
