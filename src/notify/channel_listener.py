@@ -4585,7 +4585,14 @@ async def start_listener() -> None:
                 else:
                     log.debug("[OEH] Rescan skipped — only ₹%.0f available", _oeh_capital_avail)
 
-            first_run = True  # reset so next day's scan gets scheduled
+            # Sleep until next trading day's scheduled time (fixes after-hours spam)
+            now3 = datetime.now(IST)
+            next_run = now3.replace(hour=h, minute=m, second=0, microsecond=0) + timedelta(days=1)
+            wait_next = (next_run - now3).total_seconds()
+            log.info("[OEH] Done for today. Next scan at %s IST (in %.0f min)",
+                     next_run.strftime("%Y-%m-%d %H:%M"), wait_next / 60)
+            await asyncio.sleep(wait_next)
+            first_run = True
 
     asyncio.get_event_loop().create_task(_oeh_scheduler())
     log.info("OEH scanner started — runs daily at %s IST", OEH_RUN_TIME)
@@ -4786,7 +4793,14 @@ async def start_listener() -> None:
                 else:
                     log.debug("[ORB] Rescan skipped — only ₹%.0f available", _orb_capital_avail)
 
-            first_run = True  # reset so next day's scan gets scheduled
+            # Sleep until next trading day's scheduled time (fixes after-hours spam)
+            now3 = datetime.now(IST)
+            next_run = now3.replace(hour=h, minute=m, second=0, microsecond=0) + timedelta(days=1)
+            wait_next = (next_run - now3).total_seconds()
+            log.info("[ORB] Done for today. Next scan at %s IST (in %.0f min)",
+                     next_run.strftime("%Y-%m-%d %H:%M"), wait_next / 60)
+            await asyncio.sleep(wait_next)
+            first_run = True
 
     asyncio.get_event_loop().create_task(_orb_scheduler())
     log.info("ORB scanner started — runs at %s + %s IST (capital: ₹%.0f)",
@@ -4862,6 +4876,13 @@ async def start_listener() -> None:
                 else:
                     log.debug("[MOM] Rescan skipped — only ₹%.0f available", _mom_capital_avail)
 
+            # Sleep until next trading day's scheduled time (fixes after-hours spam)
+            now3 = datetime.now(IST)
+            next_run = now3.replace(hour=h, minute=m, second=0, microsecond=0) + timedelta(days=1)
+            wait_next = (next_run - now3).total_seconds()
+            log.info("[MOM] Done for today. Next scan at %s IST (in %.0f min)",
+                     next_run.strftime("%Y-%m-%d %H:%M"), wait_next / 60)
+            await asyncio.sleep(wait_next)
             first_run = True
 
     asyncio.get_event_loop().create_task(_mom_scheduler())
