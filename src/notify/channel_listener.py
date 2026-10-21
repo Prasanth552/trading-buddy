@@ -138,7 +138,7 @@ OEH_SL_COOLDOWN = True          # guardrail: block stock for rest of day after S
 # OEL Scanner (Open=Low) — bullish counterpart to OEH
 # ---------------------------------------------------------------------------
 OEL_ENABLED = True
-OEL_RUN_TIME = "09:22"          # IST — staggered 2 min after OEH to avoid API contention
+OEL_RUN_TIME = "09:45"          # IST — delayed to avoid bull-trap reversals in first 15 min
 OEL_LIST_TIME = "09:16"         # IST — early list using 1-min candle
 OEL_CAPITAL = 300000            # ₹3 lakh capital pool — no trade limit, capital-gated
 OEL_SL_PCT = 0.30               # 30% of premium as stop-loss
@@ -3598,6 +3598,29 @@ async def _run_oel_scan():
         _notify("*[OEL] Scan skipped* — NIFTY is BEARISH today. OEL runs only on bullish days.")
         return
 
+    # --- Live NIFTY momentum check at entry time ---
+    # If NIFTY is below its open, the bullish regime has reversed — skip
+    try:
+        _ud_tmp = UpstoxData(access_token=load_cached_token())
+        nifty_k = config.UPSTOX_INDEX_KEYS.get("NSE:NIFTY 50")
+        if nifty_k:
+            _now = datetime.now(ZoneInfo(config.TIMEZONE))
+            _from = datetime.combine(_now.date(), datetime.min.time()).replace(hour=9, minute=15)
+            _nifty_candles = _ud_tmp.historical_data(nifty_k, _from, _now, "1minute")
+            if _nifty_candles and len(_nifty_candles) >= 2:
+                _nifty_open = _nifty_candles[0]["open"]
+                _nifty_now = _nifty_candles[-1]["close"]
+                if _nifty_now < _nifty_open:
+                    log.info("[OEL] Skipping — NIFTY below open (%.1f < %.1f), bullish regime reversed",
+                             _nifty_now, _nifty_open)
+                    _notify(f"*[OEL] Scan skipped* — NIFTY reversed below open "
+                            f"({_nifty_now:.0f} < {_nifty_open:.0f}). Bullish regime no longer holds.")
+                    return
+                log.info("[OEL] NIFTY momentum OK: %.1f vs open %.1f (+%.2f%%)",
+                         _nifty_now, _nifty_open, (_nifty_now - _nifty_open) / _nifty_open * 100)
+    except Exception as _exc:
+        log.warning("[OEL] Live NIFTY check failed (%s), proceeding with regime only", _exc)
+
     _notify("*[OEL] Scanning for Open=Low stocks...*")
 
     try:
@@ -3612,7 +3635,7 @@ async def _run_oel_scan():
 
     today = datetime.now(IST).date()
     from_dt = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=15)
-    to_dt = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=25)
+    to_dt = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=50)
 
     # NIFTY trend filter: log only (proceed regardless with floor strategy)
     nifty_key = config.UPSTOX_INDEX_KEYS.get("NSE:NIFTY 50")
