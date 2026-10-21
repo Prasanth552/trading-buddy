@@ -3939,6 +3939,23 @@ async def _run_mom_scan():
         log.info("[MOM] No new momentum signals (%d stocks, %d candles processed)", len(all_candles), len(_mom_processed_candles))
         return
 
+    # Filter CE candidates when NIFTY is below its open (bearish reversal)
+    ce_count_before = sum(1 for c in candidates if c["option_type"] == "CE")
+    if ce_count_before > 0:
+        try:
+            nifty_k = config.UPSTOX_INDEX_KEYS.get("NSE:NIFTY 50")
+            if nifty_k:
+                _nifty_1m = ud.historical_data(nifty_k, from_dt, to_dt, "1minute")
+                if _nifty_1m and len(_nifty_1m) >= 2:
+                    _n_open = _nifty_1m[0]["open"]
+                    _n_now = _nifty_1m[-1]["close"]
+                    if _n_now < _n_open:
+                        candidates = [c for c in candidates if c["option_type"] != "CE"]
+                        log.info("[MOM] NIFTY below open (%.1f < %.1f) — filtered %d CE candidates",
+                                 _n_now, _n_open, ce_count_before)
+        except Exception as _exc:
+            log.warning("[MOM] NIFTY filter check failed (%s), keeping all candidates", _exc)
+
     # Sort by body_pct (strongest momentum first)
     candidates.sort(key=lambda x: x["body_pct"], reverse=True)
     log.info("[MOM] Found %d momentum candidates", len(candidates))
