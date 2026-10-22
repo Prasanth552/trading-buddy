@@ -2463,13 +2463,6 @@ async def _run_oeh_scan():
         return
     log.info("[OEH] Scanner starting...")
 
-    # Regime filter: OEH only runs on BEARISH days (NIFTY red first 15 min)
-    regime = await _detect_nifty_regime()
-    if regime == "BULLISH":
-        log.info("[OEH] Skipping — NIFTY is BULLISH (OEH only runs on bearish days)")
-        _notify("*[OEH] Scan skipped* — NIFTY is BULLISH today. OEH runs only on bearish days.")
-        return
-
     if _oeh_daily_cap_hit():
         log.info("[OEH] Daily cap already hit (pnl=₹%.0f), skipping scan", _oeh_daily_pnl)
         _notify(f"*[OEH] Scan skipped* — daily cap hit (PnL: ₹{_oeh_daily_pnl:,.0f})")
@@ -3597,35 +3590,6 @@ async def _run_oel_scan():
         _notify("*[OEL] Scanner SKIPPED* — No Upstox token for today.")
         return
 
-    # --- NIFTY regime filter: OEL runs only on BULLISH days ---
-    regime = await _detect_nifty_regime()
-    if regime == "BEARISH":
-        log.info("[OEL] Skipping — NIFTY is BEARISH (OEL only runs on bullish days)")
-        _notify("*[OEL] Scan skipped* — NIFTY is BEARISH today. OEL runs only on bullish days.")
-        return
-
-    # --- Live NIFTY momentum check at entry time ---
-    # If NIFTY is below its open, the bullish regime has reversed — skip
-    try:
-        _ud_tmp = UpstoxData(access_token=load_cached_token())
-        nifty_k = config.UPSTOX_INDEX_KEYS.get("NSE:NIFTY 50")
-        if nifty_k:
-            _now = datetime.now(ZoneInfo(config.TIMEZONE))
-            _from = datetime.combine(_now.date(), datetime.min.time()).replace(hour=9, minute=15)
-            _nifty_candles = _ud_tmp.historical_data(nifty_k, _from, _now, "1minute")
-            if _nifty_candles and len(_nifty_candles) >= 2:
-                _nifty_open = _nifty_candles[0]["open"]
-                _nifty_now = _nifty_candles[-1]["close"]
-                if _nifty_now < _nifty_open:
-                    log.info("[OEL] Skipping — NIFTY below open (%.1f < %.1f), bullish regime reversed",
-                             _nifty_now, _nifty_open)
-                    _notify(f"*[OEL] Scan skipped* — NIFTY reversed below open "
-                            f"({_nifty_now:.0f} < {_nifty_open:.0f}). Bullish regime no longer holds.")
-                    return
-                log.info("[OEL] NIFTY momentum OK: %.1f vs open %.1f (+%.2f%%)",
-                         _nifty_now, _nifty_open, (_nifty_now - _nifty_open) / _nifty_open * 100)
-    except Exception as _exc:
-        log.warning("[OEL] Live NIFTY check failed (%s), proceeding with regime only", _exc)
 
     _notify("*[OEL] Scanning for Open=Low stocks...*")
 
