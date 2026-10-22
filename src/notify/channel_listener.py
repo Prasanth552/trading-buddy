@@ -144,7 +144,7 @@ OEH_SL_COOLDOWN = True          # guardrail: block stock for rest of day after S
 # OEL Scanner (Open=Low) — bullish counterpart to OEH
 # ---------------------------------------------------------------------------
 OEL_ENABLED = True
-OEL_RUN_TIME = "09:45"          # IST — delayed to avoid bull-trap reversals in first 15 min
+OEL_RUN_TIME = "09:21"          # IST — right after OEH (regime filter removed, no need to wait)
 OEL_LIST_TIME = "09:16"         # IST — early list using 1-min candle
 OEL_CAPITAL = 300000            # ₹3 lakh capital pool — no trade limit, capital-gated
 OEL_SL_PCT = 0.30               # 30% of premium as stop-loss
