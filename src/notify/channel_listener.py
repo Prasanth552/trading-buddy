@@ -4620,25 +4620,9 @@ async def start_listener() -> None:
                 except Exception as exc:
                     log.error("[OEH] Scheduler scan failed: %s", exc, exc_info=True)
 
-            # Rescan every 1 min until market close, whenever capital is freed
-            while True:
-                await asyncio.sleep(60)
-                if not mc.is_market_open():
-                    log.info("[OEH] Market closed, stopping rescans")
-                    break
-                if _oeh_daily_cap_hit():
-                    log.info("[OEH] Daily cap hit, stopping rescans")
-                    break
-                if _oeh_capital_avail > 5000:
-                    log.info("[OEH] Rescan starting — ₹%.0f available", _oeh_capital_avail)
-                    try:
-                        await _run_oeh_scan()
-                    except Exception as exc:
-                        log.error("[OEH] Rescan failed: %s", exc, exc_info=True)
-                else:
-                    log.debug("[OEH] Rescan skipped — only ₹%.0f available", _oeh_capital_avail)
+            log.info("[OEH] Single scan done — no re-entries, waiting for next trading day")
 
-            # Sleep until next trading day's scheduled time (fixes after-hours spam)
+            # Sleep until next trading day's scheduled time
             now3 = datetime.now(IST)
             next_run = now3.replace(hour=h, minute=m, second=0, microsecond=0) + timedelta(days=1)
             wait_next = (next_run - now3).total_seconds()
