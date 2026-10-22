@@ -4300,17 +4300,23 @@ async def start_listener() -> None:
     session_path = os.path.join(os.path.dirname(__file__), "..", "..", "data", "telegram_user.session")
     client = TelegramClient(session_path, api_id, api_hash)
 
-    await client.start(phone=phone)
-    me = await client.get_me()
-    log.info("Logged in as %s (id=%s)", me.first_name, me.id)
-    ch_list = "ch1"
-    if ch1b_int:
-        ch_list += " + ch1b"
-    if ch2_int:
-        ch_list += " + ch2"
-    if ch3_int:
-        ch_list += " + ch3"
-    _notify(f"Channel listener started as {me.first_name} ({ch_list})")
+    _telegram_connected = False
+    try:
+        await client.start(phone=phone)
+        me = await client.get_me()
+        log.info("Logged in as %s (id=%s)", me.first_name, me.id)
+        ch_list = "ch1"
+        if ch1b_int:
+            ch_list += " + ch1b"
+        if ch2_int:
+            ch_list += " + ch2"
+        if ch3_int:
+            ch_list += " + ch3"
+        _notify(f"Channel listener started as {me.first_name} ({ch_list})")
+        _telegram_connected = True
+    except Exception as _tg_err:
+        log.warning("Telegram connection failed (%s) — running scanners only (no channel signals)", _tg_err)
+        _notify(f"*[SYSTEM] Telegram offline* — {_tg_err}. Scanners (OEH/OEL/ORB/MOM/BSQ) will run normally.")
 
     # --- Background position monitor: checks LTP every 5s, auto-closes ---
     global _peak_net
@@ -5561,7 +5567,10 @@ async def start_listener() -> None:
     asyncio.get_event_loop().create_task(_eod_report_scheduler())
     log.info("EOD report scheduler started — runs daily at %s IST", EOD_REPORT_TIME)
 
-    @client.on(events.NewMessage(chats=listen_channels))
+    if not _telegram_connected:
+        log.info("Telegram offline — skipping channel signal handler, scanners running")
+
+    @client.on(events.NewMessage(chats=listen_channels if _telegram_connected else []))
     async def on_signal(event):
         global _ch2_queued_signal, _ch2_queued_task, _ch2_trigger_held, _ch2_last_executed, _ch2_last_reentry_ts
         global _ch2_trigger_held_msg_id, _ch2_trigger_held_is_fallback, _ch2_trigger_held_is_reentry
@@ -5964,16 +5973,22 @@ async def start_listener() -> None:
 
         log.info("[%s] Not an entry signal or follow-up, skipping.", ch_label)
 
-    channels_str = f"ch1={ch1_id}"
-    if ch1b_id:
-        channels_str += f", ch1b={ch1b_id}"
-    if ch2_id:
-        channels_str += f", ch2={ch2_id}"
-    if ch3_id:
-        channels_str += f", ch3={ch3_id}"
-    log.info("Listening for signals: %s ...", channels_str)
-    print(f"Listening for signals: {channels_str} ... (Ctrl-C to stop)")
-    await client.run_until_disconnected()
+    if _telegram_connected:
+        channels_str = f"ch1={ch1_id}"
+        if ch1b_id:
+            channels_str += f", ch1b={ch1b_id}"
+        if ch2_id:
+            channels_str += f", ch2={ch2_id}"
+        if ch3_id:
+            channels_str += f", ch3={ch3_id}"
+        log.info("Listening for signals: %s ...", channels_str)
+        print(f"Listening for signals: {channels_str} ... (Ctrl-C to stop)")
+        await client.run_until_disconnected()
+    else:
+        log.info("Running in scanner-only mode (no Telegram). Ctrl-C to stop.")
+        print("Running in scanner-only mode (no Telegram). Ctrl-C to stop.")
+        while True:
+            await asyncio.sleep(3600)
 
 
 def main() -> int:
