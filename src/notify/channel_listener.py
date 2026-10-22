@@ -4531,6 +4531,49 @@ async def start_listener() -> None:
 
     _recover_capital_from_db()
 
+    # --- Pre-market warm-up: refresh token + master at 08:55 IST daily ---
+    async def _pre_market_warmup():
+        from zoneinfo import ZoneInfo
+        from datetime import datetime, timedelta
+        from src.broker.upstox_data import automated_login
+        IST = ZoneInfo(config.TIMEZONE)
+
+        while True:
+            now = datetime.now(IST)
+            target = now.replace(hour=8, minute=55, second=0, microsecond=0)
+            if now >= target:
+                target += timedelta(days=1)
+            wait_secs = (target - now).total_seconds()
+            log.info("[WARMUP] Next pre-market warmup at %s IST (in %.0f min)",
+                     target.strftime("%Y-%m-%d %H:%M"), wait_secs / 60)
+            await asyncio.sleep(wait_secs)
+
+            if not mc.is_trading_day():
+                log.info("[WARMUP] Not a trading day, skipping")
+                continue
+
+            try:
+                log.info("[WARMUP] Refreshing Upstox token...")
+                await asyncio.to_thread(automated_login)
+                log.info("[WARMUP] Token refreshed OK")
+            except Exception as exc:
+                log.error("[WARMUP] Token refresh failed: %s", exc)
+
+            try:
+                global _cached_master, _cached_master_date
+                _cached_master = None
+                _cached_master_date = None
+                await _ensure_master_loaded()
+                log.info("[WARMUP] Master pre-loaded: %d instruments — ready for 09:15",
+                         len(_cached_master or []))
+                _notify("*[WARMUP] Pre-market ready* — token refreshed, "
+                        f"{len(_cached_master or [])} instruments loaded. Ready for 09:15.")
+            except Exception as exc:
+                log.error("[WARMUP] Master pre-load failed: %s", exc)
+
+    asyncio.get_event_loop().create_task(_pre_market_warmup())
+    log.info("Pre-market warmup scheduled — runs daily at 08:55 IST")
+
     # --- OEH Scanner: run once daily at OEH_RUN_TIME ---
     async def _oeh_scheduler():
         """Wait until OEH_RUN_TIME IST each day, then scan for OEH stocks."""
