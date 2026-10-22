@@ -132,7 +132,7 @@ OEH_MAX_SL = 5000               # cap max SL at ₹5000
 OEH_FLOOR_STEP = 1500           # legacy — used as fallback; live uses OEH_FLOOR_LEVELS
 OEH_FLOOR_LEVELS = [2000, 3500, 5000, 6500, 8000, 9500, 11000, 12500]  # ₹2000 start, ₹1500 step — let winners run
 OEH_TOLERANCE = 0.05            # ₹0.05 tolerance for high <= open check
-OEH_MIN_DROP_PCT = 0.3          # skip candidates with <0.3% drop (weak signal)
+OEH_MIN_DROP_PCT = 1.0          # skip candidates with <1% drop (weak signal)
 OEH_BLOCKLIST = {"GODREJCP", "GRASIM"}  # repeat losers — skip these
 OEH_LOSS_CAP = 999999
 OEH_PROFIT_CAP = 999999
