@@ -90,6 +90,10 @@ MAX_DAILY_LOSS_PER_STRATEGY = {
     "mom": 25000,
     "mom_ce": 25000,
     "mom_pe": 25000,
+    "bsq": 25000,
+    "pdhl": 25000,
+    "orf": 25000,
+    "aft": 25000,
 }
 CH2_INDEX_ONLY = {"NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY"}
 
