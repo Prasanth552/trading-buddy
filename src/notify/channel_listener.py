@@ -179,6 +179,9 @@ ORB_PROFIT_CAP = 25000
 ORB_MAX_ENTRIES_PER_SYM = 3     # guardrail: max entries per stock per day
 ORB_TIME_CUTOFF = "13:00"       # guardrail: no new entries after this time
 ORB_SL_COOLDOWN = True          # guardrail: block stock for rest of day after SL hit
+ORB_MAX_HOLD_MINS = 30          # exit if no floor hit within 30 minutes
+ORB_MAX_TRADES_PER_DAY = 15     # cap total ORB trades per day
+ORB_SKIP_FIRST_SCAN = True      # skip 09:25 scan, start from rescan (09:45)
 
 # ---------------------------------------------------------------------------
 # MOM (Momentum Scalp) scanner
@@ -455,6 +458,7 @@ def _orb_free(trade_id: int, pnl: float):
 _orb_daily_pnl: float = 0.0
 _orb_daily_date: str = ""
 _orb_sym_entry_count: dict[str, int] = {}
+_orb_daily_trade_count: int = 0
 _orb_sl_blocked: set[str] = set()
 
 def _orb_record_pnl(pnl: float):
@@ -475,6 +479,10 @@ def _orb_daily_cap_hit() -> bool:
     if _orb_daily_date != today:
         _orb_daily_pnl = 0.0
         _orb_daily_date = today
+        global _orb_daily_trade_count
+        _orb_daily_trade_count = 0
+        _orb_sym_entry_count.clear()
+        _orb_sl_blocked.clear()
         return False
     if _orb_daily_pnl >= ORB_PROFIT_CAP:
         return True
@@ -2673,6 +2681,7 @@ async def _run_oeh_scan():
 # ---------------------------------------------------------------------------
 async def _run_orb_scan():
     """Scan F&O universe for ORB breakouts after first 5-min candle."""
+    global _orb_daily_trade_count
     import re
     from datetime import datetime
     from zoneinfo import ZoneInfo
@@ -2828,6 +2837,9 @@ async def _run_orb_scan():
         if _orb_daily_cap_hit():
             log.info("[ORB] Daily cap hit mid-scan (pnl=₹%.0f), stopping", _orb_daily_pnl)
             break
+        if _orb_daily_trade_count >= ORB_MAX_TRADES_PER_DAY:
+            log.info("[ORB] Daily trade cap reached (%d)", ORB_MAX_TRADES_PER_DAY)
+            break
         if _orb_capital_avail < 5000:
             skipped_capital += len(candidates) - candidates.index(c)
             break
@@ -2866,6 +2878,7 @@ async def _run_orb_scan():
             actual_capital = result["entry"] * result["qty"]
             _orb_allocate(result["trade_id"], actual_capital)
             _orb_sym_entry_count[sym] = _orb_sym_entry_count.get(sym, 0) + 1
+            _orb_daily_trade_count += 1
             executed += 1
             dir_tag = "▲" if c["direction"] == "bullish" else "▼"
             summary_lines.append(
@@ -4473,25 +4486,34 @@ async def start_listener() -> None:
                                 f"🔒 *Profit floor hit* — {trade['symbol']}\n"
                                 f"Peak: ₹{peak:+,.0f} | Floor: ₹{stepped_floor:,} | Exit: ₹{net_pnl:+,.0f}"
                             )
-                        elif ch in ("mom", "mom_ce", "mom_pe") and MOM_MAX_HOLD_MINS and stepped_floor == 0:
-                            from datetime import datetime as _dt
-                            from zoneinfo import ZoneInfo as _ZI
-                            _ist = _ZI(config.TIMEZONE)
-                            entry_ts = trade["ts"]
-                            if entry_ts:
-                                entry_dt = _dt.fromisoformat(entry_ts) if isinstance(entry_ts, str) else entry_ts
-                                if entry_dt.tzinfo is None:
-                                    entry_dt = entry_dt.replace(tzinfo=_ist)
-                                elapsed = (_dt.now(_ist) - entry_dt).total_seconds() / 60
-                                if elapsed >= MOM_MAX_HOLD_MINS:
-                                    log.info("[MOM] MAX HOLD %dmin for %s: elapsed=%.1fmin net=₹%.0f — closing",
-                                             MOM_MAX_HOLD_MINS, trade["symbol"], elapsed, net_pnl)
-                                    _close_trade_by_id(tid, ltp, "max_hold")
-                                    _peak_net.pop(tid, None)
-                                    _notify(
-                                        f"⏱️ *Max hold exit* — {trade['symbol']}\n"
-                                        f"Held {elapsed:.0f}min (limit: {MOM_MAX_HOLD_MINS}min) | PnL: ₹{net_pnl:+,.0f}"
-                                    )
+                        elif stepped_floor == 0:
+                            max_hold = None
+                            tag = ""
+                            if ch in ("mom", "mom_ce", "mom_pe") and MOM_MAX_HOLD_MINS:
+                                max_hold = MOM_MAX_HOLD_MINS
+                                tag = "MOM"
+                            elif ch == "orb" and ORB_MAX_HOLD_MINS:
+                                max_hold = ORB_MAX_HOLD_MINS
+                                tag = "ORB"
+                            if max_hold:
+                                from datetime import datetime as _dt
+                                from zoneinfo import ZoneInfo as _ZI
+                                _ist = _ZI(config.TIMEZONE)
+                                entry_ts = trade["ts"]
+                                if entry_ts:
+                                    entry_dt = _dt.fromisoformat(entry_ts) if isinstance(entry_ts, str) else entry_ts
+                                    if entry_dt.tzinfo is None:
+                                        entry_dt = entry_dt.replace(tzinfo=_ist)
+                                    elapsed = (_dt.now(_ist) - entry_dt).total_seconds() / 60
+                                    if elapsed >= max_hold:
+                                        log.info("[%s] MAX HOLD %dmin for %s: elapsed=%.1fmin net=₹%.0f — closing",
+                                                 tag, max_hold, trade["symbol"], elapsed, net_pnl)
+                                        _close_trade_by_id(tid, ltp, "max_hold")
+                                        _peak_net.pop(tid, None)
+                                        _notify(
+                                            f"⏱️ *Max hold exit* — {trade['symbol']}\n"
+                                            f"Held {elapsed:.0f}min (limit: {max_hold}min) | PnL: ₹{net_pnl:+,.0f}"
+                                        )
             except Exception as exc:  # noqa: BLE001
                 _monitor_fail_count += 1
                 if _monitor_fail_count % 60 == 0:
@@ -4808,11 +4830,14 @@ async def start_listener() -> None:
                     rescan_t = now.replace(hour=h2, minute=m2, second=0, microsecond=0)
                     rescan_late = (now - rescan_t).total_seconds() / 60 if now > rescan_t else -1
                     if mins_late <= 300:
-                        log.info("[ORB] Missed scheduled %s run — catching up now (%.0f min late)", ORB_RUN_TIME, mins_late)
-                        try:
-                            await _run_orb_scan()
-                        except Exception as exc:
-                            log.error("[ORB] Catch-up scan failed: %s", exc, exc_info=True)
+                        if ORB_SKIP_FIRST_SCAN:
+                            log.info("[ORB] Skipping first scan (catch-up) — waiting for rescan")
+                        else:
+                            log.info("[ORB] Missed scheduled %s run — catching up now (%.0f min late)", ORB_RUN_TIME, mins_late)
+                            try:
+                                await _run_orb_scan()
+                            except Exception as exc:
+                                log.error("[ORB] Catch-up scan failed: %s", exc, exc_info=True)
                         if now > rescan_t:
                             log.info("[ORB] Also missed rescan at %s — running now", ORB_RESCAN_TIME)
                             try:
@@ -4845,10 +4870,13 @@ async def start_listener() -> None:
                         log.info("[ORB] Not a trading day, skipping scan")
                         continue
 
-                    try:
-                        await _run_orb_scan()
-                    except Exception as exc:
-                        log.error("[ORB] Scheduler scan failed: %s", exc, exc_info=True)
+                    if ORB_SKIP_FIRST_SCAN:
+                        log.info("[ORB] Skipping first scan (09:25) — waiting for rescan")
+                    else:
+                        try:
+                            await _run_orb_scan()
+                        except Exception as exc:
+                            log.error("[ORB] Scheduler scan failed: %s", exc, exc_info=True)
 
             # Rescan every 5 min until market close, whenever capital is freed
             while True:
@@ -4858,6 +4886,9 @@ async def start_listener() -> None:
                     break
                 if _orb_daily_cap_hit():
                     log.info("[ORB] Daily cap hit, stopping rescans")
+                    break
+                if _orb_daily_trade_count >= ORB_MAX_TRADES_PER_DAY:
+                    log.info("[ORB] Daily trade cap reached (%d), stopping rescans", ORB_MAX_TRADES_PER_DAY)
                     break
                 if _orb_capital_avail > 5000:
                     log.info("[ORB] Rescan starting — ₹%.0f available", _orb_capital_avail)
