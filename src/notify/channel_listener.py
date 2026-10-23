@@ -4477,7 +4477,7 @@ async def start_listener() -> None:
                             from datetime import datetime as _dt
                             from zoneinfo import ZoneInfo as _ZI
                             _ist = _ZI(config.TIMEZONE)
-                            entry_ts = trade.get("ts")
+                            entry_ts = trade["ts"]
                             if entry_ts:
                                 entry_dt = _dt.fromisoformat(entry_ts) if isinstance(entry_ts, str) else entry_ts
                                 if entry_dt.tzinfo is None:
