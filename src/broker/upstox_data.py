@@ -20,6 +20,8 @@ from datetime import date, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import time as _time
+
 import requests
 
 import config
@@ -100,12 +102,23 @@ class UpstoxData:
         return {"Authorization": f"Bearer {self.token}", "Accept": "application/json"}
 
     def _get(self, path: str, params: dict | None = None) -> dict:
-        r = requests.get(config.UPSTOX_API_BASE + path, params=params,
-                         headers=self._headers(), timeout=20)
-        data = r.json()
-        if r.status_code != 200 or data.get("status") == "error":
-            raise UpstoxDataError(f"Upstox GET {path} failed: {data}")
-        return data
+        max_retries = 4
+        for attempt in range(max_retries + 1):
+            r = requests.get(config.UPSTOX_API_BASE + path, params=params,
+                             headers=self._headers(), timeout=20)
+            if r.status_code == 429:
+                if attempt < max_retries:
+                    wait = min(2 ** attempt * 2, 60)
+                    log.warning("Rate limited on %s, retry %d/%d in %ds",
+                                path, attempt + 1, max_retries, wait)
+                    _time.sleep(wait)
+                    continue
+                raise UpstoxDataError(f"Upstox GET {path} rate limited after {max_retries} retries")
+            data = r.json()
+            if r.status_code != 200 or data.get("status") == "error":
+                raise UpstoxDataError(f"Upstox GET {path} failed: {data}")
+            return data
+        raise UpstoxDataError(f"Upstox GET {path} failed: exhausted retries")
 
     def profile(self) -> dict[str, Any]:
         return self._get("/v2/user/profile").get("data", {})
