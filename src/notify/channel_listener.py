@@ -91,6 +91,8 @@ MAX_DAILY_LOSS_PER_STRATEGY = {
     "mom_ce": 25000,
     "mom_pe": 25000,
     "bsq": 25000,
+    "bsq_ce": 25000,
+    "bsq_pe": 25000,
     "pdhl": 25000,
     "orf": 25000,
     "aft": 25000,
@@ -784,7 +786,7 @@ def _recover_capital_from_db():
         elif ch in ("mom", "mom_ce", "mom_pe"):
             _mom_capital_avail -= cap
             _mom_capital_locked[tid] = cap
-        elif ch == "bsq":
+        elif ch in ("bsq", "bsq_ce", "bsq_pe"):
             _bsq_capital_avail -= cap
             _bsq_capital_locked[tid] = cap
     log.info("[CAPITAL] Recovered from DB: OEH=%d trades (avail=%.0f), OEL=%d (avail=%.0f), "
@@ -1756,7 +1758,7 @@ def _loss_cap_for_channel(ch: str) -> float:
         return CH2F_MAX_LOSS
     if ch == "ch2":
         return CH2_MAX_LOSS
-    if ch in ("oeh", "oel", "orb", "pdhl", "orf", "aft", "mom", "mom_ce", "mom_pe"):
+    if ch in ("oeh", "oel", "orb", "pdhl", "orf", "aft", "mom", "mom_ce", "mom_pe", "bsq", "bsq_ce", "bsq_pe"):
         return OEH_MAX_SL
     return MAX_LOSS_PER_TRADE
 
@@ -1764,7 +1766,7 @@ def _loss_cap_for_channel(ch: str) -> float:
 def _floor_for_channel(ch: str) -> float:
     if ch == "ch2f":
         return CH2F_PROFIT_FLOOR
-    if ch in ("oeh", "oel", "orb", "pdhl", "orf", "aft", "mom", "mom_ce", "mom_pe"):
+    if ch in ("oeh", "oel", "orb", "pdhl", "orf", "aft", "mom", "mom_ce", "mom_pe", "bsq", "bsq_ce", "bsq_pe"):
         return OEH_FLOOR_STEP
     return PROFIT_TARGET
 
@@ -1784,7 +1786,7 @@ def _floor_levels_for_channel(ch: str) -> list[float] | None:
         return AFT_FLOOR_LEVELS
     if ch in ("mom", "mom_ce", "mom_pe"):
         return MOM_FLOOR_LEVELS
-    if ch == "bsq":
+    if ch in ("bsq", "bsq_ce", "bsq_pe"):
         return BSQ_FLOOR_LEVELS
     return None
 
@@ -5086,8 +5088,23 @@ async def start_listener() -> None:
             log.info("[BSQ] No new squeeze breakout signals (%d stocks scanned)", len(all_candles))
             return
 
+        # NIFTY direction filter — skip CE on bearish days, PE on bullish days
+        regime = await _detect_nifty_regime()
+        if regime == "BEARISH":
+            before = len(candidates)
+            candidates = [c for c in candidates if c["option_type"] != "CE"]
+            skipped_nifty = before - len(candidates)
+            if skipped_nifty:
+                log.info("[BSQ] NIFTY BEARISH — skipped %d CE candidates", skipped_nifty)
+        elif regime == "BULLISH":
+            before = len(candidates)
+            candidates = [c for c in candidates if c["option_type"] != "PE"]
+            skipped_nifty = before - len(candidates)
+            if skipped_nifty:
+                log.info("[BSQ] NIFTY BULLISH — skipped %d PE candidates", skipped_nifty)
+
         candidates.sort(key=lambda x: x["breakout_strength"], reverse=True)
-        log.info("[BSQ] Found %d squeeze breakout candidates", len(candidates))
+        log.info("[BSQ] Found %d squeeze breakout candidates (after NIFTY filter)", len(candidates))
 
         if not _bsq_capital_locked:
             _bsq_init_capital()
@@ -5129,7 +5146,8 @@ async def start_listener() -> None:
                 skipped_capital += 1
                 continue
 
-            result = execute_signal(parsed, channel="bsq", max_lots=2)
+            bsq_ch = "bsq_ce" if ot == "CE" else "bsq_pe"
+            result = execute_signal(parsed, channel=bsq_ch, max_lots=2)
             if result["placed"]:
                 actual_capital = result["entry"] * result["qty"]
                 _bsq_allocate(result["trade_id"], actual_capital)
