@@ -198,6 +198,8 @@ MOM_MAX_ENTRIES_PER_SYM = 2
 MOM_TIME_CUTOFF = "15:15"       # run throughout market hours
 MOM_SL_COOLDOWN = True
 MOM_RESCAN_INTERVAL = 300       # rescan every 5 min (matches 5-min candle close)
+MOM_MAX_HOLD_MINS = 15          # exit if no floor hit within 15 minutes
+MOM_MAX_TRADES_PER_DAY = 20     # cap total MOM trades per day
 
 # ---------------------------------------------------------------------------
 # BSQ (Bollinger Squeeze Breakout) scanner
@@ -508,6 +510,7 @@ def _mom_free(trade_id: int, pnl: float):
 _mom_daily_pnl: float = 0.0
 _mom_daily_date: str = ""
 _mom_sym_entry_count: dict[str, int] = {}
+_mom_daily_trade_count: int = 0
 _mom_sl_blocked: set[str] = set()
 _mom_processed_candles: set[str] = set()
 
@@ -532,6 +535,8 @@ def _mom_daily_cap_hit() -> bool:
         _mom_sym_entry_count.clear()
         _mom_sl_blocked.clear()
         _mom_processed_candles.clear()
+        global _mom_daily_trade_count
+        _mom_daily_trade_count = 0
         return False
     if _mom_daily_pnl >= MOM_PROFIT_CAP:
         return True
@@ -3785,6 +3790,7 @@ async def _run_oel_scan():
 # ---------------------------------------------------------------------------
 async def _run_mom_scan():
     """Scan F&O universe for momentum breakout signals on 5-min candles."""
+    global _mom_daily_trade_count
     from datetime import datetime
     from zoneinfo import ZoneInfo
     from src.broker.upstox_data import UpstoxData, load_cached_token
@@ -3943,6 +3949,9 @@ async def _run_mom_scan():
     for c in candidates:
         if _mom_daily_cap_hit():
             break
+        if _mom_daily_trade_count >= MOM_MAX_TRADES_PER_DAY:
+            log.info("[MOM] Daily trade cap reached (%d)", MOM_MAX_TRADES_PER_DAY)
+            break
         if _mom_capital_avail < 5000:
             skipped_capital += len(candidates) - candidates.index(c)
             break
@@ -3981,6 +3990,7 @@ async def _run_mom_scan():
             actual_capital = result["entry"] * result["qty"]
             _mom_allocate(result["trade_id"], actual_capital)
             _mom_sym_entry_count[sym] = _mom_sym_entry_count.get(sym, 0) + 1
+            _mom_daily_trade_count += 1
             executed += 1
             _notify(
                 f"*[MOM] Trade #{executed}*\n"
@@ -4304,7 +4314,7 @@ async def start_listener() -> None:
                 with db.get_conn() as conn:
                     rows = conn.execute(
                         "SELECT id, symbol, price, qty, stop_price, target_price, "
-                        "broker_key, channel, targets_remaining, peak_price "
+                        "broker_key, channel, targets_remaining, peak_price, ts "
                         "FROM trades WHERE status = 'OPEN' AND broker_key IS NOT NULL"
                     ).fetchall()
                 if not rows:
@@ -4463,6 +4473,25 @@ async def start_listener() -> None:
                                 f"🔒 *Profit floor hit* — {trade['symbol']}\n"
                                 f"Peak: ₹{peak:+,.0f} | Floor: ₹{stepped_floor:,} | Exit: ₹{net_pnl:+,.0f}"
                             )
+                        elif ch in ("mom", "mom_ce", "mom_pe") and MOM_MAX_HOLD_MINS and stepped_floor == 0:
+                            from datetime import datetime as _dt
+                            from zoneinfo import ZoneInfo as _ZI
+                            _ist = _ZI(config.TIMEZONE)
+                            entry_ts = trade.get("ts")
+                            if entry_ts:
+                                entry_dt = _dt.fromisoformat(entry_ts) if isinstance(entry_ts, str) else entry_ts
+                                if entry_dt.tzinfo is None:
+                                    entry_dt = entry_dt.replace(tzinfo=_ist)
+                                elapsed = (_dt.now(_ist) - entry_dt).total_seconds() / 60
+                                if elapsed >= MOM_MAX_HOLD_MINS:
+                                    log.info("[MOM] MAX HOLD %dmin for %s: elapsed=%.1fmin net=₹%.0f — closing",
+                                             MOM_MAX_HOLD_MINS, trade["symbol"], elapsed, net_pnl)
+                                    _close_trade_by_id(tid, ltp, "max_hold")
+                                    _peak_net.pop(tid, None)
+                                    _notify(
+                                        f"⏱️ *Max hold exit* — {trade['symbol']}\n"
+                                        f"Held {elapsed:.0f}min (limit: {MOM_MAX_HOLD_MINS}min) | PnL: ₹{net_pnl:+,.0f}"
+                                    )
             except Exception as exc:  # noqa: BLE001
                 _monitor_fail_count += 1
                 if _monitor_fail_count % 60 == 0:
