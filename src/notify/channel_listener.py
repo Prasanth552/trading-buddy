@@ -126,7 +126,7 @@ MIN_OPTION_PREMIUM = 2.0         # skip options below ₹2 (illiquid, wide sprea
 # OEH Scanner (Open=High) — auto-execute config
 # ---------------------------------------------------------------------------
 OEH_ENABLED = True
-OEH_RUN_TIME = "09:20"          # IST — check after first 5-min candle
+OEH_RUN_TIME = "09:16"          # IST — scan on first 1-min candle close
 OEH_LIST_TIME = "09:16"         # IST — early list using 1-min candle
 OEH_CAPITAL = 300000            # ₹3 lakh capital pool — no trade limit, capital-gated
 OEH_SL_PCT = 0.30               # 30% of premium as stop-loss
@@ -146,7 +146,7 @@ OEH_SL_COOLDOWN = True          # guardrail: block stock for rest of day after S
 # OEL Scanner (Open=Low) — bullish counterpart to OEH
 # ---------------------------------------------------------------------------
 OEL_ENABLED = True
-OEL_RUN_TIME = "09:21"          # IST — right after OEH (regime filter removed, no need to wait)
+OEL_RUN_TIME = "09:17"          # IST — 1 min after OEH
 OEL_LIST_TIME = "09:16"         # IST — early list using 1-min candle
 OEL_CAPITAL = 300000            # ₹3 lakh capital pool — no trade limit, capital-gated
 OEL_SL_PCT = 0.30               # 30% of premium as stop-loss
