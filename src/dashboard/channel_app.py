@@ -70,7 +70,7 @@ async def _ws_stats_loop():
             _ensure_db()
             today_iso = mc.now_ist().date().isoformat()
             payload: dict[str, dict] = {}
-            for ch in ("ch3", "oeh", "oel", "orb", "mom_ce", "mom_pe", "bsq"):
+            for ch in ("ch3", "oeh", "oel", "orb", "mom_ce", "mom_pe", "bsq_ce", "bsq_pe"):
                 cf = _ch_filter(ch)
                 with db.get_conn() as conn:
                     row = conn.execute(f"""SELECT
@@ -138,7 +138,7 @@ async def _ws_ltp_loop():
         try:
             _ensure_db()
             open_trades: list[dict] = []
-            for ch in ("oeh", "oel", "orb", "mom_ce", "mom_pe", "bsq", "ch3", "pdhl", "orf", "aft"):
+            for ch in ("oeh", "oel", "orb", "mom_ce", "mom_pe", "bsq_ce", "bsq_pe", "ch3", "pdhl", "orf", "aft"):
                 cf = _ch_filter(ch)
                 with db.get_conn() as conn:
                     rows = conn.execute(
@@ -221,7 +221,9 @@ _CH_FILTERS = {
     "mom": f"({_CHANNEL_FILTER_BASE} AND channel IN ('mom','mom_ce','mom_pe'))",
     "mom_ce": f"({_CHANNEL_FILTER_BASE} AND channel = 'mom_ce')",
     "mom_pe": f"({_CHANNEL_FILTER_BASE} AND channel = 'mom_pe')",
-    "bsq": f"({_CHANNEL_FILTER_BASE} AND channel = 'bsq')",
+    "bsq": f"({_CHANNEL_FILTER_BASE} AND channel IN ('bsq','bsq_ce','bsq_pe'))",
+    "bsq_ce": f"({_CHANNEL_FILTER_BASE} AND channel = 'bsq_ce')",
+    "bsq_pe": f"({_CHANNEL_FILTER_BASE} AND channel = 'bsq_pe')",
     "ch2f": f"({_CHANNEL_FILTER_BASE} AND channel = 'ch2f')",
     "ch1f": f"({_CHANNEL_FILTER_BASE} AND (channel IS NULL OR channel = 'ch1') AND filter_score >= 50)",
 }
@@ -1331,7 +1333,8 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
   <button class="tab" onclick="switchCh('orb')" id="tab-orb"><span class=ico>R</span> ORB</button>
   <button class="tab" onclick="switchCh('mom_ce')" id="tab-mom_ce"><span class=ico>MC</span> MOM CE</button>
   <button class="tab" onclick="switchCh('mom_pe')" id="tab-mom_pe"><span class=ico>MP</span> MOM PE</button>
-  <button class="tab" onclick="switchCh('bsq')" id="tab-bsq"><span class=ico>B</span> BSQ</button>
+  <button class="tab" onclick="switchCh('bsq_ce')" id="tab-bsq_ce"><span class=ico>BC</span> BSQ CE</button>
+  <button class="tab" onclick="switchCh('bsq_pe')" id="tab-bsq_pe"><span class=ico>BP</span> BSQ PE</button>
 </div>
 
 <div class=wrap>
