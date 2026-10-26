@@ -87,6 +87,8 @@ MAX_DAILY_LOSS_PER_STRATEGY = {
     "oeh": 25000,
     "oel": 25000,
     "orb": 25000,
+    "orb_ce": 25000,
+    "orb_pe": 25000,
     "mom": 25000,
     "mom_ce": 25000,
     "mom_pe": 25000,
@@ -793,7 +795,7 @@ def _recover_capital_from_db():
         elif ch == "oel":
             _oel_capital_avail -= cap
             _oel_capital_locked[tid] = cap
-        elif ch == "orb":
+        elif ch in ("orb", "orb_ce", "orb_pe"):
             _orb_capital_avail -= cap
             _orb_capital_locked[tid] = cap
         elif ch in ("mom", "mom_ce", "mom_pe"):
@@ -1333,7 +1335,8 @@ def execute_signal(sig: ParsedSignal, *, channel: str = "ch1", max_lots: int | N
     lot_size = config.LOT_SIZES.get(lot_key, master_lot_size)
 
     is_index = lot_key in ("NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY")
-    if channel in ("oeh", "oel", "orb", "pdhl", "orf", "aft") and max_lots is not None:
+    scanner_channels = ("oeh", "oel", "orb", "orb_ce", "orb_pe", "pdhl", "orf", "aft")
+    if channel in scanner_channels and max_lots is not None:
         lots = max_lots
     elif channel in ("ch2", "ch2f", "ch3"):
         lots = 3 if is_index else 2
@@ -1341,7 +1344,7 @@ def execute_signal(sig: ParsedSignal, *, channel: str = "ch1", max_lots: int | N
         lots = 2
     else:
         lots = 1
-    if max_lots is not None and channel not in ("oeh", "oel", "orb", "pdhl", "orf", "aft"):
+    if max_lots is not None and channel not in scanner_channels:
         lots = min(lots, max_lots)
     qty = lots * lot_size
 
@@ -1365,7 +1368,7 @@ def execute_signal(sig: ParsedSignal, *, channel: str = "ch1", max_lots: int | N
         log.warning("LTP fetch failed, using signal price: %s", exc)
 
     # Liquidity filter: skip very cheap options (wide spreads in live)
-    if entry_price < MIN_OPTION_PREMIUM and channel in ("oeh", "oel", "orb"):
+    if entry_price < MIN_OPTION_PREMIUM and channel in ("oeh", "oel", "orb", "orb_ce", "orb_pe"):
         return {"placed": False, "reason": f"Premium ₹{entry_price:.2f} < min ₹{MIN_OPTION_PREMIUM}"}
 
     # Slippage: simulate buying at ask (slightly above LTP)
@@ -1771,7 +1774,7 @@ def _loss_cap_for_channel(ch: str) -> float:
         return CH2F_MAX_LOSS
     if ch == "ch2":
         return CH2_MAX_LOSS
-    if ch in ("oeh", "oel", "orb", "pdhl", "orf", "aft", "mom", "mom_ce", "mom_pe", "bsq", "bsq_ce", "bsq_pe"):
+    if ch in ("oeh", "oel", "orb", "orb_ce", "orb_pe", "pdhl", "orf", "aft", "mom", "mom_ce", "mom_pe", "bsq", "bsq_ce", "bsq_pe"):
         return OEH_MAX_SL
     return MAX_LOSS_PER_TRADE
 
@@ -1779,7 +1782,7 @@ def _loss_cap_for_channel(ch: str) -> float:
 def _floor_for_channel(ch: str) -> float:
     if ch == "ch2f":
         return CH2F_PROFIT_FLOOR
-    if ch in ("oeh", "oel", "orb", "pdhl", "orf", "aft", "mom", "mom_ce", "mom_pe", "bsq", "bsq_ce", "bsq_pe"):
+    if ch in ("oeh", "oel", "orb", "orb_ce", "orb_pe", "pdhl", "orf", "aft", "mom", "mom_ce", "mom_pe", "bsq", "bsq_ce", "bsq_pe"):
         return OEH_FLOOR_STEP
     return PROFIT_TARGET
 
@@ -1789,7 +1792,7 @@ def _floor_levels_for_channel(ch: str) -> list[float] | None:
         return OEH_FLOOR_LEVELS
     if ch == "oel":
         return OEL_FLOOR_LEVELS
-    if ch == "orb":
+    if ch in ("orb", "orb_ce", "orb_pe"):
         return ORB_FLOOR_LEVELS
     if ch == "pdhl":
         return PDHL_FLOOR_LEVELS
@@ -2816,6 +2819,26 @@ async def _run_orb_scan():
     # Sort by range_pct descending (strongest ranges first)
     candidates.sort(key=lambda x: x["range_pct"], reverse=True)
 
+    # NIFTY regime filter — skip CE on bearish days, PE on bullish days
+    regime = await _detect_nifty_regime()
+    skipped_regime = 0
+    if regime == "BEARISH":
+        before = len(candidates)
+        candidates = [c for c in candidates if c["direction"] != "bullish"]
+        skipped_regime = before - len(candidates)
+        if skipped_regime:
+            log.info("[ORB] NIFTY BEARISH — skipped %d bullish(CE) candidates", skipped_regime)
+    elif regime == "BULLISH":
+        before = len(candidates)
+        candidates = [c for c in candidates if c["direction"] != "bearish"]
+        skipped_regime = before - len(candidates)
+        if skipped_regime:
+            log.info("[ORB] NIFTY BULLISH — skipped %d bearish(PE) candidates", skipped_regime)
+
+    if not candidates:
+        _notify(f"[ORB] No breakouts after regime filter (regime={regime}, skipped {skipped_regime})")
+        return
+
     # Initialize capital pool (only on first scan of the day, not rescans)
     if not _orb_capital_locked:
         _orb_init_capital()
@@ -2857,6 +2880,7 @@ async def _run_orb_scan():
             continue
 
         opt_type = "CE" if c["direction"] == "bullish" else "PE"
+        orb_channel = "orb_ce" if opt_type == "CE" else "orb_pe"
 
         parsed = _resolve_atm_strike(sym, opt_type)
         if parsed is None:
@@ -2873,7 +2897,7 @@ async def _run_orb_scan():
             skipped_capital += 1
             continue
 
-        result = execute_signal(parsed, channel="orb", max_lots=2)
+        result = execute_signal(parsed, channel=orb_channel, max_lots=2)
         if result["placed"]:
             actual_capital = result["entry"] * result["qty"]
             _orb_allocate(result["trade_id"], actual_capital)
@@ -2886,7 +2910,7 @@ async def _run_orb_scan():
                 f"({dir_tag} rng={c['range_pct']:.1f}%) [cap: ₹{_orb_capital_avail:,.0f}]"
             )
             _notify(
-                f"*[ORB] Trade #{executed}*\n"
+                f"*[{orb_channel.upper()}] Trade #{executed}*\n"
                 f"{dir_tag} {result['symbol']} x{result['qty']}\n"
                 f"Entry: {result['entry']} | SL: {result['sl']} | Floors: ₹500→₹1000→₹1500...\n"
                 f"Capital: ₹{actual_capital:,.0f} locked | ₹{_orb_capital_avail:,.0f} available"
@@ -4044,6 +4068,8 @@ def _build_eod_report(target_date: str | None = None) -> str:
         ("oeh", "OEH Scanner"),
         ("oel", "OEL Scanner"),
         ("orb", "ORB Scanner"),
+        ("orb_ce", "ORB CE"),
+        ("orb_pe", "ORB PE"),
         ("pdhl", "PDHL Scanner"),
         ("orf", "ORF Scanner"),
         ("aft", "AFT Scanner"),
@@ -4492,7 +4518,7 @@ async def start_listener() -> None:
                             if ch in ("mom", "mom_ce", "mom_pe") and MOM_MAX_HOLD_MINS:
                                 max_hold = MOM_MAX_HOLD_MINS
                                 tag = "MOM"
-                            elif ch == "orb" and ORB_MAX_HOLD_MINS:
+                            elif ch in ("orb", "orb_ce", "orb_pe") and ORB_MAX_HOLD_MINS:
                                 max_hold = ORB_MAX_HOLD_MINS
                                 tag = "ORB"
                             if max_hold:
