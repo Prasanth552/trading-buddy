@@ -3635,8 +3635,6 @@ async def _run_oel_scan():
         return
 
 
-    _notify("*[OEL] Scanning for Open=Low stocks...*")
-
     try:
         await _ensure_master_loaded()
     except Exception as exc:
@@ -3647,28 +3645,48 @@ async def _run_oel_scan():
     ud = UpstoxData(access_token=token)
     eq_keys = _cached_eq_keys
 
+    # Gift Nifty pre-market direction gate
+    # Compare Gift Nifty LTP vs NIFTY 50 previous close to gauge opening direction
+    GIFT_NIFTY_KEY = "GLOBAL_INDEX|SGX NIFTY"
+    nifty_key = config.UPSTOX_INDEX_KEYS.get("NSE:NIFTY 50")
+    OEL_PREMARKET_THRESHOLD = 0.3  # skip if gap < 0.3% bullish
+    gift_ok = True  # default: proceed if data unavailable
+    try:
+        ohlc = ud.market_quote_ohlc([GIFT_NIFTY_KEY, nifty_key])
+        gift = ohlc.get(GIFT_NIFTY_KEY, {})
+        nifty = ohlc.get(nifty_key, {})
+        gift_ltp = gift.get("ltp", 0)
+        nifty_prev_close = nifty.get("close", 0)
+        if gift_ltp > 0 and nifty_prev_close > 0:
+            gap_pct = (gift_ltp - nifty_prev_close) / nifty_prev_close * 100
+            log.info("[OEL] Gift Nifty LTP=%.1f, NIFTY prev close=%.1f, gap=%.2f%%",
+                     gift_ltp, nifty_prev_close, gap_pct)
+            if gap_pct >= OEL_PREMARKET_THRESHOLD:
+                _notify(f"*[OEL] Gift Nifty BULLISH* (gap +{gap_pct:.2f}%) — proceeding with scan")
+            elif gap_pct <= -OEL_PREMARKET_THRESHOLD:
+                log.info("[OEL] Gift Nifty BEARISH (gap %.2f%%) — skipping OEL scan", gap_pct)
+                _notify(f"*[OEL] Scan SKIPPED* — Gift Nifty bearish (gap {gap_pct:+.2f}%, "
+                        f"LTP={gift_ltp:.1f} vs prev close={nifty_prev_close:.1f})")
+                gift_ok = False
+            else:
+                log.info("[OEL] Gift Nifty FLAT (gap %.2f%%) — skipping OEL scan", gap_pct)
+                _notify(f"*[OEL] Scan SKIPPED* — Gift Nifty flat (gap {gap_pct:+.2f}%, "
+                        f"threshold ±{OEL_PREMARKET_THRESHOLD}%)")
+                gift_ok = False
+        else:
+            log.warning("[OEL] Gift Nifty data incomplete (ltp=%.1f, prev_close=%.1f), proceeding",
+                        gift_ltp, nifty_prev_close)
+    except Exception as exc:
+        log.warning("[OEL] Gift Nifty check failed (%s), proceeding with scan", exc)
+
+    if not gift_ok:
+        return
+
+    _notify("*[OEL] Scanning for Open=Low stocks...*")
+
     today = datetime.now(IST).date()
     from_dt = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=15)
     to_dt = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=50)
-
-    # NIFTY trend filter: log only (proceed regardless with floor strategy)
-    nifty_key = config.UPSTOX_INDEX_KEYS.get("NSE:NIFTY 50")
-    if nifty_key:
-        try:
-            nifty_candles = ud.historical_data(nifty_key, from_dt, to_dt, "5minute")
-            if nifty_candles and len(nifty_candles) >= 1:
-                nifty_open = nifty_candles[0]["open"]
-                nifty_close = nifty_candles[0]["close"]
-                if nifty_close < nifty_open:
-                    log.info("[OEL] NIFTY is red (open=%.1f close=%.1f) — proceeding anyway (floor strategy)",
-                             nifty_open, nifty_close)
-                    _notify(f"[OEL] NIFTY is red at 9:20 "
-                            f"(open={nifty_open:.1f} → {nifty_close:.1f}). "
-                            f"Proceeding — floor strategy handles red days.")
-                log.info("[OEL] NIFTY is green (open=%.1f close=%.1f) — proceeding with scan",
-                         nifty_open, nifty_close)
-        except Exception as exc:
-            log.warning("[OEL] Could not fetch NIFTY data, proceeding anyway: %s", exc)
 
     sym_key_pairs = [
         (sym, eq_keys[sym]) for sym in OEL_UNIVERSE
