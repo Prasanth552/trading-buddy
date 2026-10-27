@@ -70,7 +70,7 @@ async def _ws_stats_loop():
             _ensure_db()
             today_iso = mc.now_ist().date().isoformat()
             payload: dict[str, dict] = {}
-            for ch in ("ch3", "oeh", "oel", "orb", "mom_ce", "mom_pe", "bsq_ce", "bsq_pe"):
+            for ch in ("ch3", "oeh", "oel", "orb_ce", "orb_pe", "mom_ce", "mom_pe", "bsq_ce", "bsq_pe"):
                 cf = _ch_filter(ch)
                 with db.get_conn() as conn:
                     row = conn.execute(f"""SELECT
@@ -138,7 +138,7 @@ async def _ws_ltp_loop():
         try:
             _ensure_db()
             open_trades: list[dict] = []
-            for ch in ("oeh", "oel", "orb", "mom_ce", "mom_pe", "bsq_ce", "bsq_pe", "ch3", "pdhl", "orf", "aft"):
+            for ch in ("oeh", "oel", "orb_ce", "orb_pe", "mom_ce", "mom_pe", "bsq_ce", "bsq_pe", "ch3", "pdhl", "orf", "aft"):
                 cf = _ch_filter(ch)
                 with db.get_conn() as conn:
                     rows = conn.execute(
@@ -214,7 +214,9 @@ _CH_FILTERS = {
     "ch5": f"({_CHANNEL_FILTER_BASE} AND channel = 'ch5')",
     "oeh": f"({_CHANNEL_FILTER_BASE} AND channel = 'oeh')",
     "oel": f"({_CHANNEL_FILTER_BASE} AND channel = 'oel')",
-    "orb": f"({_CHANNEL_FILTER_BASE} AND channel = 'orb')",
+    "orb": f"({_CHANNEL_FILTER_BASE} AND channel IN ('orb','orb_ce','orb_pe'))",
+    "orb_ce": f"({_CHANNEL_FILTER_BASE} AND channel = 'orb_ce')",
+    "orb_pe": f"({_CHANNEL_FILTER_BASE} AND channel = 'orb_pe')",
     "pdhl": f"({_CHANNEL_FILTER_BASE} AND channel = 'pdhl')",
     "orf": f"({_CHANNEL_FILTER_BASE} AND channel = 'orf')",
     "aft": f"({_CHANNEL_FILTER_BASE} AND channel = 'aft')",
@@ -1330,7 +1332,8 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
 <div class=tabs id=tabbar>
   <button class="tab active" onclick="switchCh('oeh')" id="tab-oeh"><span class=ico>O</span> OEH</button>
   <button class="tab" onclick="switchCh('oel')" id="tab-oel"><span class=ico>L</span> OEL</button>
-  <button class="tab" onclick="switchCh('orb')" id="tab-orb"><span class=ico>R</span> ORB</button>
+  <button class="tab" onclick="switchCh('orb_ce')" id="tab-orb_ce"><span class=ico>RC</span> ORB CE</button>
+  <button class="tab" onclick="switchCh('orb_pe')" id="tab-orb_pe"><span class=ico>RP</span> ORB PE</button>
   <button class="tab" onclick="switchCh('mom_ce')" id="tab-mom_ce"><span class=ico>MC</span> MOM CE</button>
   <button class="tab" onclick="switchCh('mom_pe')" id="tab-mom_pe"><span class=ico>MP</span> MOM PE</button>
   <button class="tab" onclick="switchCh('bsq_ce')" id="tab-bsq_ce"><span class=ico>BC</span> BSQ CE</button>
