@@ -92,9 +92,9 @@ MAX_DAILY_LOSS_PER_STRATEGY = {
     "mom": 25000,
     "mom_ce": 25000,
     "mom_pe": 25000,
-    "bsq": 25000,
-    "bsq_ce": 25000,
-    "bsq_pe": 25000,
+    "bsq": 20000,
+    "bsq_ce": 10000,
+    "bsq_pe": 10000,
     "pdhl": 25000,
     "orf": 25000,
     "aft": 25000,
@@ -225,6 +225,7 @@ BSQ_MAX_ENTRIES_PER_SYM = 2
 BSQ_TIME_CUTOFF = "13:00"
 BSQ_SL_COOLDOWN = True
 BSQ_RESCAN_INTERVAL = 300       # rescan every 5 min
+BSQ_MAX_TRADES_PER_DAY = 30
 
 # PDH/PDL Breakout config
 PDHL_ENABLED = False
@@ -581,6 +582,7 @@ def _bsq_free(trade_id: int, pnl: float):
 
 _bsq_daily_pnl: float = 0.0
 _bsq_daily_date: str = ""
+_bsq_daily_trade_count: int = 0
 _bsq_sym_entry_count: dict[str, int] = {}
 _bsq_sl_blocked: set[str] = set()
 _bsq_processed_candles: set[str] = set()
@@ -596,12 +598,13 @@ def _bsq_record_pnl(pnl: float):
     _bsq_daily_pnl += pnl
 
 def _bsq_daily_cap_hit() -> bool:
-    global _bsq_daily_pnl, _bsq_daily_date
+    global _bsq_daily_pnl, _bsq_daily_date, _bsq_daily_trade_count
     from datetime import datetime
     from zoneinfo import ZoneInfo
     today = datetime.now(ZoneInfo(config.TIMEZONE)).strftime("%Y-%m-%d")
     if _bsq_daily_date != today:
         _bsq_daily_pnl = 0.0
+        _bsq_daily_trade_count = 0
         _bsq_daily_date = today
         _bsq_sym_entry_count.clear()
         _bsq_sl_blocked.clear()
@@ -610,6 +613,8 @@ def _bsq_daily_cap_hit() -> bool:
     if _bsq_daily_pnl >= BSQ_PROFIT_CAP:
         return True
     if _bsq_daily_pnl <= -BSQ_LOSS_CAP:
+        return True
+    if _bsq_daily_trade_count >= BSQ_MAX_TRADES_PER_DAY:
         return True
     return False
 
@@ -4092,6 +4097,10 @@ def _build_eod_report(target_date: str | None = None) -> str:
         ("orf", "ORF Scanner"),
         ("aft", "AFT Scanner"),
         ("bsq", "BSQ Scanner"),
+        ("bsq_ce", "BSQ CE"),
+        ("bsq_pe", "BSQ PE"),
+        ("mom_ce", "MOM CE"),
+        ("mom_pe", "MOM PE"),
     ]
 
     lines = []
@@ -5043,6 +5052,7 @@ async def start_listener() -> None:
 
     async def _run_bsq_scan():
         """Scan F&O universe for Bollinger squeeze breakout signals on 5-min candles."""
+        global _bsq_daily_trade_count
         import math
         from datetime import datetime
         from zoneinfo import ZoneInfo
@@ -5256,6 +5266,7 @@ async def start_listener() -> None:
                 actual_capital = result["entry"] * result["qty"]
                 _bsq_allocate(result["trade_id"], actual_capital)
                 _bsq_sym_entry_count[sym] = _bsq_sym_entry_count.get(sym, 0) + 1
+                _bsq_daily_trade_count += 1
                 executed += 1
                 _notify(
                     f"*[BSQ] Trade #{executed}*\n"
