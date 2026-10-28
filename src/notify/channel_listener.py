@@ -105,7 +105,7 @@ CH2_INDEX_ONLY = {"NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY"}
 CH2F_ENABLED = False
 CH2F_MAX_LOSS = 6000   # ₹6,000 SL cap (wider than ch2's ₹4K)
 CH2F_PROFIT_FLOOR = 2000  # ₹2,000 floor (higher than ch2's ₹1.5K)
-CH2F_PE_ONLY = True     # skip all CE signals
+CH2F_PE_ONLY = False    # replaced by regime-based filter (FLAT allows both)
 CH2F_SKIP_HOURS = {12, 13}  # skip 12:xx and 13:xx signals
 
 # ---------------------------------------------------------------------------
@@ -279,12 +279,15 @@ _peak_net: dict[int, float] = {}
 # ---------------------------------------------------------------------------
 # NIFTY Regime Detection — bearish/bullish based on first 15-min candle
 # ---------------------------------------------------------------------------
-_nifty_regime: str = ""          # "BEARISH" / "BULLISH" / "" (unknown)
+_nifty_regime: str = ""          # "BEARISH" / "BULLISH" / "FLAT" / "" (unknown)
 _nifty_regime_date: str = ""     # date string for cache
+
+REGIME_THRESHOLD_PCT = 0.3  # require 0.3%+ move to call directional regime
 
 async def _detect_nifty_regime() -> str:
     """Check NIFTY first 15-min candle to determine today's regime.
-    Returns 'BEARISH' if red, 'BULLISH' if green, '' if unknown.
+    Returns 'BEARISH', 'BULLISH', 'FLAT', or '' if unknown.
+    FLAT = move < REGIME_THRESHOLD_PCT — both CE and PE allowed.
     Caches result per day — only fetches once."""
     global _nifty_regime, _nifty_regime_date
     from datetime import datetime
@@ -311,12 +314,18 @@ async def _detect_nifty_regime() -> str:
         if candles and len(candles) >= 3:
             nifty_open = candles[0]["open"]
             nifty_close = candles[-1]["close"]
-            _nifty_regime = "BEARISH" if nifty_close < nifty_open else "BULLISH"
+            move_pct = (nifty_close - nifty_open) / nifty_open * 100
+            if move_pct >= REGIME_THRESHOLD_PCT:
+                _nifty_regime = "BULLISH"
+            elif move_pct <= -REGIME_THRESHOLD_PCT:
+                _nifty_regime = "BEARISH"
+            else:
+                _nifty_regime = "FLAT"
             _nifty_regime_date = today
-            log.info("[REGIME] NIFTY first 15-min: open=%.1f close=%.1f → %s",
-                     nifty_open, nifty_close, _nifty_regime)
+            log.info("[REGIME] NIFTY first 15-min: open=%.1f close=%.1f move=%+.2f%% → %s",
+                     nifty_open, nifty_close, move_pct, _nifty_regime)
             _notify(f"*[REGIME] NIFTY {_nifty_regime}* "
-                    f"(open={nifty_open:.1f} → close={nifty_close:.1f})")
+                    f"(open={nifty_open:.1f} → close={nifty_close:.1f}, {move_pct:+.2f}%)")
             return _nifty_regime
     except Exception as exc:
         log.warning("[REGIME] Could not fetch NIFTY data: %s", exc)
@@ -1864,9 +1873,15 @@ def _execute_and_notify(sig: ParsedSignal, channel: str, ch_label: str) -> None:
 
 def _maybe_execute_ch2f(sig: ParsedSignal) -> None:
     """Shadow-execute on ch2f if the signal passes optimized filters."""
-    if CH2F_PE_ONLY and sig.option_type != "PE":
-        log.info("[CH2F] SKIP CE signal: %s %s %s", sig.symbol, int(sig.strike), sig.option_type)
+    # Regime-based filter: BEARISH→PE only, BULLISH→CE only, FLAT→both
+    if _nifty_regime == "BEARISH" and sig.option_type != "PE":
+        log.info("[CH2F] SKIP CE signal (regime BEARISH): %s %s %s", sig.symbol, int(sig.strike), sig.option_type)
         return
+    if _nifty_regime == "BULLISH" and sig.option_type != "CE":
+        log.info("[CH2F] SKIP PE signal (regime BULLISH): %s %s %s", sig.symbol, int(sig.strike), sig.option_type)
+        return
+    if _nifty_regime == "FLAT":
+        log.info("[CH2F] FLAT regime — allowing %s: %s %s", sig.option_type, sig.symbol, int(sig.strike))
 
     from src.utils.market_calendar import now_ist
     hr = now_ist().hour
@@ -2824,7 +2839,7 @@ async def _run_orb_scan():
     # Sort by range_pct descending (strongest ranges first)
     candidates.sort(key=lambda x: x["range_pct"], reverse=True)
 
-    # NIFTY regime filter — skip CE on bearish days, PE on bullish days
+    # NIFTY regime filter — FLAT = both sides allowed
     regime = await _detect_nifty_regime()
     skipped_regime = 0
     if regime == "BEARISH":
@@ -2839,6 +2854,8 @@ async def _run_orb_scan():
         skipped_regime = before - len(candidates)
         if skipped_regime:
             log.info("[ORB] NIFTY BULLISH — skipped %d bearish(PE) candidates", skipped_regime)
+    elif regime == "FLAT":
+        log.info("[ORB] NIFTY FLAT — allowing both CE and PE candidates")
 
     if not candidates:
         _notify(f"[ORB] No breakouts after regime filter (regime={regime}, skipped {skipped_regime})")
@@ -3977,22 +3994,22 @@ async def _run_mom_scan():
         log.info("[MOM] No new momentum signals (%d stocks, %d candles processed)", len(all_candles), len(_mom_processed_candles))
         return
 
-    # Filter CE candidates when NIFTY is below its open (bearish reversal)
-    ce_count_before = sum(1 for c in candidates if c["option_type"] == "CE")
-    if ce_count_before > 0:
-        try:
-            nifty_k = config.UPSTOX_INDEX_KEYS.get("NSE:NIFTY 50")
-            if nifty_k:
-                _nifty_1m = ud.historical_data(nifty_k, from_dt, to_dt, "1minute")
-                if _nifty_1m and len(_nifty_1m) >= 2:
-                    _n_open = _nifty_1m[0]["open"]
-                    _n_now = _nifty_1m[-1]["close"]
-                    if _n_now < _n_open:
-                        candidates = [c for c in candidates if c["option_type"] != "CE"]
-                        log.info("[MOM] NIFTY below open (%.1f < %.1f) — filtered %d CE candidates",
-                                 _n_now, _n_open, ce_count_before)
-        except Exception as _exc:
-            log.warning("[MOM] NIFTY filter check failed (%s), keeping all candidates", _exc)
+    # NIFTY regime filter — FLAT = both sides allowed
+    regime = await _detect_nifty_regime()
+    if regime == "BEARISH":
+        before = len(candidates)
+        candidates = [c for c in candidates if c["option_type"] != "CE"]
+        skipped_mom = before - len(candidates)
+        if skipped_mom:
+            log.info("[MOM] NIFTY BEARISH — skipped %d CE candidates", skipped_mom)
+    elif regime == "BULLISH":
+        before = len(candidates)
+        candidates = [c for c in candidates if c["option_type"] != "PE"]
+        skipped_mom = before - len(candidates)
+        if skipped_mom:
+            log.info("[MOM] NIFTY BULLISH — skipped %d PE candidates", skipped_mom)
+    elif regime == "FLAT":
+        log.info("[MOM] NIFTY FLAT — allowing both CE and PE candidates")
 
     # Sort by body_pct (strongest momentum first)
     candidates.sort(key=lambda x: x["body_pct"], reverse=True)
@@ -5202,7 +5219,7 @@ async def start_listener() -> None:
             log.info("[BSQ] No new squeeze breakout signals (%d stocks scanned)", len(all_candles))
             return
 
-        # NIFTY direction filter — skip CE on bearish days, PE on bullish days
+        # NIFTY direction filter — FLAT = both sides allowed
         regime = await _detect_nifty_regime()
         if regime == "BEARISH":
             before = len(candidates)
@@ -5216,6 +5233,8 @@ async def start_listener() -> None:
             skipped_nifty = before - len(candidates)
             if skipped_nifty:
                 log.info("[BSQ] NIFTY BULLISH — skipped %d PE candidates", skipped_nifty)
+        elif regime == "FLAT":
+            log.info("[BSQ] NIFTY FLAT — allowing both CE and PE candidates")
 
         candidates.sort(key=lambda x: x["breakout_strength"], reverse=True)
         log.info("[BSQ] Found %d squeeze breakout candidates (after NIFTY filter)", len(candidates))
