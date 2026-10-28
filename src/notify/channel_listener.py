@@ -4575,8 +4575,8 @@ async def start_listener() -> None:
                                     if entry_dt.tzinfo is None:
                                         entry_dt = entry_dt.replace(tzinfo=_ist)
                                     elapsed = (_dt.now(_ist) - entry_dt).total_seconds() / 60
-                                    if elapsed >= max_hold:
-                                        log.info("[%s] MAX HOLD %dmin for %s: elapsed=%.1fmin net=₹%.0f — closing",
+                                    if elapsed >= max_hold and net_pnl >= 0:
+                                        log.info("[%s] MAX HOLD %dmin for %s: elapsed=%.1fmin net=₹%.0f — closing (profitable)",
                                                  tag, max_hold, trade["symbol"], elapsed, net_pnl)
                                         _close_trade_by_id(tid, ltp, "max_hold")
                                         _peak_net.pop(tid, None)
@@ -4584,6 +4584,9 @@ async def start_listener() -> None:
                                             f"⏱️ *Max hold exit* — {trade['symbol']}\n"
                                             f"Held {elapsed:.0f}min (limit: {max_hold}min) | PnL: ₹{net_pnl:+,.0f}"
                                         )
+                                    elif elapsed >= max_hold and net_pnl < 0:
+                                        log.info("[%s] MAX HOLD %dmin for %s: elapsed=%.1fmin net=₹%.0f — SKIPPING (at loss, let SL handle)",
+                                                 tag, max_hold, trade["symbol"], elapsed, net_pnl)
             except Exception as exc:  # noqa: BLE001
                 _monitor_fail_count += 1
                 if _monitor_fail_count % 60 == 0:
