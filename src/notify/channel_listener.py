@@ -5744,7 +5744,7 @@ async def start_listener() -> None:
 
         log.info("[%s] Channel message: %s", ch_label, text[:120])
 
-        if channel in ("ch1", "ch1b", "ch2", "ch3"):
+        if channel in ("ch2", "ch3"):
             return
 
         # --- CH2: handle control messages before parsing ---
