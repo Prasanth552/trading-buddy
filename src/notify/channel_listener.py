@@ -86,6 +86,7 @@ MAX_DAILY_LOSS = 25000  # ₹25,000 global daily loss limit (for ch1/ch2 only)
 MAX_DAILY_LOSS_PER_STRATEGY = {
     "ch1": 25000,
     "ch1b": 25000,
+    "ch2": 25000,
     "oeh": 25000,
     "oel": 25000,
     "orb": 25000,
@@ -5744,7 +5745,7 @@ async def start_listener() -> None:
 
         log.info("[%s] Channel message: %s", ch_label, text[:120])
 
-        if channel in ("ch2", "ch3"):
+        if channel in ("ch3",):
             return
 
         # --- CH2: handle control messages before parsing ---
