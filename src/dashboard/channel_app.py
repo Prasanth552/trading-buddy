@@ -1331,7 +1331,7 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
 
 <div class=tabs id=tabbar>
   <button class="tab active" onclick="switchCh('oeh')" id="tab-oeh"><span class=ico>O</span> OEH</button>
-  <button class="tab" onclick="switchCh('oel')" id="tab-oel"><span class=ico>L</span> OEL</button>
+  <button class="tab" onclick="switchCh('ch1')" id="tab-ch1"><span class=ico>DT</span> CH1</button>
   <button class="tab" onclick="switchCh('orb_ce')" id="tab-orb_ce"><span class=ico>RC</span> ORB CE</button>
   <button class="tab" onclick="switchCh('orb_pe')" id="tab-orb_pe"><span class=ico>RP</span> ORB PE</button>
   <button class="tab" onclick="switchCh('mom_ce')" id="tab-mom_ce"><span class=ico>MC</span> MOM CE</button>

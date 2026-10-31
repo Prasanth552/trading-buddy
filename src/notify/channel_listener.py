@@ -84,6 +84,8 @@ MAX_LOSS_PER_TRADE = 8000  # ₹8,000 hard cap — no trade can lose more than t
 CH2_MAX_LOSS = 4000  # ₹4,000 hard cap for CH2 trades
 MAX_DAILY_LOSS = 25000  # ₹25,000 global daily loss limit (for ch1/ch2 only)
 MAX_DAILY_LOSS_PER_STRATEGY = {
+    "ch1": 25000,
+    "ch1b": 25000,
     "oeh": 25000,
     "oel": 25000,
     "orb": 25000,
@@ -147,7 +149,7 @@ OEH_SL_COOLDOWN = True          # guardrail: block stock for rest of day after S
 # ---------------------------------------------------------------------------
 # OEL Scanner (Open=Low) — bullish counterpart to OEH
 # ---------------------------------------------------------------------------
-OEL_ENABLED = True
+OEL_ENABLED = False
 OEL_RUN_TIME = "09:17"          # IST — 1 min after OEH
 OEL_LIST_TIME = "09:16"         # IST — early list using 1-min candle
 OEL_CAPITAL = 300000            # ₹3 lakh capital pool — no trade limit, capital-gated
