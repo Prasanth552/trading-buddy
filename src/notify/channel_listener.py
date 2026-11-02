@@ -6137,6 +6137,33 @@ async def start_listener() -> None:
             _handle_followup(action, exit_price, channel, ch_label, original_sig)
             return
 
+        # --- CH2: bare number as price-based ABOVE activation ---
+        if channel == "ch2" and _ch2_trigger_held:
+            bare_num = re.match(r'^\s*(\d+(?:\.\d+)?)\s*$', text.strip())
+            if bare_num:
+                price_now = float(bare_num.group(1))
+                trig = _ch2_trigger_held.trigger_price
+                if trig > 0 and price_now >= trig:
+                    act_sig = _ch2_trigger_held
+                    act_origin = _ch2_trigger_held_msg_id or event.message.id
+                    act_is_fallback = _ch2_trigger_held_is_fallback
+                    act_is_reentry = _ch2_trigger_held_is_reentry
+                    _ch2_trigger_held = None
+                    _ch2_trigger_held_is_reentry = False
+                    if _ch2_can_execute(act_sig, event.message.id,
+                                        origin_msg_id=act_origin, is_fallback=act_is_fallback,
+                                        own_root=act_is_reentry):
+                        log.info("[CH2] ABOVE price activation: %.1f >= trigger %.1f -- executing %s %s %s",
+                                 price_now, trig, act_sig.symbol, int(act_sig.strike), act_sig.option_type)
+                        _notify(f"[CH2] Price {price_now} crossed trigger {trig} -- ABOVE activated:\n"
+                                f"{act_sig.symbol} {int(act_sig.strike)} {act_sig.option_type}")
+                        _execute_and_notify(act_sig, channel, ch_label)
+                    _ch2_msg_signals[event.message.id] = act_sig
+                    return
+                else:
+                    log.info("[CH2] Running price %.1f < trigger %.1f, still waiting", price_now, trig)
+                    return
+
         log.info("[%s] Not an entry signal or follow-up, skipping.", ch_label)
 
     if _telegram_connected:
