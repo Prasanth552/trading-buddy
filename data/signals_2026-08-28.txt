@@ -1,0 +1,169 @@
+
+==================================================================================================================================
+  CH1 SIGNALS — 2026-08-28 — Monthly expiry, 2 lots, ₹1,500 floor
+==================================================================================================================================
+  Parsed 7 signals from 23 messages
+
+  #   Time   Symbol                       Trigger   Entry      SL     TGT Lots   Qty Result          P&L Expiry       Warn
+  ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  19458 09:19  COFORGE 1900 CE                   95    98.0      87     105    2   950 [W] TGT_ALL    +16,150 29Sep        
+  19461 09:22  COFORGE 1920 CE                   93    93.9      85     103    2   950 [W] SL        +8,645 29Sep        
+  19463 09:22  LTM 4500 CE                      230   224.2     210     255    2   300 [W] FLOOR     +1,500 29Sep        
+  19466 09:35  KPITTECH 580 CE                   41    41.8      38      45    2  1550 [L] SL        -6,665 29Sep        
+  19470 10:02  CROMPTON 240 PE                   12    11.8      10      14    2  4300 [L] SL        -7,740 29Sep        
+  19473 11:00  KPITTECH 580 CE                   39    40.3      34      44    2  1550 [W] FLOOR     +1,500 29Sep        
+  19475 11:58  CROMPTON 240 PE                   11    11.1      10      13    2  4300 [W] FLOOR     +1,500 29Sep        
+
+  CH1: 5W/2L (0 no data) | P&L: ₹+14,890
+
+==================================================================================================================================
+  CH2 SIGNALS — 2026-08-28 — Index only, 3L idx, ₹1,500 floor
+  ABOVE → auto-hold until Active | NEAR → 5s delay
+==================================================================================================================================
+  ⊘  #11685 @ 11:00:43: SKIP non-index COFOREGE 2000 CE
+  ⏸  #11687 @ 11:00:54: WAIT FOR TRIGGER (nothing queued)
+  ⊘  #11695 @ 11:07:29: SKIP non-index TATAELEXSI 3700 CE
+  ⏸  #11697 @ 11:07:50: WAIT FOR TRIGGER (nothing queued)
+  📊 #11699 @ 11:09:57: NEAR SIGNAL NIFTY 24350 PE trigger=160.0 SL=153.0 TGT=174.0
+      → Queued (5s delay)
+  ⏱  5s elapsed — executing queued signal:
+      NIFTY 24350 PE
+  🔄 #11703 @ 11:15:25: RE-ENTRY NIFTY 24350 PE @ 160.0 SL=153
+  ▶  #11704 @ 11:18:02: ACTIVE (reply to #11703) — executing NIFTY 24350 PE
+  🔄 #11713 @ 11:19:29: RE-ENTRY ABOVE (held) NIFTY 24350 PE @ 170.0 SL=163
+  ▶  #11714 @ 11:22:15: ACTIVE (reply to #11713) — executing NIFTY 24350 PE
+  🔄 #11722 @ 11:24:28: RE-ENTRY ABOVE (held) NIFTY 24350 PE @ 180.0 SL=173
+  📊 #11734 @ 11:32:43: NEAR SIGNAL NIFTY 24300 PE trigger=150.0 SL=142.0 TGT=165.0
+      → Queued (5s delay)
+  ⏱  5s elapsed — executing queued signal:
+      NIFTY 24300 PE
+  ▶  #11735 @ 11:33:46: ACTIVE — executing held NIFTY 24350 PE
+  🔄 #11751 @ 11:34:28: RE-ENTRY ABOVE (held) NIFTY 24350 PE @ 174.0 SL=167
+  ▶  #11752 @ 11:36:07: ACTIVE (reply to #11751) — executing NIFTY 24350 PE
+  🔒 #11765 @ 11:37:31: ABOVE (auto-held) NIFTY 24250 PE
+  🔄 #11767 @ 11:45:34: RE-ENTRY NIFTY 24350 PE @ 140.0 SL=134
+  ▶  #11779 @ 11:57:18: ACTIVE (reply to #11765) — executing NIFTY 24250 PE
+  📊 #11797 @ 12:07:18: NEAR SIGNAL SENSEX 77100 PE trigger=340.0 SL=320.0 TGT=360.0
+      → Queued (5s delay)
+  ⏱  5s elapsed — executing queued signal:
+      SENSEX 77100 PE
+  🔄 #11816 @ 12:12:19: RE-ENTRY ABOVE (held) SENSEX 77100 PE @ 380.0 SL=358
+  ⊘  #11817 @ 12:12:38: RE-ENTRY SKIPPED (duplicate <60s)
+  🔄 #11818 @ 12:13:22: RE-ENTRY NIFTY 24250 PE @ 150.0 SL=140
+  🔄 #11819 @ 12:19:16: RE-ENTRY NIFTY 24250 PE @ 150.0 SL=140
+  ⚠  Replacing held SENSEX 77100 PE
+  🔒 #11830 @ 12:41:36: ABOVE (auto-held) NIFTY 24100 CE
+  🔄 #11838 @ 12:53:43: RE-ENTRY ABOVE (held) NIFTY 24250 PE @ 150.0 SL=140
+  📊 #11842 @ 12:55:43: NEAR SIGNAL NIFTY 24250 PE trigger=145.0 SL=138.0 TGT=155.0
+      → Queued (5s delay)
+  ⏱  5s elapsed — executing queued signal:
+      NIFTY 24250 PE
+  ▶  #11845 @ 12:58:27: ACTIVE — executing held NIFTY 24250 PE
+  🔒 #11864 @ 13:11:55: ABOVE (auto-held) NIFTY 24100 CE
+  ▶  #11870 @ 13:23:14: ACTIVE — executing held NIFTY 24100 CE
+  🔄 #11880 @ 13:29:55: RE-ENTRY NIFTY 24100 CE @ 133.0 SL=123
+  🔄 #11883 @ 13:34:25: RE-ENTRY ABOVE (held) NIFTY 24100 CE @ 133.0 SL=123
+  ⊘  #11884 @ 13:34:59: RE-ENTRY SKIPPED (duplicate <60s)
+  🔄 #11887 @ 13:42:57: RE-ENTRY ABOVE (held) NIFTY 24100 CE @ 133.0 SL=123
+  🔄 #11888 @ 13:48:56: RE-ENTRY NIFTY 24100 CE @ 133.0 SL=123
+  🔍 #11889 @ 14:18:38: FOCUS reply → holding NIFTY 24100 CE
+  🔄 #11890 @ 14:27:53: RE-ENTRY NIFTY 24100 CE @ 133.0 SL=123
+  ⊘  #11891 @ 14:35:33: SKIP non-index CRUDEOIL 8100 CE
+  ⏸  #11892 @ 14:35:50: WAIT FOR TRIGGER (already holding)
+  ▶  #11895 @ 14:49:44: ACTIVE (reply to #11890) — executing NIFTY 24100 CE
+  🔄 #11908 @ 14:51:45: RE-ENTRY ABOVE (held) NIFTY 24100 CE @ 160.0 SL=148
+  📊 #11910 @ 14:52:25: NEAR SIGNAL NIFTY 24150 CE trigger=115.0 SL=109.0 TGT=125.0
+      → Queued (5s delay)
+  ⏱  5s elapsed — executing queued signal:
+      NIFTY 24150 CE
+  🔄 #11918 @ 15:01:49: RE-ENTRY ABOVE (held) NIFTY 24150 CE @ 113.0 SL=107
+  ⚠  Replacing held NIFTY 24150 CE
+  🔒 #11920 @ 15:02:38: ABOVE (auto-held) SENSEX 77100 PE
+  ▶  #11922 @ 15:04:03: ACTIVE — executing held SENSEX 77100 PE
+  🔄 #11932 @ 15:05:43: RE-ENTRY ABOVE (held) SENSEX 77100 PE @ 300.0 SL=270
+  🔄 #11933 @ 15:07:06: RE-ENTRY SENSEX 77100 PE @ 300.0 SL=270
+  ▶  #11934 @ 15:09:32: ACTIVE (reply to #11918) — executing NIFTY 24150 CE
+  🔄 #11945 @ 15:11:30: RE-ENTRY ABOVE (held) NIFTY 24150 CE @ 128.0 SL=121
+  ▶  #11951 @ 15:12:04: ACTIVE (reply to #11945) — executing NIFTY 24150 CE
+  🔄 #11962 @ 15:12:43: RE-ENTRY ABOVE (held) NIFTY 24150 CE @ 144.0 SL=136
+  ⚠  Replacing held NIFTY 24150 CE
+  🔒 #11964 @ 15:13:21: ABOVE (auto-held) NIFTY 24200 CE
+  ⏸  #11966 @ 15:13:36: WAIT FOR TRIGGER (already holding)
+  🔄 #11967 @ 15:15:12: RE-ENTRY NIFTY 24150 CE @ 100.0 SL=95
+  🔄 #11977 @ 15:19:10: RE-ENTRY ABOVE (held) NIFTY 24150 CE @ 105.0 SL=100
+  ▶  #11979 @ 15:20:34: ACTIVE (reply to #11977) — executing NIFTY 24150 CE
+
+  #   Time   Symbol                     Entry      SL     TGT Lots   Qty Result          P&L Reason       Warn
+  ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  1   11:09  NIFTY 24350 PE             167.9     153     174    3   225 [L] MAX_SL     -4,000 near_exec    
+  2   11:15  NIFTY 24350 PE             154.0     153     174    3   225 [W] SL        +4,500 re-entry     
+  3   11:18  NIFTY 24350 PE             167.2     153     174    3   225 [W] SL        +1,530 active_trigger 
+  4   11:22  NIFTY 24350 PE             174.3     163     174    3   225 [W] TGT_ALL     +5,782 active_trigger ⚠TGT<E
+  5   11:32  NIFTY 24300 PE             166.3     142     165    3   225 [W] SL        +3,082 near_exec    ⚠TGT<E
+  6   11:33  NIFTY 24350 PE             203.3     173     174    3   225 [W] FLOOR     +1,500 active_trigger ⚠TGT<E
+  7   11:36  NIFTY 24350 PE             211.0     167     174    3   225 [W] FLOOR     +1,500 active_trigger ⚠TGT<E
+  8   11:45  NIFTY 24350 PE             211.2     134     174    3   225 [W] FLOOR     +1,500 re-entry     ⚠TGT<E
+  9   11:57  NIFTY 24250 PE             156.1     140     160    3   225 [W] SL          +889 active_trigger 
+  10  12:07  SENSEX 77100 PE            354.3     320     360    3    60 [W] SL          +342 near_exec    
+  11  12:13  NIFTY 24250 PE             151.0     140     160    3   225 [W] FLOOR     +1,500 re-entry     
+  12  12:19  NIFTY 24250 PE             151.2     140     160    3   225 [W] FLOOR     +1,500 re-entry     
+  13  12:55  NIFTY 24250 PE             146.8     138     155    3   225 [W] FLOOR     +1,500 near_exec    
+  14  12:58  NIFTY 24250 PE             152.1     140     160    3   225 [L] SL        -2,711 active_trigger 
+  15  13:23  NIFTY 24100 CE             134.8     123     143    3   225 [W] SL        +1,856 active_trigger 
+  16  13:29  NIFTY 24100 CE             126.8     123     143    3   225 [W] FLOOR     +1,500 re-entry     
+  17  13:48  NIFTY 24100 CE             131.3     123     143    3   225 [W] FLOOR     +1,500 re-entry     
+  18  14:27  NIFTY 24100 CE             141.0     123     143    3   225 [W] SL          +450 re-entry     
+  19  14:49  NIFTY 24100 CE             147.0     123     143    3   225 [W] SL        +2,925 active_trigger ⚠TGT<E
+  20  14:52  NIFTY 24150 CE             123.3     109     125    3   225 [L] MAX_SL     -4,000 near_exec    
+  21  15:04  SENSEX 77100 PE            300.9     270     320    3    60 [L] SL        -1,857 active_trigger 
+  22  15:07  SENSEX 77100 PE            267.0     270     320    3    60 [L] MAX_SL     -4,000 re-entry     ⚠SL>E
+  23  15:09  NIFTY 24150 CE             117.0     107     125    3   225 [W] SL        +1,789 active_trigger 
+  24  15:12  NIFTY 24150 CE             133.8     121     125    3   225 [W] SL        +1,384 active_trigger ⚠TGT<E
+  25  15:15  NIFTY 24150 CE             133.8      95     125    3   225 [W] SL        +1,384 re-entry     ⚠TGT<E
+  26  15:20  NIFTY 24150 CE             131.0     100     125    3   225 [W] SL        +2,025 active_trigger ⚠TGT<E
+
+  CH2: 21W/5L (0 no data) | P&L: ₹+23,370
+
+==================================================================================================================================
+  DB TRADES — 2026-08-28
+==================================================================================================================================
+
+  CH1 DB trades:
+  ID     Time   Symbol                         Entry      SL     TGT    Exit        P&L Status
+  ─────────────────────────────────────────────────────────────────────────────────────────────────────────
+  434    09:22  COFORGE 1900 CE                108.8      87     105   118.0     +8,404 CLOSED
+  444    09:35  COFORGE 1920 CE                104.3      85     103   103.5     -1,024 CLOSED
+  445    09:36  LTM 4500 CE                    227.0     210     255   227.2       -137 CLOSED
+  447    09:36  KPITTECH 580 CE                 40.0      38      45    40.9     +1,209 CLOSED
+  449    10:03  CROMPTON 240 PE                 11.7      10      14     9.8     -8,315 CLOSED_SL
+  451    11:01  KPITTECH 580 CE                 39.5      34      44    40.5     +1,366 CLOSED
+  455    12:01  CROMPTON 240 PE                 11.1      10      13    11.4     +1,136 CLOSED
+  CH1: 7 trades, DB P&L: ₹+2,638
+
+  CH2 DB trades:
+  ID     Time   Symbol                         Entry      SL     TGT    Exit        P&L Status
+  ─────────────────────────────────────────────────────────────────────────────────────────────────────────
+  443    09:35  SENSEX 77500 CE                400.4     385     430   382.4     -1,178 CLOSED_SL
+  446    09:36  NIFTY 24150 CE                 134.5     140     155   139.6       +888 CLOSED_SL
+  448    09:45  SENSEX 77600 CE                363.9     350     390   347.8     -1,066 CLOSED_SL
+  450    10:09  NIFTY 24200 CE                 111.8     110     128   110.0       -455 CLOSED_SL
+  452    11:10  NIFTY 24350 PE                 166.7     153     174   152.1     -2,961 CLOSED_SL
+  453    11:33  NIFTY 24300 PE                 158.0     165     180   166.2     +1,481 CLOSED
+  454    12:00  NIFTY 24250 PE                 155.2     160     175   157.8       +392 CLOSED_SL
+  456    12:10  SENSEX 77100 PE                355.0     360     400   359.5       +176 CLOSED_SL
+  457    12:56  NIFTY 24250 PE                 148.2     138     155   138.0     -2,087 CLOSED_SL
+  458    12:58  NIFTY 24100 CE                 127.7     120     140   135.4     +1,397 CLOSED
+  459    13:23  NIFTY 24100 CE                 131.7     123     143   138.4     +1,220 CLOSED
+  460    14:53  NIFTY 24150 CE                 124.3     125     140   124.4        -91 CLOSED_SL
+  461    15:05  SENSEX 77100 PE                294.0     270     320   269.9     -1,530 CLOSED_SL
+  462    15:21  NIFTY 24200 CE                 113.3     100     122    99.1     -2,860 CLOSED_SL
+  CH2: 14 trades, DB P&L: ₹-6,674
+
+==================================================================================================================================
+  GRAND TOTAL
+==================================================================================================================================
+  CH1: 5W/2L = ₹+14,890
+  CH2: 21W/5L = ₹+23,370
+  Combined: ₹+38,260
+  Re-entries (skipped): 9
+==================================================================================================================================

@@ -1,0 +1,94 @@
+nohup: ignoring input
+2026-08-04 09:14:34 IST | INFO    | trading_buddy.channel_listener | Logged in as prasanth (id=1059145330)
+2026-08-04 09:14:35 IST | INFO    | trading_buddy.telegram | Sent Telegram message (36 chars) to 2 chat(s).
+2026-08-04 09:14:35 IST | INFO    | trading_buddy.channel_listener | Listening for signals in channel -1721210254 ...
+Listening for signals in channel -1721210254 ... (Ctrl-C to stop)
+2026-08-04 09:15:59 IST | INFO    | trading_buddy.channel_listener | Channel message: KEI 5100 CE
+2026-08-04 09:16:03 IST | INFO    | trading_buddy.channel_listener | Not a signal or exit message, skipping.
+2026-08-04 09:16:40 IST | INFO    | trading_buddy.channel_listener | Channel message: BUY KEI 
+
+5100 CE ABOVE 310
+
+SL 290 TARGET 335 380
+2026-08-04 09:16:41 IST | INFO    | trading_buddy.channel_listener | Parsed signal: BUY KEI 5100.0 CE trigger=310.00 SL=290.00 targets=[335.0, 380.0]
+2026-08-04 09:16:43 IST | INFO    | trading_buddy.telegram | Sent Telegram message (99 chars) to 2 chat(s).
+2026-08-04 09:16:43 IST | INFO    | trading_buddy.upstox | Downloading Upstox instrument master...
+2026-08-04 09:16:44 IST | INFO    | trading_buddy.upstox | Loaded 120570 Upstox instruments.
+2026-08-04 09:16:44 IST | INFO    | trading_buddy.channel_listener | CHANNEL SIGNAL simulated order id=SIM-CHANNEL-1785815204772
+2026-08-04 09:16:47 IST | INFO    | trading_buddy.telegram | Sent Telegram message (72 chars) to 2 chat(s).
+2026-08-04 09:16:47 IST | INFO    | trading_buddy.channel_listener | Order placed: {'placed': True, 'order_id': 'SIM-CHANNEL-1785815204772', 'symbol': 'KEI 5100 CE', 'qty': 350, 'entry': 310.0, 'sl': 290.0, 'target': 335.0}
+2026-08-04 09:19:55 IST | INFO    | trading_buddy.channel_listener | Channel message: 325, BOOK OR TRAIL
+2026-08-04 09:19:57 IST | INFO    | trading_buddy.telegram | Sent Telegram message (91 chars) to 2 chat(s).
+2026-08-04 09:19:57 IST | INFO    | trading_buddy.channel_listener | Closed trade (id=170): entry=310.00 exit=325.00 pnl=5250.00 reason=book
+Cannot get difference since the account is likely misusing the session: database is locked
+Unhandled exception from keepalive_handle after cancelling <class '_asyncio.Task'> (<Task finished name='Task-7' coro=<UpdateMethods._keepalive_loop() done, defined at /home/pklprasanth522/Trading-Buddy/.venv/lib/python3.12/site-packages/telethon/client/updates.py:481> exception=OperationalError('database is locked')>)
+Traceback (most recent call last):
+  File "/home/pklprasanth522/Trading-Buddy/.venv/lib/python3.12/site-packages/telethon/helpers.py", line 176, in _cancel
+    await task
+  File "/home/pklprasanth522/Trading-Buddy/.venv/lib/python3.12/site-packages/telethon/client/updates.py", line 517, in _keepalive_loop
+    self._save_states_and_entities()
+  File "/home/pklprasanth522/Trading-Buddy/.venv/lib/python3.12/site-packages/telethon/client/telegrambaseclient.py", line 693, in _save_states_and_entities
+    self.session.process_entities(types.contacts.ResolvedPeer(None, [e._as_input_peer() for e in entities], []))
+  File "/home/pklprasanth522/Trading-Buddy/.venv/lib/python3.12/site-packages/telethon/sessions/sqlite.py", line 301, in process_entities
+    c.executemany(
+sqlite3.OperationalError: database is locked
+Task exception was never retrieved
+future: <Task finished name='Task-33' coro=<TelegramBaseClient._disconnect_coro() done, defined at /home/pklprasanth522/Trading-Buddy/.venv/lib/python3.12/site-packages/telethon/client/telegrambaseclient.py:706> exception=OperationalError('database is locked')>
+Traceback (most recent call last):
+  File "/home/pklprasanth522/Trading-Buddy/.venv/lib/python3.12/site-packages/telethon/client/telegrambaseclient.py", line 736, in _disconnect_coro
+    self._save_states_and_entities()
+  File "/home/pklprasanth522/Trading-Buddy/.venv/lib/python3.12/site-packages/telethon/client/telegrambaseclient.py", line 693, in _save_states_and_entities
+    self.session.process_entities(types.contacts.ResolvedPeer(None, [e._as_input_peer() for e in entities], []))
+  File "/home/pklprasanth522/Trading-Buddy/.venv/lib/python3.12/site-packages/telethon/sessions/sqlite.py", line 301, in process_entities
+    c.executemany(
+sqlite3.OperationalError: database is locked
+Unhandled exception from keepalive_handle after cancelling <class '_asyncio.Task'> (<Task finished name='Task-7' coro=<UpdateMethods._keepalive_loop() done, defined at /home/pklprasanth522/Trading-Buddy/.venv/lib/python3.12/site-packages/telethon/client/updates.py:481> exception=OperationalError('database is locked')>)
+Traceback (most recent call last):
+  File "/home/pklprasanth522/Trading-Buddy/.venv/lib/python3.12/site-packages/telethon/helpers.py", line 176, in _cancel
+    await task
+sqlite3.OperationalError: database is locked
+Traceback (most recent call last):
+  File "/home/pklprasanth522/Trading-Buddy/.venv/lib/python3.12/site-packages/telethon/client/updates.py", line 38, in _run_until_disconnected
+    raise self._updates_error
+  File "/home/pklprasanth522/Trading-Buddy/.venv/lib/python3.12/site-packages/telethon/client/updates.py", line 308, in _update_loop
+    diff = await self(get_diff)
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/home/pklprasanth522/Trading-Buddy/.venv/lib/python3.12/site-packages/telethon/client/users.py", line 30, in __call__
+    return await self._call(self._sender, request, ordered=ordered)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/pklprasanth522/Trading-Buddy/.venv/lib/python3.12/site-packages/telethon/client/users.py", line 88, in _call
+    self.session.process_entities(result)
+  File "/home/pklprasanth522/Trading-Buddy/.venv/lib/python3.12/site-packages/telethon/sessions/sqlite.py", line 301, in process_entities
+    c.executemany(
+sqlite3.OperationalError: database is locked
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/pklprasanth522/Trading-Buddy/src/notify/channel_listener.py", line 510, in <module>
+    raise SystemExit(main())
+                     ^^^^^^
+  File "/home/pklprasanth522/Trading-Buddy/src/notify/channel_listener.py", line 505, in main
+    asyncio.run(start_listener())
+  File "/usr/lib/python3.12/asyncio/runners.py", line 194, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/base_events.py", line 687, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/home/pklprasanth522/Trading-Buddy/src/notify/channel_listener.py", line 501, in start_listener
+    await client.run_until_disconnected()
+  File "/home/pklprasanth522/Trading-Buddy/.venv/lib/python3.12/site-packages/telethon/client/updates.py", line 43, in _run_until_disconnected
+    await self.disconnect()
+  File "/home/pklprasanth522/Trading-Buddy/.venv/lib/python3.12/site-packages/telethon/client/telegrambaseclient.py", line 736, in _disconnect_coro
+    self._save_states_and_entities()
+  File "/home/pklprasanth522/Trading-Buddy/.venv/lib/python3.12/site-packages/telethon/client/telegrambaseclient.py", line 693, in _save_states_and_entities
+    self.session.process_entities(types.contacts.ResolvedPeer(None, [e._as_input_peer() for e in entities], []))
+  File "/home/pklprasanth522/Trading-Buddy/.venv/lib/python3.12/site-packages/telethon/sessions/sqlite.py", line 301, in process_entities
+    c.executemany(
+sqlite3.OperationalError: database is locked

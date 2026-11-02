@@ -1,0 +1,200 @@
+
+==================================================================================================================================
+  CH1 SIGNALS — 2026-08-31 — Monthly expiry, 2 lots, ₹1,500 floor
+==================================================================================================================================
+  Parsed 8 signals from 26 messages
+
+  #   Time   Symbol                       Trigger   Entry      SL     TGT Lots   Qty Result          P&L Expiry       Warn
+  ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  19482 10:28  KAYNES 3800 PE                   198   201.7     180     220    2   300 [W] FLOOR     +1,500 29Sep        
+  19483 10:29  COALINDIA 380 PE                  22     1.1      20      24    2  2700 [W] FLOOR     +1,500 29Sep        ⚠SL>E
+  19486 10:34  COALINDIA 380 CE                  22    23.3      20      24    2  2700 [L] SL        -8,910 29Sep        
+  19489 10:39  CHOLAFIN 1840 PE                  62    63.9      58      68    2  1250 [L] SL        -7,938 29Sep        
+  19490 11:23  PAYTM 1640 CE                     70    71.5      66      75    2  3200 [W] SL       +11,200 29Sep        
+  19493 11:46  CAMS 750 CE                       37    39.5      34      41    2  1650 [W] TGT_ALL     +8,993 29Sep        
+  19496 12:01  CAMS 750 CE                       46    44.9      42      51    2  1650 [L] SL        -3,878 29Sep        
+  19502 13:08  ADANIENT 3100 PE                 155   157.8     144     170    2   618 [L] SL        -8,559 29Sep        
+
+  CH1: 4W/4L (0 no data) | P&L: ₹-6,092
+
+==================================================================================================================================
+  CH2 SIGNALS — 2026-08-31 — Index only, 3L idx, ₹1,500 floor
+  ABOVE → auto-hold until Active | NEAR → 5s delay
+==================================================================================================================================
+  ⊘  #12368 @ 09:10:22: SKIP non-index GLENMARK 2500 CE
+  📊 #12371 @ 09:15:59: NEAR SIGNAL NIFTY 24200 PE trigger=145.0 SL=138.0 TGT=155.0
+      → Queued (5s delay)
+  ⏱  5s elapsed — executing queued signal:
+      NIFTY 24200 PE
+  🔄 #12382 @ 09:17:18: RE-ENTRY NIFTY 24200 PE @ 145.0 SL=138
+  🔄 #12390 @ 09:18:39: RE-ENTRY ABOVE (held) NIFTY 24200 PE @ 160.0 SL=152
+  🔍 #12393 @ 09:19:26: FOCUS reply → holding NIFTY 24200 PE
+  ⚠  Replacing held NIFTY 24200 PE
+  🔒 #12394 @ 09:20:05: ABOVE (auto-held) BANKNIFTY 58400 CE
+  ▶  #12396 @ 09:21:19: ACTIVE — executing held BANKNIFTY 58400 CE
+  🔄 #12409 @ 09:23:05: RE-ENTRY ABOVE (held) BANKNIFTY 58400 CE @ 448.0 SL=420
+  ▶  #12410 @ 09:23:54: ACTIVE (reply to #12409) — executing BANKNIFTY 58400 CE
+  ▶  #12424 @ 09:26:51: ACTIVE (reply to #12390) — executing NIFTY 24200 PE
+  🔒 #12431 @ 09:28:36: ABOVE (auto-held) SENSEX 76900 PE
+  🔄 #12435 @ 09:29:56: RE-ENTRY NIFTY 24200 PE @ 160.0 SL=152
+  ⚠  Replacing held SENSEX 76900 PE
+  🔒 #12436 @ 09:30:53: ABOVE (auto-held) NIFTY 24150 PE
+  ▶  #12439 @ 09:31:54: ACTIVE — executing held NIFTY 24150 PE
+  🔄 #12447 @ 09:33:53: RE-ENTRY ABOVE (held) NIFTY 24150 PE @ 134.0 SL=124
+  ▶  #12448 @ 09:42:47: ACTIVE (reply to #12447) — executing NIFTY 24150 PE
+  🔄 #12462 @ 09:53:47: RE-ENTRY ABOVE (held) NIFTY 24150 PE @ 134.0 SL=124
+  ▶  #12463 @ 09:56:39: ACTIVE (reply to #12462) — executing NIFTY 24150 PE
+  ▶  #12472 @ 09:59:28: ACTIVE (reply to #12436) — executing NIFTY 24150 PE
+  🔄 #12481 @ 10:01:02: RE-ENTRY ABOVE (held) NIFTY 24150 PE @ 134.0 SL=124
+  ⚠  Replacing held NIFTY 24150 PE
+  🔒 #12485 @ 10:27:30: ABOVE (auto-held) BANKNIFTY 56900 PE
+  ⏸  #12488 @ 10:28:08: WAIT FOR TRIGGER (already holding)
+  📊 #12490 @ 10:29:49: NEAR SIGNAL NIFTY 23900 CE trigger=135.0 SL=125.0 TGT=150.0
+      → Queued (5s delay)
+  ⏱  5s elapsed — executing queued signal:
+      NIFTY 23900 CE
+  📊 #12492 @ 10:31:58: NEAR SIGNAL NIFTY 23950 CE trigger=133.0 SL=125.0 TGT=148.0
+      → Queued (5s delay)
+  ⏱  5s elapsed — executing queued signal:
+      NIFTY 23950 CE
+  🔄 #12500 @ 10:38:16: RE-ENTRY ABOVE (held) NIFTY 24150 PE @ 134.0 SL=124
+  🔄 #12503 @ 10:45:22: RE-ENTRY NIFTY 23950 CE @ 133.0 SL=125
+  ⊘  #12505 @ 10:52:45: SKIP non-index MOTOR 4300 CE
+  ⏸  #12507 @ 10:53:11: WAIT FOR TRIGGER (already holding)
+  ▶  #12508 @ 10:59:52: ACTIVE (reply to #12503) — executing NIFTY 23950 CE
+  🔄 #12518 @ 11:09:29: RE-ENTRY ABOVE (held) NIFTY 24150 PE @ 146.0 SL=135
+  🔄 #12519 @ 11:30:28: RE-ENTRY ABOVE (held) NIFTY 23950 CE @ 133.0 SL=125
+  ▶  #12520 @ 11:36:41: ACTIVE (reply to #12519) — executing NIFTY 23950 CE
+  🔄 #12526 @ 11:44:18: RE-ENTRY ABOVE (held) NIFTY 23950 CE @ 151.0 SL=142
+  ▶  #12527 @ 11:51:34: ACTIVE (reply to #12526) — executing NIFTY 23950 CE
+  📊 #12546 @ 11:56:52: NEAR SIGNAL NIFTY 24000 CE trigger=160.0 SL=152.0 TGT=175.0
+      → Queued (5s delay)
+  ⏱  5s elapsed — executing queued signal:
+      NIFTY 24000 CE
+  🔄 #12547 @ 12:00:01: RE-ENTRY NIFTY 24000 CE @ 150.0 SL=142
+  ▶  #12549 @ 12:04:56: ACTIVE (reply to #12547) — executing NIFTY 24000 CE
+  🔄 #12560 @ 12:05:21: RE-ENTRY ABOVE (held) NIFTY 24000 CE @ 150.0 SL=142
+  🔄 #12562 @ 12:13:19: RE-ENTRY NIFTY 24000 CE @ 150.0 SL=142
+  ▶  #12563 @ 12:16:34: ACTIVE (reply to #12562) — executing NIFTY 24000 CE
+  🔄 #12575 @ 12:22:50: RE-ENTRY ABOVE (held) NIFTY 24000 CE @ 170.0 SL=161
+  📊 #12577 @ 12:38:46: NEAR SIGNAL SENSEX 77200 CE trigger=365.0 SL=345.0 TGT=385.0
+      → Queued (5s delay)
+  ⏱  5s elapsed — executing queued signal:
+      SENSEX 77200 CE
+  🔍 #12588 @ 12:42:22: FOCUS reply → holding NIFTY 24000 CE
+  ⊘  #12589 @ 12:55:24: SKIP non-index POLYCAB 9500 CE
+  🔄 #12591 @ 12:55:59: RE-ENTRY ABOVE (held) SENSEX 77200 CE @ 365.0 SL=345
+  ▶  #12593 @ 13:00:54: ACTIVE — executing held SENSEX 77200 CE
+  🔒 #12599 @ 13:28:57: ABOVE (auto-held) NIFTY 24050 CE
+  ⏸  #12601 @ 13:29:18: WAIT FOR TRIGGER (already holding)
+  ⚠  Replacing held NIFTY 24050 CE
+  🔒 #12607 @ 13:39:54: ABOVE (auto-held) NIFTY 24250 PE
+  ▶  #12612 @ 13:59:47: ACTIVE (reply to #12607) — executing NIFTY 24250 PE
+  📊 #12633 @ 14:09:17: NEAR SIGNAL NIFTY 24200 PE trigger=135.0 SL=127.0 TGT=145.0
+      → Queued (5s delay)
+  ⏱  5s elapsed — executing queued signal:
+      NIFTY 24200 PE
+  🔄 #12646 @ 14:18:00: RE-ENTRY NIFTY 24200 PE @ 135.0 SL=127
+  ⊘  #12648 @ 14:20:55: SKIP non-index CRUDEOIL 8500 CE
+  ▶  #12652 @ 14:22:05: ACTIVE (reply to #12646) — executing NIFTY 24200 PE
+  🔄 #12660 @ 14:23:06: RE-ENTRY NIFTY 24200 PE @ 135.0 SL=127
+  🔄 #12672 @ 14:32:18: RE-ENTRY ABOVE (held) NIFTY 24200 PE @ 135.0 SL=127
+  📊 #12674 @ 14:41:54: NEAR SIGNAL NIFTY 24000 CE trigger=135.0 SL=128.0 TGT=150.0
+      → Queued (5s delay)
+  ⏱  5s elapsed — executing queued signal:
+      NIFTY 24000 CE
+  📊 #12677 @ 14:43:21: NEAR SIGNAL NIFTY 24000 CE trigger=145.0 SL=139.0 TGT=160.0
+      → Queued (5s delay)
+  ⏱  5s elapsed — executing queued signal:
+      NIFTY 24000 CE
+  📊 #12709 @ 14:48:13: NEAR SIGNAL NIFTY 24050 CE trigger=135.0 SL=128.0 TGT=150.0
+      → Queued (5s delay)
+  ⏱  5s elapsed — executing queued signal:
+      NIFTY 24050 CE
+  ▶  #12711 @ 14:49:21: ACTIVE — executing held NIFTY 24200 PE
+  🔒 #12730 @ 14:59:17: ABOVE (auto-held) NIFTY 24250 PE
+  ▶  #12733 @ 15:00:23: ACTIVE — executing held NIFTY 24250 PE
+  🔄 #12743 @ 15:02:36: RE-ENTRY NIFTY 24250 PE @ 141.0 SL=130
+  ▶  #12745 @ 15:03:34: ACTIVE (reply to #12743) — executing NIFTY 24250 PE
+  🔄 #12764 @ 15:07:02: RE-ENTRY ABOVE (held) NIFTY 24250 PE @ 141.0 SL=130
+  ⊘  #12766 @ 15:08:18: SKIP non-index CRUDEOIL 8000 PE
+  ⏸  #12768 @ 15:08:33: WAIT FOR TRIGGER (already holding)
+  🔄 #12769 @ 15:08:51: RE-ENTRY ABOVE (held) NIFTY 24250 PE @ 127.0 SL=117
+  🔄 #12784 @ 15:15:38: RE-ENTRY ABOVE (held) NIFTY 24250 PE @ 168.0 SL=155
+  ⊘  #12786 @ 15:17:42: SKIP non-index GOLD 156000 CE
+  ⏸  #12788 @ 15:17:51: WAIT FOR TRIGGER (already holding)
+
+  ⚠  Signal still held (never activated): NIFTY 24250 PE
+
+  #   Time   Symbol                     Entry      SL     TGT Lots   Qty Result          P&L Reason       Warn
+  ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  1   09:15  NIFTY 24200 PE             100.0     138     155    3   225 [W] SL       +12,375 near_exec    ⚠SL>E
+  2   09:17  NIFTY 24200 PE             154.3     138     155    3   225 [W] SL          +146 re-entry     
+  3   09:21  BANKNIFTY 58400 CE         484.1     420     470    3    90 [L] MAX_SL     -4,000 active_trigger ⚠TGT<E
+  4   09:23  BANKNIFTY 58400 CE         484.1     420     470    3    90 [L] MAX_SL     -4,000 active_trigger ⚠TGT<E
+  5   09:26  NIFTY 24200 PE             165.9     152     155    3   225 [W] SL          +922 active_trigger ⚠TGT<E
+  6   09:29  NIFTY 24200 PE             165.9     152     155    3   225 [W] SL          +922 re-entry     ⚠TGT<E
+  7   09:31  NIFTY 24150 PE             123.2     124     144    3   225 [W] FLOOR     +1,500 active_trigger ⚠SL>E
+  8   09:42  NIFTY 24150 PE             135.2     124     144    3   225 [W] FLOOR     +1,500 active_trigger 
+  9   09:56  NIFTY 24150 PE             134.4     124     144    3   225 [L] SL        -2,351 active_trigger 
+  10  09:59  NIFTY 24150 PE             134.4     124     144    3   225 [L] SL        -2,351 active_trigger 
+  11  10:29  NIFTY 23900 CE             176.3     125     150    3   225 [W] FLOOR     +1,500 near_exec    ⚠TGT<E
+  12  10:31  NIFTY 23950 CE             132.8     125     148    3   225 [W] FLOOR     +1,500 near_exec    
+  13  10:45  NIFTY 23950 CE             133.7     125     148    3   225 [W] FLOOR     +1,500 re-entry     
+  14  10:59  NIFTY 23950 CE             135.5     125     148    3   225 [W] FLOOR     +1,500 active_trigger 
+  15  11:36  NIFTY 23950 CE             142.7     125     148    3   225 [W] SL        +1,204 active_trigger 
+  16  11:51  NIFTY 23950 CE             189.9     142     148    3   225 [W] TGT_ALL     +2,261 active_trigger ⚠TGT<E
+  17  11:56  NIFTY 24000 CE             152.6     152     175    3   225 [L] SL          -135 near_exec    
+  18  12:00  NIFTY 24000 CE             152.6     142     175    3   225 [W] FLOOR     +1,500 re-entry     
+  19  12:04  NIFTY 24000 CE             170.2     142     175    3   225 [L] MAX_SL     -4,000 active_trigger 
+  20  12:13  NIFTY 24000 CE             148.7     142     175    3   225 [W] FLOOR     +1,500 re-entry     
+  21  12:16  NIFTY 24000 CE             160.5     142     175    3   225 [W] FLOOR     +1,500 active_trigger 
+  22  12:38  SENSEX 77200 CE            374.9     345     385    3    60 [W] SL          +609 near_exec    
+  23  13:00  SENSEX 77200 CE            369.1     345     385    3    60 [W] SL          +951 active_trigger 
+  24  13:59  NIFTY 24250 PE             166.1     150     170    3   225 [W] FLOOR     +1,500 active_trigger 
+  25  14:09  NIFTY 24200 PE             140.7     127     145    3   225 [W] SL          +968 near_exec    
+  26  14:18  NIFTY 24200 PE             138.9     127     145    3   225 [W] SL        +1,361 re-entry     
+  27  14:22  NIFTY 24200 PE             145.4     127     145    3   225 [W] FLOOR     +1,500 active_trigger ⚠TGT<E
+  28  14:23  NIFTY 24200 PE             145.4     127     145    3   225 [W] FLOOR     +1,500 re-entry     ⚠TGT<E
+  29  14:41  NIFTY 24000 CE             152.9     128     150    3   225 [W] SL        +6,086 near_exec    ⚠TGT<E
+  30  14:43  NIFTY 24000 CE             152.9     139     160    3   225 [W] SL        +4,961 near_exec    
+  31  14:48  NIFTY 24050 CE             142.2     128     150    3   225 [W] SL        +1,766 near_exec    
+  32  14:49  NIFTY 24200 PE             105.2     127     145    3   225 [W] FLOOR     +1,500 active_trigger ⚠SL>E
+  33  15:00  NIFTY 24250 PE             140.9     130     150    3   225 [W] SL        +2,047 active_trigger 
+  34  15:02  NIFTY 24250 PE             153.8     130     150    3   225 [W] SL        +2,509 re-entry     ⚠TGT<E
+  35  15:03  NIFTY 24250 PE             153.8     130     150    3   225 [W] SL        +2,509 active_trigger ⚠TGT<E
+
+  CH2: 29W/6L (0 no data) | P&L: ₹+44,261
+
+==================================================================================================================================
+  DB TRADES — 2026-08-31
+==================================================================================================================================
+
+  CH1 DB trades:
+  ID     Time   Symbol                         Entry      SL     TGT    Exit        P&L Status
+  ─────────────────────────────────────────────────────────────────────────────────────────────────────────
+  473    10:29  KAYNES 3800 PE                 200.0     180     220   205.1     +1,348 CLOSED
+  474    10:30  COALINDIA 380 PE                 1.1      20      24     1.1        -54 CLOSED_SL
+  477    10:34  COALINDIA 380 CE                23.4      20      24    20.2     -8,543 CLOSED
+  478    10:40  CHOLAFIN 1840 PE                64.1      58      68    57.5     -8,398 CLOSED
+  CH1: 4 trades, DB P&L: ₹-15,646
+
+  CH2 DB trades:
+  ID     Time   Symbol                         Entry      SL     TGT    Exit        P&L Status
+  ─────────────────────────────────────────────────────────────────────────────────────────────────────────
+  470    09:29  BANKNIFTY 58400 CE             455.7     420     470   420.0     -3,345 CLOSED_SL
+  471    09:32  NIFTY 24150 PE                 127.9     124     144   122.6     -1,134 CLOSED_SL
+  472    10:00  NIFTY 24150 PE                 131.0     124     144   123.7     -1,525 CLOSED_SL
+  475    10:30  NIFTY 23900 CE                 177.4     125     150   177.7        -84 CLOSED
+  476    10:33  NIFTY 23950 CE                 135.9     125     148   142.5     +1,179 CLOSED
+  479    11:00  BANKNIFTY 56900 PE             458.1     440     495   439.2     -1,827 CLOSED_SL
+  CH2: 6 trades, DB P&L: ₹-6,736
+
+==================================================================================================================================
+  GRAND TOTAL
+==================================================================================================================================
+  CH1: 4W/4L = ₹-6,092
+  CH2: 29W/6L = ₹+44,261
+  Combined: ₹+38,169
+  Re-entries (skipped): 8
+==================================================================================================================================

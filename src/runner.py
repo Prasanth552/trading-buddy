@@ -236,7 +236,7 @@ def run_cycle(client: Any, notifier: Any | None, executor: Any) -> dict[str, Any
             if opt:
                 full = f"{opt['exchange']}:{opt['tradingsymbol']}"
                 opt["last_price"] = client.ltp([full])[full]["last_price"]
-                result = executor.execute_signal(signal_dict, opt)
+                result = executor.execute_signal(signal_dict, opt, channel="idx")
                 log.info("Execution result %s: %s", snap["symbol"], result)
         except Exception as exc:  # noqa: BLE001 - fail safe: log + alert, don't crash loop
             log.error("Execution error for %s: %s", snap["symbol"], exc)

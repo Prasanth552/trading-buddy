@@ -1,0 +1,14 @@
+OEH Analysis — 2026-08-22
+Candidates: 8 | Trades: 8 (4W/4L)
+Total P&L: ₹-1,148
+Settings: max loss ₹1,500, ₹1,500 floor, SL 30%, TGT 2.0x
+
+Candidates:
+  1. CIPLA — Open 1435.90, Drop 1.1%
+  2. MARUTI — Open 13609.00, Drop 0.6%
+  3. WIPRO — Open 181.29, Drop 0.6%
+  4. COALINDIA — Open 408.00, Drop 0.5%
+  5. PIDILITIND — Open 1660.00, Drop 0.5%
+  6. ADANIENT — Open 2998.00, Drop 0.4%
+  7. ITC — Open 269.70, Drop 0.4%
+  8. TATAPOWER — Open 373.00, Drop 0.3%

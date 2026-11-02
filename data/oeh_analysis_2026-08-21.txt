@@ -1,0 +1,10 @@
+OEH Analysis — 2026-08-21
+Candidates: 4 | Trades: 4 (3W/1L)
+Total P&L: ₹+1,236
+Settings: max loss ₹1,500, ₹1,500 floor, SL 30%, TGT 2.0x
+
+Candidates:
+  1. COLPAL — Open 1907.90, Drop 1.0%
+  2. BEL — Open 413.45, Drop 0.5%
+  3. MARUTI — Open 13809.00, Drop 0.4%
+  4. ITC — Open 271.60, Drop 0.4%

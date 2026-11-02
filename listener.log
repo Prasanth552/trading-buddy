@@ -1,0 +1,12 @@
+nohup: ignoring input
+2026-08-19 22:24:51 IST | INFO    | trading_buddy.channel_listener | Logged in as prasanth (id=1059145330)
+2026-08-19 22:24:53 IST | INFO    | trading_buddy.telegram | Sent Telegram message (61 chars) to 2 chat(s).
+2026-08-19 22:24:53 IST | INFO    | trading_buddy.channel_listener | Position monitor started (target=₹2000, check every 5s)
+2026-08-19 22:24:53 IST | INFO    | trading_buddy.channel_listener | Scanner (ch5) scheduler started — runs daily at 09:20 IST
+2026-08-19 22:24:53 IST | INFO    | trading_buddy.channel_listener | Listening for signals: ch1=-1721210254, ch1b=2402465834, ch2=1547107686, ch3=2228650108 ...
+Listening for signals: ch1=-1721210254, ch1b=2402465834, ch2=1547107686, ch3=2228650108 ... (Ctrl-C to stop)
+2026-08-19 22:24:53 IST | INFO    | trading_buddy.channel_listener | [CH5] Next scanner run at 2026-08-20 09:20 IST (in 655 min)
+2026-08-19 22:24:59 IST | WARNING | trading_buddy.channel_listener | SL MONITOR: LTP API returned empty data for 2 trades — token may be expired or API down
+2026-08-19 22:30:18 IST | WARNING | trading_buddy.channel_listener | SL MONITOR: LTP API returned empty data for 2 trades — token may be expired or API down
+2026-08-19 22:35:37 IST | WARNING | trading_buddy.channel_listener | SL MONITOR: LTP API returned empty data for 2 trades — token may be expired or API down
+2026-08-19 22:40:56 IST | WARNING | trading_buddy.channel_listener | SL MONITOR: LTP API returned empty data for 2 trades — token may be expired or API down

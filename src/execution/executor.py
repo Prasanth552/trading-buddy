@@ -304,12 +304,13 @@ class Executor:
             "broker_key": broker_key,
             "expiry": expiry,
             "index_entry": index_entry,
+            "channel": channel,
         })
         log.info("ORDER (submitted) id=%s status=%s", order_id, status)
         return order_id
 
     # --- main entry point --------------------------------------------------
-    def execute_signal(self, signal: dict[str, Any], option: dict[str, Any]) -> dict[str, Any]:
+    def execute_signal(self, signal: dict[str, Any], option: dict[str, Any], *, channel: str = "ch1") -> dict[str, Any]:
         """Size, validate, and place the entry + protective stop for one signal.
 
         ``option`` is a resolved instrument dict (tradingsymbol, exchange,

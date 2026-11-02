@@ -1,0 +1,132 @@
+========================================================================================================================
+  CH2 Parser Simulation v2 — 2026-08-25
+  ABOVE → auto-hold until Active | NEAR → 5s delay | Re-entry: tight SL, validated TGT
+========================================================================================================================
+
+  🔒 #9703 @ 09:51:18: ABOVE SIGNAL (auto-held) BANKNIFTY 57700 PE trigger=230.0 SL=210.0 TGT=250.0
+  ⏸  #9705 @ 09:51:45: WAIT FOR TRIGGER (already holding)
+  ▶  #9708 @ 09:53:09: ACTIVE — executing held BANKNIFTY 57700 PE
+  ℹ  #9720 @ 10:02:10: RE-ENTRY detected (not executing) BANKNIFTY 57700 PE
+      "Above High again focus with tight sl"
+  📊 #9770 @ 10:31:14: NEAR SIGNAL BANKNIFTY 57200 CE trigger=260.0 SL=240.0 TGT=285.0
+      → Queued (5s delay)
+  ⏱  5s elapsed — executing queued signal:
+      BANKNIFTY 57200 CE trigger=260.0 SL=240.0 TGT=285.0
+  ℹ  #9784 @ 10:39:26: RE-ENTRY detected (not executing) BANKNIFTY 57200 CE
+      "Near same range again focus with tight sl"
+  🔒 #9834 @ 10:54:01: ABOVE SIGNAL (auto-held) BANKNIFTY 57300 CE trigger=330.0 SL=300.0 TGT=350.0
+  ⚠  Replacing held BANKNIFTY 57300 CE
+  🔒 #9838 @ 11:03:58: ABOVE SIGNAL (auto-held) BANKNIFTY 57700 PE trigger=270.0 SL=240.0 TGT=290.0
+  ▶  #9842 @ 11:06:22: ACTIVE — executing held BANKNIFTY 57700 PE
+  ℹ  #9868 @ 11:17:30: RE-ENTRY detected (not executing) BANKNIFTY 57700 PE
+      "Near same range again"
+  🔒 #9895 @ 11:53:01: ABOVE SIGNAL (auto-held) NIFTY 24000 CE trigger=175.0 SL=165.0 TGT=185.0
+  ⏸  #9898 @ 11:53:36: WAIT FOR TRIGGER (already holding)
+  ▶  #9899 @ 11:54:29: ACTIVE — executing held NIFTY 24000 CE
+  ℹ  #9925 @ 11:58:19: RE-ENTRY detected (not executing) NIFTY 24000 CE
+      "Above last swing high again focus with tight sl"
+  📊 #9927 @ 12:12:50: NEAR SIGNAL NIFTY 24200 CE trigger=20.0 SL=16.0 TGT=30.0
+      → Queued (5s delay)
+  ⏱  5s elapsed — executing queued signal:
+      NIFTY 24200 CE trigger=20.0 SL=16.0 TGT=30.0
+  🔒 #9935 @ 12:38:52: ABOVE SIGNAL (auto-held) BANKNIFTY 57600 PE trigger=200.0 SL=170.0 TGT=220.0
+  ▶  #9941 @ 12:55:11: ACTIVE — executing held BANKNIFTY 57600 PE
+  ⊘  #9963 @ 13:05:14: SKIP non-index MIDCAPNIFTY 14850 CE
+  🔒 #9998 @ 13:22:35: ABOVE SIGNAL (auto-held) BANKNIFTY 57500 PE trigger=215.0 SL=185.0 TGT=235.0
+  ⏸  #10001 @ 13:23:09: WAIT FOR TRIGGER (already holding)
+  ▶  #10002 @ 13:25:45: ACTIVE — executing held BANKNIFTY 57500 PE
+  ⊘  #10045 @ 13:55:04: SKIP non-index MIDCAPNIFTY 14900 CE
+  📊 #10063 @ 14:24:16: NEAR SIGNAL BANKNIFTY 57500 CE trigger=35.0 SL=27.0 TGT=45.0
+      → Queued (5s delay)
+  ⏱  5s elapsed — executing queued signal:
+      BANKNIFTY 57500 CE trigger=35.0 SL=27.0 TGT=45.0
+  🔒 #10095 @ 14:34:53: ABOVE SIGNAL (auto-held) BANKNIFTY 57400 CE trigger=120.0 SL=100.0 TGT=140.0
+  ⏸  #10097 @ 14:35:10: WAIT FOR TRIGGER (already holding)
+  ℹ  #10099 @ 14:39:33: RE-ENTRY detected (not executing) BANKNIFTY 57500 CE
+      "Above last swing high again focus"
+  ▶  #10100 @ 14:43:01: ACTIVE — executing held BANKNIFTY 57400 CE
+  📊 #10138 @ 14:53:49: NEAR SIGNAL NIFTY 24250 CE trigger=30.0 SL=26.0 TGT=40.0
+      → Queued (5s delay)
+  ⏱  5s elapsed — executing queued signal:
+      NIFTY 24250 CE trigger=30.0 SL=26.0 TGT=40.0
+  📊 #10152 @ 15:02:20: NEAR SIGNAL MIDCPNIFTY 14950 CE trigger=30.0 SL=25.0 TGT=38.0
+      → Queued (5s delay)
+  ⏱  5s elapsed — executing queued signal:
+      MIDCPNIFTY 14950 CE trigger=30.0 SL=25.0 TGT=38.0
+  ℹ  #10168 @ 15:13:07: RE-ENTRY detected (not executing) NIFTY 24250 CE
+      "Above last swing high again focus with tight sl"
+  🔒 #10170 @ 15:13:58: ABOVE SIGNAL (auto-held) BANKNIFTY 57600 CE trigger=30.0 SL=20.0 TGT=40.0
+  ▶  #10176 @ 15:16:10: ACTIVE — executing held BANKNIFTY 57600 CE
+  🔒 #10178 @ 15:17:00: ABOVE SIGNAL (auto-held) BANKNIFTY 57600 CE trigger=15.0 SL=10.0 TGT=25.0
+  ▶  #10202 @ 15:21:38: ACTIVE — executing held BANKNIFTY 57600 CE
+  ℹ  #10227 @ 15:29:34: RE-ENTRY detected (not executing) BANKNIFTY 57700 PE
+      "**TRADE NO 7
+
+1st tine 10-15 point loss 
+
+Again buy 
+
+2   TGT HIT 
+
+Sm"
+  ⊘  #10239 @ 15:35:11: SKIP non-index CRUDEOIL 8000 CE
+
+========================================================================================================================
+  EXECUTION RESULTS
+========================================================================================================================
+  #   Time   Symbol                   Trigger   Entry      SL     TGT Lots   Qty Result          P&L Reason       Warn
+  ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  1   09:53  BANKNIFTY 57700 PE           230   234.0     210     250    3    90 [L] SL        -2,160 active_trigger 
+  2   10:31  BANKNIFTY 57200 CE           260   294.2     240     285    3    90 [W] FLOOR     +1,500 near_exec    ⚠TGT<E
+  3   11:06  BANKNIFTY 57700 PE           270   254.4     240     290    3    90 [L] SL        -1,300 active_trigger 
+  4   11:54  NIFTY 24000 CE               175   178.4     165     185    3   225 [W] TGT       +1,474 active_trigger 
+  5   12:12  NIFTY 24200 CE                20    24.0      16      30    3   225 [L] SL        -1,800 near_exec    
+  6   12:55  BANKNIFTY 57600 PE           200   186.9     170     220    3    90 [W] TGT       +2,979 active_trigger 
+  7   13:25  BANKNIFTY 57500 PE           215   211.2     185     235    3    90 [W] TGT       +2,138 active_trigger 
+  8   14:24  BANKNIFTY 57500 CE            35    36.6      27      45    3    90 [W] TGT         +752 near_exec    
+  9   14:43  BANKNIFTY 57400 CE           120   111.3     100     140    3    90 [L] SL        -1,017 active_trigger 
+  10  14:53  NIFTY 24250 CE                30    31.2      26      40    3   225 [L] SL        -1,181 near_exec    
+  11  15:02  MIDCPNIFTY 14950 CE           30    32.2      25      38    3   150 [W] TGT         +862 near_exec    
+  12  15:16  BANKNIFTY 57600 CE            30    19.8      20      40    3    90 [W] TGT       +1,822 active_trigger ⚠SL>E
+  13  15:21  BANKNIFTY 57600 CE            15     7.8      10      25    3    90 [L] EOD         -693 active_trigger ⚠SL>E
+
+  ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Total: 7W/6L (0 no data) | Simulated P&L: ₹+3,375
+
+========================================================================================================================
+  DB COMPARISON (actual trades today)
+========================================================================================================================
+  ID    Time   Symbol                     Entry      SL     TGT        P&L Status
+  ──────────────────────────────────────────────────────────────────────────────────────────
+  358   09:19  BANKNIFTY 57100 CE         348.1     260     305       -592 CLOSED
+  363   09:26  BANKNIFTY 57300 CE         285.8     230     280     +2,003 CLOSED
+  364   09:26  NIFTY 24050 CE             147.9     156     176     +1,057 CLOSED_SL
+  365   09:27  MIDCPNIFTY 14800 CE         99.1      95     115     +1,114 CLOSED
+  366   09:31  BANKNIFTY 57400 CE         261.4     216     260       -112 CLOSED
+  367   09:52  BANKNIFTY 57700 PE         226.5     210     250     +1,337 CLOSED
+  368   10:33  BANKNIFTY 57200 CE         306.9     240     285        -72 CLOSED
+  369   10:54  BANKNIFTY 57300 CE         295.8     300     350       -133 CLOSED_SL
+  370   11:04  BANKNIFTY 57700 PE         258.1     240     290     -2,318 CLOSED_SL
+  371   11:54  NIFTY 24000 CE             176.7     165     185     +2,457 CLOSED
+  372   12:13  NIFTY 24200 CE              24.9      16      30     -1,849 CLOSED_SL
+  373   12:39  BANKNIFTY 57600 PE         193.3     170     220     +2,502 CLOSED
+  378   14:26  BANKNIFTY 57500 CE          37.2      27      45       +920 CLOSED
+  379   14:35  BANKNIFTY 57400 CE          99.9     100     140       -103 CLOSED_SL
+  380   14:54  NIFTY 24250 CE              33.1      26      40     -1,570 CLOSED_SL
+  381   15:02  MIDCPNIFTY 14950 CE         35.4      25      38     +1,093 CLOSED
+  382   15:14  BANKNIFTY 57600 CE          22.9      20      40       -366 CLOSED_SL
+  383   15:17  BANKNIFTY 57600 CE          19.8      10      25     +1,845 CLOSED
+  384   15:35  CRUDEOIL 8000 CE           315.4     300     325     -3,960 CLOSED_SL
+
+  DB Total: ₹+3,253 (19 trades)
+
+========================================================================================================================
+  SUMMARY
+========================================================================================================================
+  New parser signals executed: 13
+  Signals cancelled:          0
+  Re-entries detected:        7
+  Simulated P&L:              ₹+3,375
+  Actual DB P&L:              ₹+3,253
+  Difference:                 ₹+122
+========================================================================================================================

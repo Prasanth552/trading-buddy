@@ -1,0 +1,13 @@
+OEH Analysis — 2026-08-19
+Candidates: 7 | Trades: 7 (6W/1L)
+Total P&L: ₹+7,718
+Settings: max loss ₹1,500, ₹1,500 floor, SL 30%, TGT 2.0x
+
+Candidates:
+  1. SHREECEM — Open 24700.00, Drop 1.5%
+  2. BAJFINANCE — Open 1093.90, Drop 1.0%
+  3. AMBUJACEM — Open 412.40, Drop 0.9%
+  4. JSWSTEEL — Open 1273.70, Drop 0.7%
+  5. DIVISLAB — Open 8600.00, Drop 0.6%
+  6. DABUR — Open 403.50, Drop 0.5%
+  7. PIDILITIND — Open 1670.00, Drop 0.3%

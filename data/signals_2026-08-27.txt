@@ -1,0 +1,141 @@
+
+==================================================================================================================================
+  CH1 SIGNALS — 2026-08-27 — Monthly expiry, 2 lots, ₹1,500 floor
+==================================================================================================================================
+  Parsed 5 signals from 21 messages
+
+  #   Time   Symbol                       Trigger   Entry      SL     TGT Lots   Qty Result          P&L Expiry       Warn
+  ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  19437 09:24  GVT&D 4300 CE                    330   332.0     320     360    2   250 [L] SL        -3,000 29Sep        
+  19442 09:46  PFC 380 PE                        23    23.6      21      26    2  2600 [W] TGT_ALL     +4,810 29Sep        
+  19444 10:17  MUTHOOTFIN 3300 PE               170   179.2     156     190    2  2000 [W] TGT_ALL    +21,600 29Sep        
+  19446 10:21  MUTHOOTFIN 3200 PE               115   118.9     102     135    2  2000 [W] FLOOR     +1,500 29Sep        
+  19448 10:23  TATAPOWER 380 PE                  30    29.9      28      32    2  2900 [W] FLOOR     +1,500 29Sep        
+
+  CH1: 4W/1L (0 no data) | P&L: ₹+26,410
+
+==================================================================================================================================
+  CH2 SIGNALS — 2026-08-27 — Index only, 3L idx, ₹1,500 floor
+  ABOVE → auto-hold until Active | NEAR → 5s delay
+==================================================================================================================================
+  📊 #10906 @ 09:34:19: NEAR SIGNAL SENSEX 77700 PE trigger=290.0 SL=270.0 TGT=315.0
+      → Queued (5s delay)
+  ⏱  5s elapsed — executing queued signal:
+      SENSEX 77700 PE
+  🔄 #10928 @ 09:43:28: RE-ENTRY SENSEX 77700 PE @ 290.0 SL=270
+  ⊘  #10929 @ 09:46:47: SKIP non-index PAGEIND 36000 CE
+  🔄 #10940 @ 09:51:48: RE-ENTRY SENSEX 77700 PE @ 290.0 SL=270
+  🔒 #10958 @ 10:00:21: ABOVE (auto-held) NIFTY 24300 PE
+  ⏸  #10961 @ 10:00:46: WAIT FOR TRIGGER (already holding)
+  ▶  #10962 @ 10:01:29: ACTIVE — executing held NIFTY 24300 PE
+  🔒 #10970 @ 10:02:34: ABOVE (auto-held) SENSEX 77600 PE
+  ⏸  #10972 @ 10:02:52: WAIT FOR TRIGGER (already holding)
+  🔄 #10974 @ 10:04:33: RE-ENTRY NIFTY 24300 PE @ 132.0 SL=122
+  🔄 #10982 @ 10:16:31: RE-ENTRY NIFTY 24300 PE @ 132.0 SL=122
+  ⊘  #10984 @ 10:16:54: RE-ENTRY SKIPPED (duplicate <60s)
+  🔄 #10985 @ 10:20:58: RE-ENTRY ABOVE (held) NIFTY 24300 PE @ 143.0 SL=132
+  ▶  #10986 @ 10:43:54: ACTIVE — executing held NIFTY 24300 PE
+  🔄 #11012 @ 10:46:14: RE-ENTRY ABOVE (held) NIFTY 24300 PE @ 310.0 SL=286
+  ▶  #11013 @ 10:47:23: ACTIVE — executing held NIFTY 24300 PE
+  📊 #11050 @ 11:05:36: NEAR SIGNAL SENSEX 77500 PE trigger=220.0 SL=200.0 TGT=240.0
+      → Queued (5s delay)
+  ⏱  5s elapsed — executing queued signal:
+      SENSEX 77500 PE
+  🔄 #11070 @ 11:14:44: RE-ENTRY SENSEX 77500 PE @ 220.0 SL=200
+  🔄 #11074 @ 11:16:58: RE-ENTRY SENSEX 77500 PE @ 220.0 SL=200
+  📊 #11099 @ 11:26:24: NEAR SIGNAL SENSEX 77400 PE trigger=210.0 SL=200.0 TGT=240.0
+      → Queued (5s delay)
+  ⏱  5s elapsed — executing queued signal:
+      SENSEX 77400 PE
+  🔄 #11108 @ 11:28:45: RE-ENTRY SENSEX 77400 PE @ 210.0 SL=200
+  🔄 #11114 @ 11:30:20: RE-ENTRY SENSEX 77400 PE @ 210.0 SL=200
+  🔄 #11116 @ 11:35:42: RE-ENTRY SENSEX 77400 PE @ 210.0 SL=200
+  🔒 #11118 @ 11:57:05: ABOVE (auto-held) SENSEX 77100 CE
+  🔄 #11123 @ 12:07:57: RE-ENTRY SENSEX 77400 PE @ 210.0 SL=200
+  ▶  #11124 @ 12:08:46: ACTIVE — executing held SENSEX 77100 CE
+  🔄 #11131 @ 12:09:24: RE-ENTRY SENSEX 77100 CE @ 265.0 SL=245
+  🔄 #11136 @ 12:22:12: RE-ENTRY SENSEX 77100 CE @ 230.0 SL=213
+  📊 #11173 @ 12:50:09: NEAR SIGNAL SENSEX 77200 CE trigger=230.0 SL=210.0 TGT=260.0
+      → Queued (5s delay)
+  ⏱  5s elapsed — executing queued signal:
+      SENSEX 77200 CE
+  🔄 #11197 @ 12:56:40: RE-ENTRY ABOVE (held) SENSEX 77200 CE @ 275.0 SL=251
+  🔄 #11224 @ 13:41:26: RE-ENTRY SENSEX 77200 CE @ 230.0 SL=210
+  ⊘  #11225 @ 13:41:29: RE-ENTRY SKIPPED (duplicate <60s)
+  ▶  #11226 @ 13:43:03: ACTIVE — executing held SENSEX 77200 CE
+  🔄 #11245 @ 13:48:03: RE-ENTRY ABOVE (held) SENSEX 77200 CE @ 51.0 SL=47
+  ▶  #11246 @ 13:48:48: ACTIVE — executing held SENSEX 77200 CE
+  📊 #11260 @ 13:50:32: NEAR SIGNAL SENSEX 77300 PE trigger=90.0 SL=80.0 TGT=115.0
+      → Queued (5s delay)
+  ⏱  5s elapsed — executing queued signal:
+      SENSEX 77300 PE
+  🔄 #11268 @ 13:52:48: RE-ENTRY SENSEX 77300 PE @ 90.0 SL=80
+  🔒 #11276 @ 13:57:13: ABOVE (auto-held) SENSEX 77100 PE
+  ⏸  #11279 @ 13:57:39: WAIT FOR TRIGGER (already holding)
+  ▶  #11281 @ 14:00:12: ACTIVE — executing held SENSEX 77100 PE
+  🔄 #11299 @ 14:05:38: RE-ENTRY SENSEX 77100 PE @ 43.0 SL=33
+  🔒 #11305 @ 14:17:54: ABOVE (auto-held) SENSEX 77400 CE
+  ⏸  #11307 @ 14:18:30: WAIT FOR TRIGGER (already holding)
+  ▶  #11310 @ 14:20:14: ACTIVE — executing held SENSEX 77400 CE
+  🔄 #11336 @ 14:31:42: RE-ENTRY ABOVE (held) SENSEX 77400 CE @ 41.0 SL=30
+  📊 #11338 @ 14:35:32: NEAR SIGNAL SENSEX 77100 PE trigger=20.0 SL=16.0 TGT=28.0
+      → Queued (5s delay)
+  ⏱  5s elapsed — executing queued signal:
+      SENSEX 77100 PE
+  🔄 #11352 @ 14:51:32: RE-ENTRY ABOVE (held) SENSEX 77100 PE @ 20.0 SL=16
+  ▶  #11353 @ 14:52:22: ACTIVE — executing held SENSEX 77100 PE
+  🔄 #11362 @ 14:55:00: RE-ENTRY ABOVE (held) SENSEX 77100 PE @ 40.0 SL=32
+  🔄 #11379 @ 15:16:24: RE-ENTRY ABOVE (held) SENSEX 77100 CE @ 30.0 SL=24
+  🔄 #11381 @ 15:17:41: RE-ENTRY ABOVE (held) SENSEX 77100 PE @ 42.0 SL=34
+  ▶  #11382 @ 15:20:28: ACTIVE — executing held SENSEX 77100 PE
+
+  #   Time   Symbol                     Entry      SL     TGT Lots   Qty Result          P&L Reason       Warn
+  ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  1   09:34  SENSEX 77700 PE            290.7     270     315    3    60 [L] SL        -1,242 near_exec    
+  2   09:43  SENSEX 77700 PE            273.2     270     315    3    60 [L] SL          -195 re-entry     
+  3   09:51  SENSEX 77700 PE            287.6     270     315    3    60 [W] SL        +1,641 re-entry     
+  4   10:01  NIFTY 24300 PE             135.6     122     142    3   225 [W] SL        +1,440 active_trigger 
+  5   10:04  NIFTY 24300 PE             135.6     122     142    3   225 [W] SL        +1,440 re-entry     
+  6   10:16  NIFTY 24300 PE             136.1     122     142    3   225 [W] SL        +1,339 re-entry     
+  7   10:43  NIFTY 24300 PE             146.6     132     142    3   225 [W] FLOOR     +1,500 active_trigger ⚠TGT<E
+  8   10:47  NIFTY 24300 PE             144.8     286     142    3   225 [W] FLOOR     +1,500 active_trigger ⚠TGT<E SL>E
+  9   11:05  SENSEX 77500 PE            229.9     200     240    3    60 [W] TGT_ALL     +5,403 near_exec    
+  10  11:14  SENSEX 77500 PE            255.0     200     240    3    60 [W] TGT_ALL     +3,900 re-entry     ⚠TGT<E
+  11  11:16  SENSEX 77500 PE            286.3     200     240    3    60 [W] TGT_ALL     +2,022 re-entry     ⚠TGT<E
+  12  11:26  SENSEX 77400 PE            223.2     200     240    3    60 [L] SL        -1,392 near_exec    
+  13  11:28  SENSEX 77400 PE            223.2     200     240    3    60 [L] SL        -1,392 re-entry     
+  14  11:30  SENSEX 77400 PE            223.2     200     240    3    60 [L] SL        -1,392 re-entry     
+  15  11:35  SENSEX 77400 PE            191.1     200     240    3    60 [W] FLOOR     +1,500 re-entry     ⚠SL>E
+  16  12:07  SENSEX 77400 PE            204.7     200     240    3    60 [L] SL          -279 re-entry     
+  17  12:08  SENSEX 77100 CE            230.4     245     275    3    60 [W] FLOOR     +1,500 active_trigger ⚠SL>E
+  18  12:09  SENSEX 77100 CE            230.4     245     275    3    60 [W] FLOOR     +1,500 re-entry     ⚠SL>E
+  19  12:22  SENSEX 77100 CE            234.8     213     275    3    60 [W] SL        +2,412 re-entry     
+  20  12:50  SENSEX 77200 CE            244.5     210     260    3    60 [W] SL          +930 near_exec    
+  21  13:41  SENSEX 77200 CE            187.3     210     260    3    60 [L] MAX_SL     -4,000 re-entry     ⚠SL>E
+  22  13:43  SENSEX 77200 CE            187.3     251     260    3    60 [L] MAX_SL     -4,000 active_trigger ⚠SL>E
+  23  13:48  SENSEX 77200 CE            131.3      47     260    3    60 [W] FLOOR     +1,500 active_trigger 
+  24  13:50  SENSEX 77300 PE            105.7      80     115    3    60 [W] SL          +561 near_exec    
+  25  13:52  SENSEX 77300 PE            111.9      80     115    3    60 [W] SL          +186 re-entry     
+  26  14:00  SENSEX 77100 PE             44.3      33      55    3    60 [L] SL          -678 active_trigger 
+  27  14:05  SENSEX 77100 PE             45.0      33      55    3    60 [L] SL          -717 re-entry     
+  28  14:20  SENSEX 77400 CE             43.5      30      50    3    60 [W] SL          +393 active_trigger 
+  29  14:35  SENSEX 77100 PE             20.9      16      28    3    60 [W] TGT_ALL       +429 near_exec    
+  30  14:52  SENSEX 77100 PE             28.6      16      28    3    60 [W] EOD       +8,244 active_trigger ⚠TGT<E
+  31  15:20  SENSEX 77100 PE             30.1      34      28    3    60 [W] EOD       +8,154 active_trigger ⚠TGT<E SL>E
+
+  CH2: 21W/10L (0 no data) | P&L: ₹+32,207
+
+==================================================================================================================================
+  DB TRADES — 2026-08-27
+==================================================================================================================================
+  CH1: 6 trades, DB P&L: ₹+3,398
+  CH2: 13 trades, DB P&L: ₹+4,874
+
+==================================================================================================================================
+  GRAND TOTAL
+==================================================================================================================================
+  CH1: 4W/1L = ₹+26,410
+  CH2: 21W/10L = ₹+32,207
+  Combined: ₹+58,617
+  Re-entries (skipped): 15
+==================================================================================================================================

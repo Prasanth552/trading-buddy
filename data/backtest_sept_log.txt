@@ -1,0 +1,47 @@
+2026-10-10 15:36:05 IST | INFO    | trading_buddy.upstox_data | Downloading Upstox instrument master...
+2026-10-10 15:36:22 IST | INFO    | trading_buddy.upstox_data | Loaded 120670 Upstox instruments.
+
+  ALL 5 STRATEGIES BACKTEST (time-stepped simulation)
+  Capital: ₹300,000/strategy | Lots: 2 | SL: 30% / ₹5,000
+  Max concurrent: 8 | Cooldown: 15min | Max/scan: 3
+  Universe: 214 stocks | Days: 22
+
+##########################################################################################
+  2026-09-01 (Tuesday)
+##########################################################################################
+  Fetched 208 stocks in 4.0s
+
+  --- OEH ---
+
+  Symbol            Str D   Entry    Exit       P&L     Peak Reason       ETime XTime
+  -----------------------------------------------------------------------------------------------
+
+  --- OEL ---
+
+  Symbol            Str D   Entry    Exit       P&L     Peak Reason       ETime XTime
+  -----------------------------------------------------------------------------------------------
+  ▼ ITC             265PE     5.7 →    4.2  ₹  -5,085  ₹     +0 MAX_LOSS     11:35 13:27
+  ▼ IDEA             14PE     0.6 →    0.6  ₹  +4,062  ₹ +5,489 FLOOR ₹5000  13:20 13:31
+  ▼ KALYANKJIL      580PE    39.0 →   38.0  ₹  -2,975  ₹ +2,417 FLOOR ₹2000  11:20 13:33
+  ▼ ASHOKLEY        170PE     5.8 →    6.0  ₹  +1,822  ₹ +2,022 FLOOR ₹2000  13:40 13:46
+  ▼ YESBANK          22PE     0.7 →    0.7  ₹  +2,347  ₹ +2,347 EOD          09:20 15:29
+  ▼ HINDZINC        600PE    21.8 →   26.9  ₹ +12,555  ₹+12,555 EOD          09:45 15:29
+  ▼ OFSS          12000PE   445.4 →  550.0  ₹ +20,644  ₹+20,644 EOD          13:45 15:29
+  ▼ TATAPOWER       350PE     8.8 →    9.2  ₹  +1,055  ₹ +1,055 EOD          13:50 15:29
+  ▼ VEDL            275PE    11.0 →   13.4  ₹  +5,523  ₹ +5,523 EOD          13:50 15:29
+  ▼ NATIONALUM      370PE    13.6 →   13.6  ₹    -159  ₹     +0 EOD          13:55 15:29
+  OEH TOTAL: 14 trades | 11W/3L | ₹+47,826
+  ▲ HCLTECH        1340CE    54.0 →   52.0  ₹  -1,740  ₹   +656 FLOOR ₹500   09:30 09:38
+  ▼ HDFCBANK        700PE    18.0 →   19.2  ₹  +1,459  ₹ +1,848 FLOOR ₹1500  09:30 09:41
+  ▲ TCS            2360CE    80.0 →   85.0  ₹  +2,120  ₹ +5,265 FLOOR ₹5000  09:25 09:50
+  ▼ DABUR           380PE     7.2 →    8.0  ₹  +1,910  ₹ +2,035 FLOOR ₹2000  09:50 09:59
+  ▼ SBICARD         640PE    19.6 →   20.6  ₹  +1,481  ₹ +3,718 FLOOR ₹3500  09:45 10:19
+  ▼ HINDUNILVR     1980PE    38.5 →   40.0  ₹    +831  ₹ +2,029 FLOOR ₹2000  09:50 10:26
+  ▲ TATASTEEL       185CE     7.0 →    7.7  ₹  +3,712  ₹+16,342 FLOOR ₹6000  09:40 13:18
+  ▲ BPCL            320CE    10.4 →   12.0  ₹  +5,975  ₹ +6,764 FLOOR ₹6000  09:25 15:04
+  ▼ YESBANK          22PE     0.7 →    0.7  ₹  +2,347  ₹ +2,347 EOD          09:25 15:29
+  ▼ KALYANKJIL      600PE    37.9 →   53.0  ₹ +40,568  ₹+40,568 EOD          09:30 15:29
+  ▲ KPITTECH        590CE    33.0 →   33.0  ₹    -160  ₹     +0 EOD          10:20 15:29
+  ▼ VEDL            275PE    11.0 →   13.4  ₹  +5,523  ₹ +5,523 EOD          12:10 15:29
+  ▼ SBICARD         640PE    22.5 →   25.0  ₹  +3,867  ₹ +3,867 EOD          13:20 15:29
+  ORB TOTAL: 13 trades | 11W/2L | ₹+67,893

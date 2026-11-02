@@ -1,0 +1,138 @@
+
+==================================================================================================================================
+  CH1 SIGNALS — 2026-08-26 — Monthly expiry, 2 lots, ₹1,500 floor
+==================================================================================================================================
+  Parsed 7 signals from 21 messages
+
+  #   Time   Symbol                       Trigger   Entry      SL     TGT Lots   Qty Result          P&L Expiry       Warn
+  ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  19414 09:20  HINDZINC 590 CE                   34    34.0      32      37    2  2450 [W] TGT_ALL     +7,228 29Sep        
+  19416 09:40  CHOLAFIN 1900 CE                  70    71.0      65      76    2  1250 [W] FLOOR     +1,500 29Sep        
+  19419 09:44  PNBHOUSING 1200 CE                48    45.0      43      54    2  1300 [L] SL        -2,535 29Sep        
+  19422 09:56  COFORGE 1900 CE                   75    76.6      68      84    2   950 [L] SL        -8,170 29Sep        
+  19423 10:02  OFSS 12500 CE                    280   285.0     250     320    2   200 [W] FLOOR     +1,500 29Sep        
+  19426 10:18  CHOLAFIN 1940 PE                  65    69.1      60      71    2  1250 [W] TGT_ALL     +2,375 29Sep        
+  19428 12:12  INDUSIND 1010 PE                  26              22      31            NO_INST                         
+
+  CH1: 4W/2L (1 no data) | P&L: ₹+1,898
+
+==================================================================================================================================
+  CH2 SIGNALS — 2026-08-26 — Index only, 3L idx, ₹1,500 floor
+  ABOVE → auto-hold until Active | NEAR → 5s delay
+==================================================================================================================================
+  ⊘  #10266 @ 09:08:00: SKIP non-index INDIGO 5300 CE
+  ⊘  #10267 @ 09:09:05: SKIP non-index TRENT 2950 CE
+  🔒 #10270 @ 09:15:41: ABOVE (auto-held) SENSEX 77900 CE
+  ⚠  Replacing held SENSEX 77900 CE
+  🔒 #10293 @ 09:25:52: ABOVE (auto-held) NIFTY 24350 CE
+  ⏸  #10297 @ 09:26:27: WAIT FOR TRIGGER (already holding)
+  ▶  #10303 @ 09:28:02: ACTIVE — executing held NIFTY 24350 CE
+  🔄 #10321 @ 09:32:37: RE-ENTRY ABOVE (held) NIFTY 24350 CE @ 147.0 SL=138
+  🔄 #10322 @ 09:33:33: RE-ENTRY NIFTY 24350 CE SL=152.0 TGT=172.0
+  ▶  #10325 @ 09:40:45: ACTIVE — executing held NIFTY 24350 CE
+  🔒 #10340 @ 09:58:54: ABOVE (auto-held) BANKNIFTY 59000 CE
+  ⏸  #10343 @ 09:59:53: WAIT FOR TRIGGER (already holding)
+  ⚠  Replacing held BANKNIFTY 59000 CE
+  🔒 #10345 @ 10:07:09: ABOVE (auto-held) SENSEX 78200 PE
+  ▶  #10349 @ 10:09:34: ACTIVE — executing held SENSEX 78200 PE
+  🔒 #10372 @ 10:12:49: ABOVE (auto-held) SENSEX 78300 PE
+  ⏸  #10374 @ 10:13:04: WAIT FOR TRIGGER (already holding)
+  ▶  #10376 @ 10:18:04: ACTIVE — executing held SENSEX 78300 PE
+  📊 #10411 @ 10:23:34: NEAR SIGNAL NIFTY 24450 PE trigger=142.0 SL=135.0 TGT=152.0
+      → Queued (5s delay)
+  ⏱  5s elapsed — executing queued signal:
+      NIFTY 24450 PE
+  📊 #10414 @ 10:24:04: NEAR SIGNAL NIFTY 24450 PE trigger=150.0 SL=143.0 TGT=160.0
+      → Queued (5s delay)
+  ⏱  5s elapsed — executing queued signal:
+      NIFTY 24450 PE
+  🔄 #10427 @ 10:31:50: RE-ENTRY NIFTY 24450 PE @ 150.0 SL=143
+  ⊘  #10430 @ 10:39:23: SKIP non-index HEROMOTOCO 5600 CE
+  🔄 #10441 @ 10:41:35: RE-ENTRY ABOVE (held) NIFTY 24450 PE @ 150.0 SL=143
+  ⊘  #10443 @ 10:44:30: SKIP non-index EICHERMOT 8100 CE
+  ▶  #10447 @ 10:48:58: ACTIVE — executing held NIFTY 24450 PE
+  🔒 #10473 @ 10:59:07: ABOVE (auto-held) SENSEX 77700 CE
+  ⏸  #10476 @ 10:59:39: WAIT FOR TRIGGER (already holding)
+  🔄 #10479 @ 11:04:28: RE-ENTRY NIFTY 24450 PE @ 150.0 SL=143
+  🔄 #10489 @ 11:19:43: RE-ENTRY ABOVE (held) NIFTY 24450 PE @ 150.0 SL=143
+  📊 #10491 @ 11:20:49: NEAR SIGNAL SENSEX 78100 PE trigger=320.0 SL=300.0 TGT=340.0
+      → Queued (5s delay)
+  ⏱  5s elapsed — executing queued signal:
+      SENSEX 78100 PE
+  🔄 #10512 @ 11:24:31: RE-ENTRY ABOVE (held) SENSEX 78100 PE @ 370.0 SL=347
+  ⚠  Replacing held SENSEX 78100 PE
+  🔒 #10518 @ 11:34:43: ABOVE (auto-held) SENSEX 78000 PE
+  ▶  #10524 @ 11:54:15: ACTIVE — executing held SENSEX 78000 PE
+  ⊘  #10534 @ 11:59:04: SKIP non-index MCX 3300 CE
+  ⏸  #10536 @ 11:59:22: WAIT FOR TRIGGER (nothing queued)
+  🔄 #10538 @ 12:00:48: RE-ENTRY SENSEX 78000 PE @ 300.0 SL=270
+  🔒 #10574 @ 12:13:26: ABOVE (auto-held) SENSEX 77900 PE
+  ⏸  #10576 @ 12:13:59: WAIT FOR TRIGGER (already holding)
+  ⚠  Replacing held SENSEX 77900 PE
+  🔒 #10594 @ 12:46:52: ABOVE (auto-held) SENSEX 77600 CE
+  ⏸  #10597 @ 12:47:15: WAIT FOR TRIGGER (already holding)
+  ▶  #10601 @ 13:03:48: ACTIVE — executing held SENSEX 77600 CE
+  🔄 #10610 @ 13:05:37: RE-ENTRY SENSEX 77600 CE @ 320.0 SL=290
+  🔄 #10624 @ 13:24:54: RE-ENTRY ABOVE (held) SENSEX 77600 CE @ 320.0 SL=290
+  ⚠  Replacing held SENSEX 77600 CE
+  🔒 #10626 @ 13:29:30: ABOVE (auto-held) SENSEX 77800 PE
+  ⏸  #10628 @ 13:30:09: WAIT FOR TRIGGER (already holding)
+  ⚠  Replacing held SENSEX 77800 PE
+  🔒 #10631 @ 13:43:05: ABOVE (auto-held) SENSEX 77800 PE
+  ▶  #10645 @ 14:04:05: ACTIVE — executing held SENSEX 77800 PE
+  🔒 #10655 @ 14:10:10: ABOVE (auto-held) SENSEX 77600 CE
+  ⏸  #10658 @ 14:10:29: WAIT FOR TRIGGER (already holding)
+  ▶  #10659 @ 14:12:55: ACTIVE — executing held SENSEX 77600 CE
+  🔄 #10671 @ 14:14:45: RE-ENTRY ABOVE (held) SENSEX 77600 CE @ 295.0 SL=268
+  ▶  #10672 @ 14:16:29: ACTIVE — executing held SENSEX 77600 CE
+  🔄 #10680 @ 14:23:12: RE-ENTRY ABOVE (held) SENSEX 77600 CE @ 295.0 SL=268
+  🔄 #10681 @ 14:37:20: RE-ENTRY ABOVE (held) SENSEX 77600 CE @ 310.0 SL=282
+  ▶  #10683 @ 14:47:23: ACTIVE — executing held SENSEX 77600 CE
+  ⊘  #10694 @ 14:50:02: SKIP non-index CRUDEOIL 7500 PE
+  ⏸  #10697 @ 14:50:36: WAIT FOR TRIGGER (nothing queued)
+  🔒 #10699 @ 14:54:10: ABOVE (auto-held) SENSEX 77700 CE
+  ⏸  #10701 @ 14:54:29: WAIT FOR TRIGGER (already holding)
+  ❌ #10719 @ 15:03:00: NOT ACTIVE — cancelled held SENSEX 77700 CE
+  🔒 #10724 @ 15:07:52: ABOVE (auto-held) SENSEX 77900 PE
+  ▶  #10729 @ 15:21:57: ACTIVE — executing held SENSEX 77900 PE
+
+  #   Time   Symbol                     Entry      SL     TGT Lots   Qty Result          P&L Reason       Warn
+  ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  1   09:28  NIFTY 24350 CE             158.6     152     172    3   225 [L] SL        -1,485 active_trigger 
+  2   09:33  NIFTY 24350 CE             154.6     152     172    3   225 [W] SL        +3,915 re-entry     
+  3   09:40  NIFTY 24350 CE             163.2     138     172    3   225 [W] SL        +1,991 active_trigger 
+  4   10:09  SENSEX 78200 PE            315.1     275     325    3    60 [W] SL          +594 active_trigger 
+  5   10:18  SENSEX 78300 PE            448.2     405     455    3    60 [W] SL        +2,508 active_trigger 
+  6   10:23  NIFTY 24450 PE             150.8     135     152    3   225 [W] SL          +270 near_exec    
+  7   10:24  NIFTY 24450 PE             150.8     143     160    3   225 [L] SL        -1,755 near_exec    
+  8   10:31  NIFTY 24450 PE             138.8     143     160    3   225 [W] FLOOR     +1,500 re-entry     ⚠SL>E
+  9   10:48  NIFTY 24450 PE             138.2     143     160    3   225 [W] FLOOR     +1,500 active_trigger ⚠SL>E
+  10  11:04  NIFTY 24450 PE             142.1     143     160    3   225 [W] FLOOR     +1,500 re-entry     ⚠SL>E
+  11  11:20  SENSEX 78100 PE            331.3     300     340    3    60 [W] TGT_ALL       +522 near_exec    
+  12  11:54  SENSEX 78000 PE            304.4     270     320    3    60 [W] FLOOR     +1,500 active_trigger 
+  13  12:00  SENSEX 78000 PE            303.7     270     320    3    60 [W] FLOOR     +1,500 re-entry     
+  14  13:03  SENSEX 77600 CE            288.2     290     340    3    60 [W] FLOOR     +1,500 active_trigger ⚠SL>E
+  15  13:05  SENSEX 77600 CE            288.2     290     340    3    60 [W] FLOOR     +1,500 re-entry     ⚠SL>E
+  16  14:04  SENSEX 77800 PE            224.9     200     250    3    60 [L] SL        -1,494 active_trigger 
+  17  14:12  SENSEX 77600 CE            280.9     250     295    3    60 [W] SL          +849 active_trigger 
+  18  14:16  SENSEX 77600 CE            296.2     268     295    3    60 [W] SL        +2,028 active_trigger ⚠TGT<E
+  19  14:47  SENSEX 77600 CE            325.8     282     295    3    60 [W] SL          +255 active_trigger ⚠TGT<E
+  20  15:21  SENSEX 77900 PE            277.7     220     266    3    60 [W] EOD      +41,709 active_trigger ⚠TGT<E
+
+  CH2: 17W/3L (0 no data) | P&L: ₹+60,407
+
+==================================================================================================================================
+  DB TRADES — 2026-08-26
+==================================================================================================================================
+  CH1: 5 trades, DB P&L: ₹+1,052
+  CH2: 10 trades, DB P&L: ₹+9
+
+==================================================================================================================================
+  GRAND TOTAL
+==================================================================================================================================
+  CH1: 4W/2L = ₹+1,898
+  CH2: 17W/3L = ₹+60,407
+  Combined: ₹+62,305
+  Cancelled: 1
+  Re-entries (skipped): 5
+==================================================================================================================================
