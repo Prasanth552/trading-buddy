@@ -1676,7 +1676,7 @@ _RE_REENTRY = re.compile(
 _CH2_SYMBOL_RE = re.compile(
     r'(?:(?:Intra|positional|Note)[/\s]*)*'
     r'((?:BANK\s*NIFTY|NIFTY|SENSEX|FINNIFTY|MIDCPNIFTY|[A-Za-z&]{2,20}))'
-    r'\s+(\d+)\s+(CE|PE)',
+    r'\s+(\d+)\s*(CE|PE)',
     re.IGNORECASE | re.MULTILINE,
 )
 _CH2_ENTRY_RE = re.compile(
