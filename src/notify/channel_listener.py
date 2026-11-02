@@ -972,6 +972,9 @@ def _build_fno_universe(master: list[dict]) -> list[str]:
 # Follow-up / exit message classification
 # ---------------------------------------------------------------------------
 _RE_CLOSE_NEAR_COST = re.compile(r'(?:CLOSE|CUT|EXIT)\s+(?:NEAR|AT)\s+COST|COST\s+TO\s+COST', re.I)
+_RE_BOOK_OR_TRAIL = re.compile(r'BOOK\s+(?:OR\s+TRAIL|PROFIT|PARTIAL)', re.I)
+_RE_BARE_SL = re.compile(r'^\s*SL\s*$', re.I)
+_RE_BARE_CUT = re.compile(r'^\s*(?:CUT|EXIT|CLOSE|BOOK)\s*$', re.I)
 
 
 def _classify_followup(text: str) -> tuple[str, float | None]:
@@ -983,6 +986,12 @@ def _classify_followup(text: str) -> tuple[str, float | None]:
     """
     text = text.strip()
     if _RE_CLOSE_NEAR_COST.search(text):
+        return "book", None
+    if _RE_BOOK_OR_TRAIL.search(text):
+        return "book", None
+    if _RE_BARE_SL.search(text):
+        return "book", None
+    if _RE_BARE_CUT.search(text):
         return "book", None
     return "unknown", None
 
@@ -1588,10 +1597,14 @@ def _handle_followup(action: str, exit_price: float | None, channel: str, ch_lab
                         "Open trades: %s", ch_label, match_sym,
                         [r["symbol"] for r in rows])
 
-    # Fall back to most recent open trade if no match
+    # If reply-to did not match, do NOT close a random trade
     if not target_trade:
+        if original_sig:
+            log.info("[%s] Reply-to trade already closed, skipping.", ch_label)
+            _notify(f"[{ch_label}] Close-near-cost skipped: replied-to trade already closed.")
+            return
         target_trade = rows[0]
-        log.info("[%s] No reply match, closing most recent open: %s", ch_label, target_trade["symbol"])
+        log.info("[%s] No reply-to, closing most recent open: %s", ch_label, target_trade["symbol"])
 
     # Get current LTP
     if exit_price:
