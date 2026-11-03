@@ -1811,6 +1811,8 @@ def _loss_cap_for_channel(ch: str) -> float:
 
 
 def _floor_for_channel(ch: str) -> float:
+    if ch in ("ch1", "ch1b", "ch2"):
+        return 0
     if ch == "ch2f":
         return CH2F_PROFIT_FLOOR
     if ch in ("oeh", "oel", "orb", "orb_ce", "orb_pe", "pdhl", "orf", "aft", "mom", "mom_ce", "mom_pe", "bsq", "bsq_ce", "bsq_pe"):
