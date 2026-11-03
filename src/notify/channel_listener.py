@@ -1923,9 +1923,9 @@ def _maybe_execute_ch2f(sig: ParsedSignal) -> None:
 
 
 def parse_signal_ch2(text: str) -> ParsedSignal | None:
-    """Parse Channel 2 (Shrivastav G Prime) signal format.
+    """Parse Channel 2 (Shrivastav G free / @shrivistav) signal format.
 
-    Handles single-message and split-message signals with a buffer.
+    Handles both VIP format (with SL/targets) and free format (SL VIP → default 30% SL, 2× target).
     """
     global _ch2_pending, _ch2_pending_ts, _ch2_last_is_above
     text = text.strip()
@@ -1940,7 +1940,13 @@ def parse_signal_ch2(text: str) -> ParsedSignal | None:
                                        "FAKE ALERT", "OFFER", "APPLICATION",
                                        "FOLLOW THIS", "PLS READ",
                                        "PERFORMANCE", "MEMBERS SEND",
-                                       "CONGRATULATIONS", "ENTER AFTER BREAK")):
+                                       "CONGRATULATIONS", "ENTER AFTER BREAK",
+                                       "CALL NO", "RESULT", "PROFIT BOOKED",
+                                       "JOIN VIP", "PREMIUM", "CONTACT",
+                                       "WHATSAPP", "T.ME/")):
+        return None
+
+    if re.fullmatch(r'\d+(?:\.\d+)?', clean):
         return None
 
     if re.search(r'NOT\s+ACTIVE\s+AVOID', upper):
@@ -2003,6 +2009,22 @@ def parse_signal_ch2(text: str) -> ParsedSignal | None:
                 trigger_price=trigger,
                 stop_loss=sl,
                 targets=targets,
+            )
+        elif "VIP" in upper and trigger > 0:
+            sl = round(trigger * 0.70, 2)
+            tgt1 = round(trigger * 2.0, 2)
+            _ch2_last_is_above = has_above
+            _ch2_pending = None
+            log.info("[CH2] Free signal (SL VIP → defaults): %s %s %s trigger=%.0f sl=%.0f tgt=%.0f",
+                     raw_sym, strike, opt_type, trigger, sl, tgt1)
+            return ParsedSignal(
+                action="BUY",
+                symbol=raw_sym,
+                strike=strike,
+                option_type=opt_type,
+                trigger_price=trigger,
+                stop_loss=sl,
+                targets=[tgt1],
             )
         else:
             _ch2_pending = {
@@ -4374,7 +4396,7 @@ async def start_listener() -> None:
     ch2_int = _normalize_channel_id(ch2_id) if ch2_id else None
     ch3_int = _normalize_channel_id(ch3_id) if ch3_id else None
 
-    listen_channels = [c for c in [ch1_int or ch1_id, ch1b_int] if c]
+    listen_channels = [c for c in [ch1_int or ch1_id, ch1b_int, ch2_int] if c]
     ch1b_ids = {ch1b_int} if ch1b_int else set()
     ch2_ids = {ch2_int} if ch2_int else set()
     ch3_ids = {ch3_int} if ch3_int else set()
@@ -5761,7 +5783,7 @@ async def start_listener() -> None:
 
         log.info("[%s] Channel message: %s", ch_label, text[:120])
 
-        if channel in ("ch2", "ch3"):
+        if channel in ("ch3",):
             return
 
         # --- CH2: handle control messages before parsing ---
