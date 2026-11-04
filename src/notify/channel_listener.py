@@ -6328,7 +6328,11 @@ async def start_listener() -> None:
                              completed_buffer_start, event.message.id)
 
                 _ch2_msg_signals[event.message.id] = sig
-                is_above = bool(re.search(r'\bABO(?:VE)?\b', text, re.I)) or _ch2_last_is_above
+                is_above_in_text = bool(re.search(r'\bABO(?:VE)?\b', text, re.I))
+                is_near_in_text = bool(re.search(r'\bNEAR\b', text, re.I))
+                is_above = is_above_in_text and not is_near_in_text
+                if not is_above_in_text and not is_near_in_text:
+                    is_above = _ch2_last_is_above
                 if is_above:
                     _ch2_trigger_held = sig
                     _ch2_trigger_held_msg_id = completed_buffer_start or event.message.id
