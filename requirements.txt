@@ -33,3 +33,5 @@ protobuf>=5.27.0
 websockets>=13.0
 # Timezone (stdlib zoneinfo used; tzdata needed on Windows)
 tzdata==2024.2
+# Gemini Flash — free-tier channel message classifier
+google-genai>=1.0.0

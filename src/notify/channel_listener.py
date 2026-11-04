@@ -998,7 +998,113 @@ def _classify_followup(text: str) -> tuple[str, float | None]:
 
 
 # ---------------------------------------------------------------------------
-# LLM + regex signal parsing (unchanged)
+# Gemini Flash — unified CH1 message classifier
+# ---------------------------------------------------------------------------
+_GEMINI_CH1_SYSTEM = """\
+You classify Telegram trading channel messages. Given a message and a list of \
+currently open trades, return a JSON object with ONE of these types:
+
+1. NEW_SIGNAL — a new BUY/SELL signal with stock name, strike, CE/PE, entry price, SL, targets.
+   {"type":"NEW_SIGNAL","symbol":"MCX","strike":3400,"option_type":"PE",\
+"trigger_price":200,"stop_loss":185,"targets":[220,250],"is_above":true}
+   - is_above = true when entry says "ABOVE" (wait for price to reach trigger before entering)
+   - is_above = false when entry says "NEAR" or "CMP" or just a price (enter immediately)
+   - trigger_price = the premium/price to enter at (number after ABOVE/NEAR/CMP/BUY@)
+   - If no trigger price, set trigger_price to 0
+
+2. BOOK_PROFIT — close/exit/book a trade. Examples: "15.3 BOOK OR TRAIL", "BOOK SMALL", \
+"BOOK PROFIT", "EXIT", "CLOSE", "CUT".
+   {"type":"BOOK_PROFIT","symbol":"PETRONET 300 CE","price":15.3}
+   - symbol: the full trade name if identifiable from context/open trades, else null
+   - price: the price mentioned, else null
+
+3. MOVE_SL — move stop loss to a new level. Examples: "103.35 SL COST" (move SL to entry/cost), \
+"TRAIL SL TO 180", "SL 95".
+   {"type":"MOVE_SL","symbol":"ADANIENT 2650 CE","new_sl":98.59,"to_cost":true}
+   - to_cost: true if "SL COST" or "COST TO COST" (move SL to entry price)
+   - new_sl: explicit SL price if given, else null
+
+4. CANCEL — cancel/invalidate the last signal. Examples: "NOT ACTIVATED IGNORE", \
+"IGNORE ABOVE CALL", "CANCEL", "NOT ACTIVE AVOID".
+   {"type":"CANCEL","reason":"NOT ACTIVATED IGNORE"}
+
+5. WAIT — hold off, don't enter yet. Examples: "WAIT TO ACTIVATE", "WAIT FOR TRIGGER", \
+"HOLD", "DON'T ENTER YET".
+   {"type":"WAIT","reason":"WAIT TO ACTIVATE"}
+
+6. IGNORE — not a trading instruction at all. Greetings, promos, payment links, \
+market commentary, performance summaries, disclaimer, watchlist.
+   {"type":"IGNORE"}
+
+Rules:
+- A message with JUST a number like "15.3" or "103.35" followed by a trading action word \
+is BOOK_PROFIT or MOVE_SL depending on context.
+- "SL COST" means MOVE_SL with to_cost=true, NOT a stop loss hit.
+- "BOOK OR TRAIL" = BOOK_PROFIT
+- "BOOK SMALL" = BOOK_PROFIT
+- Messages like "GOOD MORNING", "CLICK ON NOTIFICATION", payment links = IGNORE
+- If a message has BOTH a signal AND "WAIT TO ACTIVATE", classify as NEW_SIGNAL \
+(the WAIT will come as a separate message)
+- Use the open trades list to resolve which trade a BOOK/MOVE_SL refers to.
+"""
+
+_gemini_client_singleton = None
+
+
+def _get_gemini_client():
+    global _gemini_client_singleton
+    if _gemini_client_singleton is None:
+        try:
+            from src.llm.client import GeminiClient
+            _gemini_client_singleton = GeminiClient()
+        except Exception as exc:
+            log.warning("Gemini client init failed: %s", exc)
+            return None
+    return _gemini_client_singleton
+
+
+def _get_open_trades_context(channel: str) -> str:
+    """Build a string listing open trades for context."""
+    from src.storage import db
+    db.init_db()
+    with db.get_conn() as conn:
+        ch_filter = "(channel IS NULL OR channel = 'ch1')" if channel == "ch1" else f"channel = '{channel}'"
+        rows = conn.execute(
+            f"SELECT symbol, price, stop_price FROM trades "
+            f"WHERE status = 'OPEN' AND ({ch_filter}) ORDER BY id DESC"
+        ).fetchall()
+    if not rows:
+        return "No open trades."
+    parts = []
+    for r in rows:
+        parts.append(f"- {r['symbol']} (entry={r['price']}, SL={r['stop_price']})")
+    return "Open trades:\n" + "\n".join(parts)
+
+
+def classify_ch1_message(text: str, channel: str = "ch1") -> dict | None:
+    """Classify a CH1 message using Gemini Flash. Returns dict or None on failure."""
+    gc = _get_gemini_client()
+    if gc is None:
+        return None
+
+    open_ctx = _get_open_trades_context(channel)
+    user_msg = f"Open trades context:\n{open_ctx}\n\nMessage to classify:\n{text}"
+
+    try:
+        result = gc.classify_json(
+            system=_GEMINI_CH1_SYSTEM,
+            user=user_msg,
+        )
+        msg_type = result.get("type", "IGNORE")
+        log.info("[GEMINI] Classified '%s' → %s", text[:80], msg_type)
+        return result
+    except Exception as exc:
+        log.warning("[GEMINI] Classification failed: %s", exc)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# LLM + regex signal parsing (Anthropic fallback)
 # ---------------------------------------------------------------------------
 _PARSE_SYSTEM = """You extract trading signals from Telegram messages.
 Return a JSON object with these fields (or null if the message is NOT a trading signal):
@@ -1637,6 +1743,44 @@ def _handle_followup(action: str, exit_price: float | None, channel: str, ch_lab
     _notify(f"[{ch_label}] Close-near-cost executed: {target_trade['symbol']} at {ltp}")
 
 
+def _move_sl(channel: str, ch_label: str, symbol: str | None, new_sl: float | None, to_cost: bool) -> None:
+    """Move stop loss for a trade (SL COST or explicit SL level)."""
+    from src.storage import db
+    db.init_db()
+    with db.get_conn() as conn:
+        ch_filter = "(channel IS NULL OR channel = 'ch1')" if channel == "ch1" else f"channel = '{channel}'"
+        rows = conn.execute(
+            f"SELECT id, symbol, price, stop_price FROM trades "
+            f"WHERE status = 'OPEN' AND ({ch_filter}) ORDER BY id DESC"
+        ).fetchall()
+
+    if not rows:
+        log.info("[%s] MOVE_SL but no open trades.", ch_label)
+        return
+
+    target = None
+    if symbol:
+        for r in rows:
+            if r["symbol"].upper() == symbol.upper():
+                target = r
+                break
+    if not target:
+        target = rows[0]
+
+    if to_cost:
+        new_sl = target["price"]
+
+    if new_sl is None or new_sl <= 0:
+        log.warning("[%s] MOVE_SL: no valid SL value for %s", ch_label, target["symbol"])
+        return
+
+    old_sl = target["stop_price"]
+    with db.get_conn() as conn:
+        conn.execute("UPDATE trades SET stop_price = ? WHERE id = ?", (new_sl, target["id"]))
+    log.info("[%s] SL moved: %s %.2f → %.2f", ch_label, target["symbol"], old_sl, new_sl)
+    _notify(f"[{ch_label}] SL moved: {target['symbol']} {old_sl:.2f} → {new_sl:.2f}")
+
+
 # ---------------------------------------------------------------------------
 # Channel 2 signal parser — "Shrivastav G Prime" format
 #
@@ -1671,6 +1815,12 @@ _ch2_last_near_flush_ts: float = 0.0
 _ch2_buffer_start_id: int | None = None
 _ch2_buffer_links: dict[int, int] = {}  # completion_msg_id → buffer_start_id (split-signal dedup)
 CH2_INST_COOLDOWN = 10 * 60  # 10-min same-instrument cooldown
+
+# CH1 queued signal — 5s delay for cancel/wait protection (like CH2)
+_ch1_queued_signal: ParsedSignal | None = None
+_ch1_queued_task: Any = None
+_ch1_queued_channel: str = ""
+_ch1_queued_label: str = ""
 
 _RE_REENTRY = re.compile(
     r'(?:'
@@ -6068,6 +6218,97 @@ async def start_listener() -> None:
                 _ch2_buffer_start_id = event.message.id
                 log.info("[CH2] Buffer start: msg %d", event.message.id)
         else:
+            # --- CH1/CH1B: Gemini-first classification (fallback to Anthropic+regex) ---
+            global _ch1_queued_signal, _ch1_queued_task, _ch1_queued_channel, _ch1_queued_label
+            classification = classify_ch1_message(text, channel)
+
+            if classification is not None:
+                msg_type = classification.get("type", "IGNORE")
+
+                if msg_type == "NEW_SIGNAL":
+                    targets = classification.get("targets") or []
+                    sl = classification.get("stop_loss", 0)
+                    if targets and sl > 0:
+                        sig = ParsedSignal(
+                            action=classification.get("action", "BUY"),
+                            symbol=classification["symbol"],
+                            strike=float(classification["strike"]),
+                            option_type=classification["option_type"],
+                            trigger_price=float(classification.get("trigger_price", 0)),
+                            stop_loss=float(sl),
+                            targets=[float(t) for t in targets],
+                        )
+                        is_above = classification.get("is_above", False)
+                        log.info("[%s] Gemini NEW_SIGNAL: %s %s %s trigger=%.2f SL=%.2f above=%s",
+                                 ch_label, sig.symbol, sig.strike, sig.option_type,
+                                 sig.trigger_price, sig.stop_loss, is_above)
+
+                        # Queue with 5s delay for cancel/wait protection
+                        if _ch1_queued_task:
+                            _ch1_queued_task.cancel()
+                        _ch1_queued_signal = sig
+                        _ch1_queued_channel = channel
+                        _ch1_queued_label = ch_label
+                        _frozen_sig = sig
+
+                        async def _ch1_delayed_exec():
+                            global _ch1_queued_signal, _ch1_queued_task
+                            await asyncio.sleep(5)
+                            if _ch1_queued_signal is _frozen_sig:
+                                _ch1_queued_signal = None
+                                _ch1_queued_task = None
+                                _execute_and_notify(_frozen_sig, _ch1_queued_channel, _ch1_queued_label)
+
+                        _ch1_queued_task = asyncio.create_task(_ch1_delayed_exec())
+                        log.info("[%s] Signal queued (5s): %s %s %s",
+                                 ch_label, sig.symbol, int(sig.strike), sig.option_type)
+                        _notify(f"[{ch_label}] Signal detected (5s queue):\n"
+                                f"{sig.symbol} {int(sig.strike)} {sig.option_type} @ {sig.trigger_price}\n"
+                                f"SL: {sig.stop_loss} | TGT: {sig.targets[0] if sig.targets else 0}")
+                        return
+                    else:
+                        log.info("[%s] Gemini NEW_SIGNAL but missing SL/targets, trying Anthropic fallback", ch_label)
+
+                elif msg_type == "BOOK_PROFIT":
+                    log.info("[%s] Gemini BOOK_PROFIT: symbol=%s price=%s",
+                             ch_label, classification.get("symbol"), classification.get("price"))
+                    _handle_followup("book", classification.get("price"), channel, ch_label)
+                    return
+
+                elif msg_type == "MOVE_SL":
+                    log.info("[%s] Gemini MOVE_SL: symbol=%s new_sl=%s to_cost=%s",
+                             ch_label, classification.get("symbol"),
+                             classification.get("new_sl"), classification.get("to_cost"))
+                    _move_sl(channel, ch_label,
+                             classification.get("symbol"),
+                             classification.get("new_sl"),
+                             classification.get("to_cost", False))
+                    return
+
+                elif msg_type == "CANCEL":
+                    log.info("[%s] Gemini CANCEL: %s", ch_label, classification.get("reason"))
+                    if _ch1_queued_signal and _ch1_queued_task:
+                        cancelled_sym = f"{_ch1_queued_signal.symbol} {int(_ch1_queued_signal.strike)} {_ch1_queued_signal.option_type}"
+                        _ch1_queued_task.cancel()
+                        _ch1_queued_signal = None
+                        _ch1_queued_task = None
+                        log.info("[%s] Cancelled queued signal: %s", ch_label, cancelled_sym)
+                        _notify(f"[{ch_label}] Signal cancelled: {cancelled_sym}\n"
+                                f"Reason: {classification.get('reason', 'channel instruction')}")
+                    else:
+                        log.info("[%s] CANCEL but no queued signal to cancel", ch_label)
+                    return
+
+                elif msg_type == "WAIT":
+                    log.info("[%s] Gemini WAIT: %s — keeping signal queued", ch_label, classification.get("reason"))
+                    return
+
+                elif msg_type == "IGNORE":
+                    log.info("[%s] Gemini IGNORE: not a trading instruction", ch_label)
+                    return
+
+            # --- Gemini didn't classify or returned unexpected type: fallback to Anthropic + regex ---
+            log.info("[%s] Falling back to Anthropic+regex parser", ch_label)
             sig = parse_signal(text)
 
         if sig is not None:
@@ -6134,7 +6375,7 @@ async def start_listener() -> None:
                         f"SL: {sig.stop_loss} | TGT: {sig.targets[0] if sig.targets else 0}")
                 return
 
-            # --- Non-CH2: execute immediately ---
+            # --- Non-CH2: execute immediately (fallback path) ---
             _execute_and_notify(sig, channel, ch_label)
             return
 

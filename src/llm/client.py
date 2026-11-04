@@ -105,3 +105,39 @@ class LLMClient:
             }],
         )
         return next((b.text for b in resp.content if b.type == "text"), "")
+
+
+class GeminiClient:
+    """Thin wrapper over the google-genai SDK for Gemini Flash (free tier)."""
+
+    def __init__(self, api_key: str | None = None) -> None:
+        self.api_key = api_key or os.getenv("GEMINI_API_KEY")
+        if not self.api_key:
+            raise LLMError("GEMINI_API_KEY missing — set it in .env")
+        try:
+            from google import genai
+        except ImportError as exc:
+            raise LLMError(
+                "google-genai not installed — run: pip install google-genai"
+            ) from exc
+        self._genai = genai
+        self.client = genai.Client(api_key=self.api_key)
+
+    def classify_json(
+        self,
+        system: str,
+        user: str,
+        model: str | None = None,
+    ) -> dict[str, Any]:
+        """Send a message with system instruction, return parsed JSON."""
+        model = model or config.GEMINI_MODEL
+        resp = self.client.models.generate_content(
+            model=model,
+            contents=user,
+            config=self._genai.types.GenerateContentConfig(
+                system_instruction=system,
+                response_mime_type="application/json",
+                temperature=0.0,
+            ),
+        )
+        return json.loads(resp.text)
