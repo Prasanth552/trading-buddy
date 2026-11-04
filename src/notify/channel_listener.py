@@ -92,9 +92,7 @@ MAX_DAILY_LOSS_PER_STRATEGY = {
     "orb": 25000,
     "orb_ce": 25000,
     "orb_pe": 25000,
-    "mom": 25000,
-    "mom_ce": 25000,
-    "mom_pe": 25000,
+    "ch3": 25000,
     "bsq": 20000,
     "bsq_ce": 10000,
     "bsq_pe": 10000,
@@ -189,26 +187,6 @@ ORB_MAX_HOLD_MINS = 30          # exit if no floor hit within 30 minutes
 ORB_MAX_TRADES_PER_DAY = 15     # cap total ORB trades per day
 ORB_SKIP_FIRST_SCAN = True      # skip 09:25 scan, start from rescan (09:45)
 
-# ---------------------------------------------------------------------------
-# MOM (Momentum Scalp) scanner
-# ---------------------------------------------------------------------------
-MOM_ENABLED = True
-MOM_RUN_TIME = "09:30"          # IST — first scan after 3x 5-min candles available
-MOM_CAPITAL = 300000            # ₹3 lakh capital pool
-MOM_SL_PCT = 0.30               # 30% of premium as stop-loss
-MOM_MAX_SL = 5000               # cap max SL at ₹5000
-MOM_FLOOR_LEVELS = [500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5500, 6000]
-MOM_BODY_PCT = 0.30             # min body % for momentum signal (was 0.15)
-MOM_VOL_MULT = 2.0              # volume must be > 2.0x average (was 1.5)
-MOM_BLOCKLIST = {"GODREJCP", "GRASIM"}
-MOM_LOSS_CAP = 20000
-MOM_PROFIT_CAP = 30000
-MOM_MAX_ENTRIES_PER_SYM = 2
-MOM_TIME_CUTOFF = "15:15"       # run throughout market hours
-MOM_SL_COOLDOWN = True
-MOM_RESCAN_INTERVAL = 300       # rescan every 5 min (matches 5-min candle close)
-MOM_MAX_HOLD_MINS = 15          # exit if no floor hit within 15 minutes
-MOM_MAX_TRADES_PER_DAY = 20     # cap total MOM trades per day
 
 # ---------------------------------------------------------------------------
 # BSQ (Bollinger Squeeze Breakout) scanner
@@ -506,67 +484,6 @@ def _orb_daily_cap_hit() -> bool:
         return True
     return False
 
-# MOM capital tracking — in-memory, resets on restart
-_mom_capital_avail: float = MOM_CAPITAL
-_mom_capital_locked: dict[int, float] = {}
-
-def _mom_init_capital():
-    global _mom_capital_avail
-    _mom_capital_avail = MOM_CAPITAL
-    _mom_capital_locked.clear()
-
-def _mom_allocate(trade_id: int, amount: float) -> bool:
-    global _mom_capital_avail
-    if amount > _mom_capital_avail:
-        return False
-    _mom_capital_avail -= amount
-    _mom_capital_locked[trade_id] = amount
-    return True
-
-def _mom_free(trade_id: int, pnl: float):
-    global _mom_capital_avail
-    locked = _mom_capital_locked.pop(trade_id, 0)
-    if locked > 0:
-        _mom_capital_avail += locked + pnl
-        log.info("[MOM-CAP] Freed ₹%.0f + PnL ₹%.0f = avail ₹%.0f (locked: %d)",
-                 locked, pnl, _mom_capital_avail, len(_mom_capital_locked))
-
-_mom_daily_pnl: float = 0.0
-_mom_daily_date: str = ""
-_mom_sym_entry_count: dict[str, int] = {}
-_mom_daily_trade_count: int = 0
-_mom_sl_blocked: set[str] = set()
-_mom_processed_candles: set[str] = set()
-
-def _mom_record_pnl(pnl: float):
-    global _mom_daily_pnl, _mom_daily_date
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
-    today = datetime.now(ZoneInfo(config.TIMEZONE)).strftime("%Y-%m-%d")
-    if _mom_daily_date != today:
-        _mom_daily_pnl = 0.0
-        _mom_daily_date = today
-    _mom_daily_pnl += pnl
-
-def _mom_daily_cap_hit() -> bool:
-    global _mom_daily_pnl, _mom_daily_date
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
-    today = datetime.now(ZoneInfo(config.TIMEZONE)).strftime("%Y-%m-%d")
-    if _mom_daily_date != today:
-        _mom_daily_pnl = 0.0
-        _mom_daily_date = today
-        _mom_sym_entry_count.clear()
-        _mom_sl_blocked.clear()
-        _mom_processed_candles.clear()
-        global _mom_daily_trade_count
-        _mom_daily_trade_count = 0
-        return False
-    if _mom_daily_pnl >= MOM_PROFIT_CAP:
-        return True
-    if _mom_daily_pnl <= -MOM_LOSS_CAP:
-        return True
-    return False
 
 # BSQ capital tracking — in-memory, resets on restart
 _bsq_capital_avail: float = BSQ_CAPITAL
@@ -793,7 +710,7 @@ def _aft_daily_cap_hit() -> bool:
 
 def _recover_capital_from_db():
     """On startup, read OPEN trades from DB and pre-lock capital so restarts don't double-allocate."""
-    global _oeh_capital_avail, _oel_capital_avail, _orb_capital_avail, _mom_capital_avail, _bsq_capital_avail
+    global _oeh_capital_avail, _oel_capital_avail, _orb_capital_avail, _bsq_capital_avail
     from src.storage.db import get_conn
     with get_conn() as conn:
         rows = conn.execute(
@@ -816,18 +733,14 @@ def _recover_capital_from_db():
         elif ch in ("orb", "orb_ce", "orb_pe"):
             _orb_capital_avail -= cap
             _orb_capital_locked[tid] = cap
-        elif ch in ("mom", "mom_ce", "mom_pe"):
-            _mom_capital_avail -= cap
-            _mom_capital_locked[tid] = cap
         elif ch in ("bsq", "bsq_ce", "bsq_pe"):
             _bsq_capital_avail -= cap
             _bsq_capital_locked[tid] = cap
     log.info("[CAPITAL] Recovered from DB: OEH=%d trades (avail=%.0f), OEL=%d (avail=%.0f), "
-             "ORB=%d (avail=%.0f), MOM=%d (avail=%.0f), BSQ=%d (avail=%.0f)",
+             "ORB=%d (avail=%.0f), BSQ=%d (avail=%.0f)",
              len(_oeh_capital_locked), _oeh_capital_avail,
              len(_oel_capital_locked), _oel_capital_avail,
              len(_orb_capital_locked), _orb_capital_avail,
-             len(_mom_capital_locked), _mom_capital_avail,
              len(_bsq_capital_locked), _bsq_capital_avail)
 
 
@@ -1639,12 +1552,6 @@ def _close_trade_by_id(trade_id: int, exit_price: float, reason: str) -> None:
             if row["id"] in _aft_capital_locked:
                 _aft_free(row["id"], net_pnl)
                 _aft_record_pnl(net_pnl)
-            if row["id"] in _mom_capital_locked:
-                _mom_free(row["id"], net_pnl)
-                _mom_record_pnl(net_pnl)
-                if reason in ("max_loss_cap", "sl_hit") and MOM_SL_COOLDOWN:
-                    _mom_sl_blocked.add(_base_sym)
-                    log.info("[MOM] SL cooldown: %s blocked for rest of day", _base_sym)
             if row["id"] in _bsq_capital_locked:
                 _bsq_free(row["id"], net_pnl)
                 _bsq_record_pnl(net_pnl)
@@ -1955,7 +1862,7 @@ def _loss_cap_for_channel(ch: str) -> float:
         return CH2F_MAX_LOSS
     if ch == "ch2":
         return CH2_MAX_LOSS
-    if ch in ("oeh", "oel", "orb", "orb_ce", "orb_pe", "pdhl", "orf", "aft", "mom", "mom_ce", "mom_pe", "bsq", "bsq_ce", "bsq_pe"):
+    if ch in ("oeh", "oel", "orb", "orb_ce", "orb_pe", "pdhl", "orf", "aft", "bsq", "bsq_ce", "bsq_pe"):
         return OEH_MAX_SL
     return MAX_LOSS_PER_TRADE
 
@@ -1965,7 +1872,7 @@ def _floor_for_channel(ch: str) -> float:
         return 0
     if ch == "ch2f":
         return CH2F_PROFIT_FLOOR
-    if ch in ("oeh", "oel", "orb", "orb_ce", "orb_pe", "pdhl", "orf", "aft", "mom", "mom_ce", "mom_pe", "bsq", "bsq_ce", "bsq_pe"):
+    if ch in ("oeh", "oel", "orb", "orb_ce", "orb_pe", "pdhl", "orf", "aft", "bsq", "bsq_ce", "bsq_pe"):
         return OEH_FLOOR_STEP
     return PROFIT_TARGET
 
@@ -1983,8 +1890,6 @@ def _floor_levels_for_channel(ch: str) -> list[float] | None:
         return ORF_FLOOR_LEVELS
     if ch == "aft":
         return AFT_FLOOR_LEVELS
-    if ch in ("mom", "mom_ce", "mom_pe"):
-        return MOM_FLOOR_LEVELS
     if ch in ("bsq", "bsq_ce", "bsq_pe"):
         return BSQ_FLOOR_LEVELS
     return None
@@ -2304,15 +2209,17 @@ def _ch2_extract_sl(sl_match: re.Match, trigger: float) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Channel 3 signal parser (free channel — no SL/TGT provided)
+# Channel 3 signal parser — BullRun Premium (SENSEX index options only)
 # ---------------------------------------------------------------------------
 def parse_signal_ch3(text: str) -> ParsedSignal | None:
-    """Parse Channel 3 format: SYMBOL STRIKE CE/PE, BUY ABOVE/NEAR price, TGT paid, SL paid.
+    """Parse BullRun Premium format.
 
-    No SL or targets from the channel — we set a 30% SL and no target (rely on floor + market close).
+    Signal: SENSEX 76900 CE ABOVE 540 - 45  (shorthand: 540-545)
+    Targets: TARGET 580 - 620 - 660++
+    SL: SL 500
+    Control messages (Trade Triggered, Target Achieved, DONE FOR THE DAY) → None.
     """
-    text = text.strip()
-    clean = text.replace("**", "")
+    clean = text.replace("**", "").replace("__", "").replace("*", "").strip()
     clean = re.sub(r'[^\x00-\x7F]+', ' ', clean).strip()
     clean = re.sub(r'\s+', ' ', clean)
 
@@ -2320,62 +2227,52 @@ def parse_signal_ch3(text: str) -> ParsedSignal | None:
         return None
 
     upper = clean.upper()
-    if "CE" not in upper and "PE" not in upper:
-        return None
-    if "BUY" not in upper:
-        return None
-    if "ABOVE" not in upper and "NEAR" not in upper:
-        return None
-    if "PAID" not in upper:
+
+    if any(kw in upper for kw in (
+        "TRIGGERED", "TARGET ACHIEVED", "TARGETS ACHIEVED", "DONE FOR THE DAY",
+        "ADD WATCHLIST", "WATCHLIST", "PREMIUM PERFORMANCE",
+    )):
         return None
 
-    # Skip CRUDEOIL — different segment/hours
-    if "CRUDEOIL" in upper or "CRUDE" in upper:
+    sym_m = re.search(r'SENSEX\s+(\d+)\s*(CE|PE)', upper)
+    if not sym_m:
         return None
 
-    parse_text = re.sub(r'[^\w\s.&/-]', ' ', clean).strip()
-    parse_text = re.sub(r'(\d)\s+(\d{3})(?=\s)', r'\1\2', parse_text)
-    parse_text = re.sub(r'\s+', ' ', parse_text).upper()
-    parse_text = re.sub(r'^[#\s]+', '', parse_text)
+    strike = float(sym_m.group(1))
+    option_type = sym_m.group(2)
 
-    m_opt = re.search(r'(\d[\d,]*(?:\.\d+)?)\s+(CE|PE)', parse_text)
-    if not m_opt:
+    entry_m = re.search(r'(?:BUY\s*)?ABOVE\s*[:\s]*(\d+)\s*[-–]\s*(\d+)', upper)
+    if not entry_m:
         return None
 
-    strike = float(m_opt.group(1).replace(",", ""))
-    option_type = m_opt.group(2)
+    entry_low = int(entry_m.group(1))
+    eh_raw = int(entry_m.group(2))
+    if eh_raw < entry_low:
+        entry_high = int(str(entry_low)[:-len(str(eh_raw))] + str(eh_raw))
+    else:
+        entry_high = eh_raw
 
-    before_strike = parse_text[:m_opt.start()].strip()
-    before_strike = re.sub(r'^(BUY|SELL)\s+', '', before_strike).strip()
-    symbol = before_strike.strip()
-    if not symbol:
-        return None
+    trigger = (entry_low + entry_high) / 2.0
 
-    # Extract entry price
-    trigger = 0.0
-    lines = [l.strip() for l in text.splitlines() if l.strip()]
-    for line in lines:
-        m_entry = re.search(r'(?:ABOVE|NEAR)\s*[:\-]?\s*0?(\d+(?:\.\d+)?)', line, re.I)
-        if m_entry:
-            trigger = float(m_entry.group(1))
-            break
+    sl_m = re.search(r'(?:STOP\s*LOSS|SL)\s*[:\s]*(\d+)', upper)
+    sl = int(sl_m.group(1)) if sl_m else round(trigger * 0.70, 2)
 
-    if trigger <= 0:
-        return None
+    tgt_m = re.search(r'(?:TARGET|TARGETS?)\s*[:\s]*([\d\s/\-+]+)', upper)
+    targets = []
+    if tgt_m:
+        targets = [int(t) for t in re.findall(r'\d+', tgt_m.group(1))]
 
-    # No SL from channel — set 30% below entry as safety net
-    sl = round(trigger * 0.70, 2)
-    # No target — rely on floor + market close exit
-    target = round(trigger * 2.0, 2)
+    if not targets:
+        targets = [round(trigger + 40), round(trigger + 80), round(trigger + 120)]
 
     return ParsedSignal(
         action="BUY",
-        symbol=symbol,
+        symbol="SENSEX",
         strike=strike,
         option_type=option_type,
-        trigger_price=trigger,
+        trigger_price=round(trigger, 2),
         stop_loss=sl,
-        targets=[target],
+        targets=targets,
     )
 
 
@@ -4054,231 +3951,6 @@ async def _run_oel_scan():
 
 
 # ---------------------------------------------------------------------------
-# MOM (Momentum Scalp) Scanner — 5-min candle momentum breakouts
-# ---------------------------------------------------------------------------
-async def _run_mom_scan():
-    """Scan F&O universe for momentum breakout signals on 5-min candles."""
-    global _mom_daily_trade_count
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
-    from src.broker.upstox_data import UpstoxData, load_cached_token
-
-    IST = ZoneInfo(config.TIMEZONE)
-    if not mc.is_market_open():
-        log.info("[MOM] Market not open, skipping scan")
-        return
-
-    if _mom_daily_cap_hit():
-        log.info("[MOM] Daily cap already hit (pnl=₹%.0f), skipping scan", _mom_daily_pnl)
-        return
-
-    # Time cutoff check
-    now = datetime.now(IST)
-    cutoff_h, cutoff_m = map(int, MOM_TIME_CUTOFF.split(":"))
-    if now.hour > cutoff_h or (now.hour == cutoff_h and now.minute > cutoff_m):
-        log.info("[MOM] Past time cutoff %s, skipping scan", MOM_TIME_CUTOFF)
-        return
-
-    if _mom_capital_avail < 5000:
-        log.debug("[MOM] Only ₹%.0f available, skipping scan", _mom_capital_avail)
-        return
-
-    token = load_cached_token()
-    if not token:
-        log.error("[MOM] No valid Upstox token")
-        return
-
-    try:
-        await _ensure_master_loaded()
-    except Exception as exc:
-        log.error("[MOM] Failed to load instrument master: %s", exc)
-        return
-
-    ud = UpstoxData(access_token=token)
-    eq_keys = _cached_eq_keys
-    lot_sizes = _cached_lot_sizes
-
-    today = now.date()
-    # Fetch 5-min candles from open to now
-    from_dt = datetime.combine(today, datetime.min.time()).replace(hour=9, minute=15)
-    to_dt = now
-
-    sym_key_pairs_all = [
-        (sym, eq_keys[sym]) for sym in OEH_UNIVERSE
-        if sym not in MOM_BLOCKLIST and sym in eq_keys
-    ]
-
-    # Bulk OHLC pre-filter: only fetch 5-min candles for stocks with meaningful day range
-    try:
-        all_eq_keys = [key for _, key in sym_key_pairs_all]
-        key_to_sym = {key: sym for sym, key in sym_key_pairs_all}
-        bulk_ohlc = ud.market_quote_ohlc(all_eq_keys)
-    except Exception as exc:
-        log.warning("[MOM] Bulk OHLC failed (%s), fetching all stocks", exc)
-        bulk_ohlc = {}
-
-    if bulk_ohlc:
-        sym_key_pairs = []
-        for key, ohlc in bulk_ohlc.items():
-            sym = key_to_sym.get(key)
-            if not sym:
-                continue
-            opn, high, low = ohlc.get("open", 0), ohlc.get("high", 0), ohlc.get("low", 0)
-            if opn <= 0:
-                continue
-            day_range_pct = (high - low) / opn * 100
-            if day_range_pct < 1.0:
-                continue
-            sym_key_pairs.append((sym, eq_keys[sym]))
-        log.info("[MOM] Bulk OHLC pre-filter: %d/%d stocks have range > 1.0%%",
-                 len(sym_key_pairs), len(sym_key_pairs_all))
-    else:
-        sym_key_pairs = sym_key_pairs_all
-
-    all_candles = await _parallel_fetch_candles(ud, sym_key_pairs, from_dt, to_dt, "5minute",
-                                                batch_size=40, label="MOM")
-
-    # Find momentum signals in ALL unprocessed candles (not just the latest)
-    candidates = []
-    for sym, candles in all_candles.items():
-        if not candles or len(candles) < 3:
-            continue
-
-        # Calculate average volume from all candles
-        vols = [c.get("volume", 0) or 0 for c in candles]
-        avg_vol = sum(vols) / max(1, len(vols))
-        if avg_vol <= 0:
-            continue
-
-        # Check every candle we haven't processed yet (skip first 2 for avg)
-        for ci in range(2, len(candles)):
-            c_bar = candles[ci]
-            # Build a unique key for this candle to avoid reprocessing
-            c_ts = str(c_bar.get("date") or c_bar.get("timestamp") or ci)
-            seen_key = f"{sym}:{c_ts}"
-            if seen_key in _mom_processed_candles:
-                continue
-
-            body = c_bar["close"] - c_bar["open"]
-            body_pct = abs(body) / c_bar["open"] * 100 if c_bar["open"] > 0 else 0
-            vol = c_bar.get("volume", 0) or 0
-
-            if body_pct >= MOM_BODY_PCT and vol > avg_vol * MOM_VOL_MULT:
-                ot = "CE" if body > 0 else "PE"
-                candidates.append({
-                    "symbol": sym,
-                    "option_type": ot,
-                    "body_pct": body_pct,
-                    "vol_ratio": vol / avg_vol if avg_vol > 0 else 0,
-                    "close": c_bar["close"],
-                    "_seen_key": seen_key,
-                })
-
-    # Mark all checked candles as processed (even non-qualifying ones)
-    for sym, candles in all_candles.items():
-        for ci in range(2, len(candles)):
-            c_bar = candles[ci]
-            c_ts = str(c_bar.get("date") or c_bar.get("timestamp") or ci)
-            _mom_processed_candles.add(f"{sym}:{c_ts}")
-
-    if not candidates:
-        log.info("[MOM] No new momentum signals (%d stocks, %d candles processed)", len(all_candles), len(_mom_processed_candles))
-        return
-
-    # NIFTY regime filter — FLAT = both sides allowed
-    regime = await _detect_nifty_regime()
-    if regime == "BEARISH":
-        before = len(candidates)
-        candidates = [c for c in candidates if c["option_type"] != "CE"]
-        skipped_mom = before - len(candidates)
-        if skipped_mom:
-            log.info("[MOM] NIFTY BEARISH — skipped %d CE candidates", skipped_mom)
-    elif regime == "BULLISH":
-        before = len(candidates)
-        candidates = [c for c in candidates if c["option_type"] != "PE"]
-        skipped_mom = before - len(candidates)
-        if skipped_mom:
-            log.info("[MOM] NIFTY BULLISH — skipped %d PE candidates", skipped_mom)
-    elif regime == "FLAT":
-        log.info("[MOM] NIFTY FLAT — allowing both CE and PE candidates")
-
-    # Sort by body_pct (strongest momentum first)
-    candidates.sort(key=lambda x: x["body_pct"], reverse=True)
-    log.info("[MOM] Found %d momentum candidates", len(candidates))
-
-    # Reset capital pool when no trades are active
-    if not _mom_capital_locked:
-        _mom_init_capital()
-
-    executed = 0
-    skipped_capital = 0
-    skipped_guardrail = 0
-
-    for c in candidates:
-        if _mom_daily_cap_hit():
-            break
-        if _mom_daily_trade_count >= MOM_MAX_TRADES_PER_DAY:
-            log.info("[MOM] Daily trade cap reached (%d)", MOM_MAX_TRADES_PER_DAY)
-            break
-        if _mom_capital_avail < 5000:
-            skipped_capital += len(candidates) - candidates.index(c)
-            break
-
-        sym = c["symbol"]
-
-        # Guardrail: per-stock entry limit
-        if _mom_sym_entry_count.get(sym, 0) >= MOM_MAX_ENTRIES_PER_SYM:
-            skipped_guardrail += 1
-            continue
-
-        # Guardrail: SL cooldown
-        if MOM_SL_COOLDOWN and sym in _mom_sl_blocked:
-            skipped_guardrail += 1
-            continue
-
-        ot = c["option_type"]
-        parsed = _resolve_atm_strike(sym, ot)
-        if parsed is None:
-            continue
-
-        mom_lot = lot_sizes.get(sym, 1) * 2
-        sl_pct_price = parsed.trigger_price * (1 - MOM_SL_PCT)
-        sl_cap_price = parsed.trigger_price - (MOM_MAX_SL / mom_lot)
-        parsed.stop_loss = round(max(sl_pct_price, sl_cap_price), 2)
-        parsed.targets = []
-
-        trade_capital = parsed.trigger_price * mom_lot
-        if trade_capital > _mom_capital_avail:
-            skipped_capital += 1
-            continue
-
-        mom_ch = "mom_ce" if ot == "CE" else "mom_pe"
-        result = execute_signal(parsed, channel=mom_ch, max_lots=2)
-        if result["placed"]:
-            actual_capital = result["entry"] * result["qty"]
-            _mom_allocate(result["trade_id"], actual_capital)
-            _mom_sym_entry_count[sym] = _mom_sym_entry_count.get(sym, 0) + 1
-            _mom_daily_trade_count += 1
-            executed += 1
-            _notify(
-                f"*[MOM] Trade #{executed}*\n"
-                f"{result['symbol']} {ot} x{result['qty']}\n"
-                f"Entry: {result['entry']} | SL: {result['sl']} | Floors: ₹500→₹1000→...\n"
-                f"Body: {c['body_pct']:.2f}% | Vol: {c['vol_ratio']:.1f}x avg\n"
-                f"Capital: ₹{actual_capital:,.0f} locked | ₹{_mom_capital_avail:,.0f} available"
-            )
-
-    if executed > 0:
-        _notify(
-            f"*[MOM] Scan: {executed} trades placed*\n"
-            f"Candidates: {len(candidates)} | Skip (capital): {skipped_capital}\n"
-            f"Capital: ₹{_mom_capital_avail:,.0f}"
-        )
-    log.info("[MOM] Scan done: %d executed, %d skip(cap), %d skip(guard)",
-             executed, skipped_capital, skipped_guardrail)
-
-
-# ---------------------------------------------------------------------------
 # EOD Report — daily summary sent to Telegram
 # ---------------------------------------------------------------------------
 def _build_eod_report(target_date: str | None = None) -> str:
@@ -4307,8 +3979,6 @@ def _build_eod_report(target_date: str | None = None) -> str:
         ("bsq", "BSQ Scanner"),
         ("bsq_ce", "BSQ CE"),
         ("bsq_pe", "BSQ PE"),
-        ("mom_ce", "MOM CE"),
-        ("mom_pe", "MOM PE"),
     ]
 
     lines = []
@@ -4570,7 +4240,7 @@ async def start_listener() -> None:
         _telegram_connected = True
     except Exception as _tg_err:
         log.warning("Telegram connection failed (%s) — running scanners only (no channel signals)", _tg_err)
-        _notify(f"*[SYSTEM] Telegram offline* — {_tg_err}. Scanners (OEH/OEL/ORB/MOM/BSQ) will run normally.")
+        _notify(f"*[SYSTEM] Telegram offline* — {_tg_err}. Scanners (OEH/OEL/ORB/BSQ) will run normally.")
 
     # --- Background position monitor: checks LTP every 5s, auto-closes ---
     global _peak_net
@@ -4597,7 +4267,6 @@ async def start_listener() -> None:
                         (_oeh_capital_locked, _oeh_free, _oeh_record_pnl, "OEH"),
                         (_oel_capital_locked, _oel_free, _oel_record_pnl, "OEL"),
                         (_orb_capital_locked, _orb_free, _orb_record_pnl, "ORB"),
-                        (_mom_capital_locked, _mom_free, _mom_record_pnl, "MOM"),
                         (_bsq_capital_locked, _bsq_free, _bsq_record_pnl, "BSQ"),
                     ]:
                         if _cap_locked:
@@ -4616,7 +4285,6 @@ async def start_listener() -> None:
                     (_oeh_capital_locked, _oeh_free, _oeh_record_pnl, "OEH"),
                     (_oel_capital_locked, _oel_free, _oel_record_pnl, "OEL"),
                     (_orb_capital_locked, _orb_free, _orb_record_pnl, "ORB"),
-                    (_mom_capital_locked, _mom_free, _mom_record_pnl, "MOM"),
                     (_bsq_capital_locked, _bsq_free, _bsq_record_pnl, "BSQ"),
                 ]:
                     stale = [tid for tid in _cap_locked if tid not in open_ids]
@@ -4750,10 +4418,7 @@ async def start_listener() -> None:
                         elif stepped_floor == 0:
                             max_hold = None
                             tag = ""
-                            if ch in ("mom", "mom_ce", "mom_pe") and MOM_MAX_HOLD_MINS:
-                                max_hold = MOM_MAX_HOLD_MINS
-                                tag = "MOM"
-                            elif ch in ("orb", "orb_ce", "orb_pe") and ORB_MAX_HOLD_MINS:
+                            if ch in ("orb", "orb_ce", "orb_pe") and ORB_MAX_HOLD_MINS:
                                 max_hold = ORB_MAX_HOLD_MINS
                                 tag = "ORB"
                             if max_hold:
@@ -5175,89 +4840,6 @@ async def start_listener() -> None:
     asyncio.get_event_loop().create_task(_orb_scheduler())
     log.info("ORB scanner started — runs at %s + %s IST (capital: ₹%.0f)",
              ORB_RUN_TIME, ORB_RESCAN_TIME, ORB_CAPITAL)
-
-    # --- MOM (Momentum Scalp) Scanner: runs from 09:30 every 5 min until 13:00 ---
-    async def _mom_scheduler():
-        from zoneinfo import ZoneInfo
-        from datetime import datetime, timedelta
-        IST = ZoneInfo(config.TIMEZONE)
-
-        h, m = map(int, MOM_RUN_TIME.split(":"))
-        first_run = True
-
-        while True:
-            if not MOM_ENABLED:
-                await asyncio.sleep(60)
-                continue
-
-            now = datetime.now(IST)
-
-            if first_run and mc.is_trading_day():
-                first_run = False
-                scheduled = now.replace(hour=h, minute=m, second=0, microsecond=0)
-                if now > scheduled:
-                    mins_late = (now - scheduled).total_seconds() / 60
-                    if mins_late > 300:
-                        log.info("[MOM] Missed scheduled %s by %.0f min — skipping", MOM_RUN_TIME, mins_late)
-                    else:
-                        log.info("[MOM] Missed scheduled %s run — catching up now", MOM_RUN_TIME)
-                        try:
-                            await _run_mom_scan()
-                        except Exception as exc:
-                            log.error("[MOM] Catch-up scan failed: %s", exc, exc_info=True)
-                else:
-                    target = now.replace(hour=h, minute=m, second=0, microsecond=0)
-                    if now >= target:
-                        target += timedelta(days=1)
-                    wait_secs = (target - now).total_seconds()
-                    log.info("[MOM] Next scan at %s IST (in %.0f min)",
-                             target.strftime("%Y-%m-%d %H:%M"), wait_secs / 60)
-                    await asyncio.sleep(wait_secs)
-
-                    if not mc.is_trading_day():
-                        first_run = True
-                        continue
-
-                    try:
-                        await _run_mom_scan()
-                    except Exception as exc:
-                        log.error("[MOM] Scheduler scan failed: %s", exc, exc_info=True)
-
-            # Rescan every 5 min until cutoff
-            while True:
-                await asyncio.sleep(MOM_RESCAN_INTERVAL)
-                if not mc.is_market_open():
-                    log.info("[MOM] Market closed, stopping rescans")
-                    break
-                if _mom_daily_cap_hit():
-                    log.info("[MOM] Daily cap hit, stopping rescans")
-                    break
-                now2 = datetime.now(IST)
-                ch, cm2 = map(int, MOM_TIME_CUTOFF.split(":"))
-                if now2.hour > ch or (now2.hour == ch and now2.minute > cm2):
-                    log.info("[MOM] Past cutoff %s, stopping rescans", MOM_TIME_CUTOFF)
-                    break
-                if _mom_capital_avail > 5000:
-                    log.info("[MOM] Rescan starting — ₹%.0f available", _mom_capital_avail)
-                    try:
-                        await _run_mom_scan()
-                    except Exception as exc:
-                        log.error("[MOM] Rescan failed: %s", exc, exc_info=True)
-                else:
-                    log.debug("[MOM] Rescan skipped — only ₹%.0f available", _mom_capital_avail)
-
-            # Sleep until next trading day's scheduled time (fixes after-hours spam)
-            now3 = datetime.now(IST)
-            next_run = now3.replace(hour=h, minute=m, second=0, microsecond=0) + timedelta(days=1)
-            wait_next = (next_run - now3).total_seconds()
-            log.info("[MOM] Done for today. Next scan at %s IST (in %.0f min)",
-                     next_run.strftime("%Y-%m-%d %H:%M"), wait_next / 60)
-            await asyncio.sleep(wait_next)
-            first_run = True
-
-    asyncio.get_event_loop().create_task(_mom_scheduler())
-    log.info("MOM scanner started — runs from %s IST every %ds (capital: ₹%.0f)",
-             MOM_RUN_TIME, MOM_RESCAN_INTERVAL, MOM_CAPITAL)
 
     # --- BSQ (Bollinger Squeeze Breakout) Scanner ---
 
@@ -5933,8 +5515,6 @@ async def start_listener() -> None:
 
         log.info("[%s] Channel message: %s", ch_label, text[:120])
 
-        if channel in ("ch3",):
-            return
 
         # --- CH2: handle control messages before parsing ---
         if channel == "ch2":
