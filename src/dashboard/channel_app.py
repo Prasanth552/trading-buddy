@@ -1332,9 +1332,12 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
 ::-webkit-scrollbar-track{background:transparent}
 ::-webkit-scrollbar-thumb{background:var(--bd);border-radius:4px}
 
-.ch3-toggle{width:32px;height:32px;border-radius:50%;border:2px solid #555;cursor:pointer;font-size:16px;line-height:28px;text-align:center;padding:0;margin-left:4px;transition:all .2s;vertical-align:middle}
-.ch3-toggle.on{background:#0a5;color:#fff;border-color:#0a5}
-.ch3-toggle.off{background:#c33;color:#fff;border-color:#c33}
+.ch3-bar{display:none;margin:10px 16px;padding:10px 14px;border-radius:10px;align-items:center;justify-content:space-between;gap:10px}
+.ch3-bar.on{background:#0a5;display:flex}
+.ch3-bar.off{background:#c33;display:flex}
+.ch3-bar .ch3-status{color:#fff;font-size:13px;font-weight:700;letter-spacing:.04em}
+.ch3-bar .ch3-btn{background:rgba(255,255,255,.2);color:#fff;border:1px solid rgba(255,255,255,.4);border-radius:8px;padding:6px 18px;font-size:13px;font-weight:700;cursor:pointer;transition:background .2s}
+.ch3-bar .ch3-btn:hover{background:rgba(255,255,255,.35)}
 @media(min-width:600px){
   .wrap{max-width:520px}
   .hero-pnl .val{font-size:38px}
@@ -1359,7 +1362,6 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
   <button class="tab" onclick="switchCh('orb_ce')" id="tab-orb_ce"><span class=ico>RC</span> ORB CE</button>
   <button class="tab" onclick="switchCh('orb_pe')" id="tab-orb_pe"><span class=ico>RP</span> ORB PE</button>
   <button class="tab" onclick="switchCh('ch3')" id="tab-ch3"><span class=ico>BR</span> CH3</button>
-  <button class="ch3-toggle" id="ch3-toggle" onclick="toggleCh3()" title="Stop/Start CH3 live trading">⏸</button>
   <button class="tab" onclick="switchCh('bsq_ce')" id="tab-bsq_ce"><span class=ico>BC</span> BSQ CE</button>
   <button class="tab" onclick="switchCh('bsq_pe')" id="tab-bsq_pe"><span class=ico>BP</span> BSQ PE</button>
 </div>
@@ -1380,6 +1382,12 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
       <div class=ring-sub>Win Rate</div>
     </div>
   </div>
+</div>
+
+<!-- CH3 live toggle -->
+<div class="ch3-bar" id="ch3-bar">
+  <span class="ch3-status" id="ch3-label">CH3 LIVE</span>
+  <button class="ch3-btn" id="ch3-btn" onclick="toggleCh3()">Pause</button>
 </div>
 
 <!-- Stat chips -->
@@ -1561,20 +1569,19 @@ let _stratCache=null,_stratCacheTs=0,_stratFocus='kitchen_sink';
 let _stocksCache=null,_stocksCacheTs=0,_stocksFocus='ema20_rsi50';
 const REFRESH_MS=30000,SCAN_CACHE_MS=300000,STRAT_CACHE_MS=120000,STOCKS_CACHE_MS=120000;
 
+function _updateCh3Bar(enabled){
+  const bar=$('ch3-bar'),lbl=$('ch3-label'),btn=$('ch3-btn');
+  if(!bar)return;
+  bar.className='ch3-bar '+(enabled?'on':'off');
+  lbl.textContent=enabled?'CH3 LIVE — Taking real trades':'CH3 PAUSED — Not taking trades';
+  btn.textContent=enabled?'Pause':'Start';
+  if(CH!=='ch3')bar.style.display='none';
+}
 async function loadCh3Status(){
-  try{const r=await fetch('/api/ch3/status');const d=await r.json();
-    const b=$('ch3-toggle');if(!b)return;
-    b.className='ch3-toggle '+(d.enabled?'on':'off');
-    b.textContent=d.enabled?'▶':'⏸';
-    b.title=d.enabled?'CH3 LIVE — click to stop':'CH3 STOPPED — click to start';
-  }catch(e){}}
+  try{const r=await fetch('/api/ch3/status');const d=await r.json();_updateCh3Bar(d.enabled)}catch(e){}}
 async function toggleCh3(){
-  const b=$('ch3-toggle');if(!b)return;b.textContent='…';
-  try{const r=await fetch('/api/ch3/toggle',{method:'POST'});const d=await r.json();
-    b.className='ch3-toggle '+(d.enabled?'on':'off');
-    b.textContent=d.enabled?'▶':'⏸';
-    b.title=d.enabled?'CH3 LIVE — click to stop':'CH3 STOPPED — click to start';
-  }catch(e){b.textContent='?'}}
+  const btn=$('ch3-btn');if(btn)btn.textContent='…';
+  try{const r=await fetch('/api/ch3/toggle',{method:'POST'});const d=await r.json();_updateCh3Bar(d.enabled)}catch(e){if(btn)btn.textContent='?'}}
 loadCh3Status();
 
 // WebSocket — live push updates
@@ -1838,6 +1845,7 @@ function switchCh(ch){
   $('stratView').style.display=isStrat?'':'none';
   $('stocksView').style.display=isStocks?'':'none';
   $('forexView').style.display='none';
+  const ch3b=$('ch3-bar');if(ch3b){ch3b.style.display=ch==='ch3'?'flex':'none';}
 
   if(isStrat){loadStrat();return}
   if(isStocks){loadStocks();return}
