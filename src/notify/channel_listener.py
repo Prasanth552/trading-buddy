@@ -81,6 +81,7 @@ class ParsedSignal:
 # ---------------------------------------------------------------------------
 PROFIT_TARGET = 1500  # ₹1,500 net profit per trade → auto-close
 MAX_LOSS_PER_TRADE = 8000  # ₹8,000 hard cap — no trade can lose more than this
+LIVE_CHANNELS: set[str] = {"ch3"}  # channels that place real orders even when UPSTOX_SIMULATE_ORDERS=True
 CH2_MAX_LOSS = 4000  # ₹4,000 hard cap for CH2 trades
 MAX_DAILY_LOSS = 25000  # ₹25,000 global daily loss limit (for ch1/ch2 only)
 MAX_DAILY_LOSS_PER_STRATEGY = {
@@ -1384,7 +1385,9 @@ def execute_signal(sig: ParsedSignal, *, channel: str = "ch1", max_lots: int | N
     scanner_channels = ("oeh", "oel", "orb", "orb_ce", "orb_pe", "pdhl", "orf", "aft")
     if channel in scanner_channels and max_lots is not None:
         lots = max_lots
-    elif channel in ("ch2", "ch2f", "ch3"):
+    elif channel == "ch3":
+        lots = 1
+    elif channel in ("ch2", "ch2f"):
         lots = 3 if is_index else 2
     elif channel in ("ch1", "ch1b"):
         lots = 2
@@ -1459,19 +1462,26 @@ def execute_signal(sig: ParsedSignal, *, channel: str = "ch1", max_lots: int | N
     }
 
     try:
-        if getattr(config, "UPSTOX_SIMULATE_ORDERS", False):
+        is_live = channel in LIVE_CHANNELS
+        if getattr(config, "UPSTOX_SIMULATE_ORDERS", False) and not is_live:
             order_id = f"SIM-CHANNEL-{int(_time.time()*1000)}"
             log.info("CHANNEL SIGNAL simulated order id=%s", order_id)
         else:
-            result = uc.place_order(
-                instrument_token=instrument_token,
-                quantity=qty,
-                transaction_type="BUY" if sig.action == "BUY" else "SELL",
-                price=0,
-                trigger_price=sig.trigger_price,
-                order_type="SL",
-            )
-            order_id = (result.get("order_ids") or ["?"])[0]
+            old_sim = getattr(config, "UPSTOX_SIMULATE_ORDERS", False)
+            if is_live:
+                config.UPSTOX_SIMULATE_ORDERS = False
+            try:
+                result = uc.place_order(
+                    instrument_token=instrument_token,
+                    quantity=qty,
+                    transaction_type="BUY" if sig.action == "BUY" else "SELL",
+                    price=0,
+                    trigger_price=sig.trigger_price,
+                    order_type="SL",
+                )
+                order_id = (result.get("order_ids") or ["?"])[0]
+            finally:
+                config.UPSTOX_SIMULATE_ORDERS = old_sim
     except Exception as exc:  # noqa: BLE001
         return {"placed": False, "reason": f"Order failed: {exc}"}
 
@@ -1503,11 +1513,36 @@ def _close_trade_by_id(trade_id: int, exit_price: float, reason: str) -> None:
         db.init_db()
         with db.get_conn() as conn:
             row = conn.execute(
-                "SELECT id, price, qty, symbol FROM trades WHERE id = ? AND status = 'OPEN'",
+                "SELECT id, price, qty, symbol, channel, broker_key FROM trades WHERE id = ? AND status = 'OPEN'",
                 (trade_id,),
             ).fetchone()
             if not row:
                 return
+
+            # Place real sell order for live channels
+            ch = row["channel"] or ""
+            if ch in LIVE_CHANNELS and row["broker_key"]:
+                try:
+                    from src.broker.upstox_client import UpstoxClient, load_cached_token
+                    token = load_cached_token()
+                    if token:
+                        _uc = UpstoxClient(access_token=token)
+                        old_sim = getattr(config, "UPSTOX_SIMULATE_ORDERS", False)
+                        config.UPSTOX_SIMULATE_ORDERS = False
+                        try:
+                            _uc.place_order(
+                                instrument_token=row["broker_key"],
+                                quantity=row["qty"],
+                                transaction_type="SELL",
+                                order_type="MARKET",
+                                price=0,
+                                trigger_price=0,
+                            )
+                            log.info("[LIVE-EXIT] Sell order placed for trade %d (%s)", trade_id, row["symbol"])
+                        finally:
+                            config.UPSTOX_SIMULATE_ORDERS = old_sim
+                except Exception as sell_exc:
+                    log.error("[LIVE-EXIT] Failed to place sell order for trade %d: %s", trade_id, sell_exc)
 
             entry_price = row["price"]
             gross_pnl = (exit_price - entry_price) * row["qty"]
