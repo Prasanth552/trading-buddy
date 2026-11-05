@@ -1472,7 +1472,7 @@ def execute_signal(sig: ParsedSignal, *, channel: str = "ch1", max_lots: int | N
         "exit_price": None,
         "channel": channel,
         "filter_score": filter_score,
-        "targets_remaining": ",".join(str(t) for t in sig.targets[1:]) if channel == "ch2" and len(sig.targets) > 1 else None,
+        "targets_remaining": ",".join(str(t) for t in sig.targets[1:]) if channel in ("ch2", "ch3") and len(sig.targets) > 1 else None,
     }
 
     try:
@@ -1485,13 +1485,14 @@ def execute_signal(sig: ParsedSignal, *, channel: str = "ch1", max_lots: int | N
             if is_live:
                 config.UPSTOX_SIMULATE_ORDERS = False
             try:
+                order_type = "MARKET" if channel == "ch3" else "SL"
                 result = uc.place_order(
                     instrument_token=instrument_token,
                     quantity=qty,
                     transaction_type="BUY" if sig.action == "BUY" else "SELL",
                     price=0,
-                    trigger_price=sig.trigger_price,
-                    order_type="SL",
+                    trigger_price=0 if order_type == "MARKET" else sig.trigger_price,
+                    order_type=order_type,
                 )
                 order_id = (result.get("order_ids") or ["?"])[0]
             finally:
