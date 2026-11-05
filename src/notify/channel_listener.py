@@ -4750,8 +4750,9 @@ async def start_listener() -> None:
             except Exception as exc:
                 log.error("[OEL] Scheduler scan failed: %s", exc, exc_info=True)
 
-    asyncio.get_event_loop().create_task(_oel_scheduler())
-    log.info("OEL scanner started — runs daily at %s IST", OEL_RUN_TIME)
+    # DISABLED — only CH1/CH2/CH3/OEH active
+    # asyncio.get_event_loop().create_task(_oel_scheduler())
+    # log.info("OEL scanner started — runs daily at %s IST", OEL_RUN_TIME)
 
     # --- OEL Early List: send stock list at 09:16 IST ---
     async def _oel_list_scheduler():
@@ -4778,7 +4779,7 @@ async def start_listener() -> None:
 
             await _run_oel_list()
 
-    asyncio.get_event_loop().create_task(_oel_list_scheduler())
+    # asyncio.get_event_loop().create_task(_oel_list_scheduler())
     log.info("OEL early list scheduler started — runs daily at %s IST", OEL_LIST_TIME)
 
     # --- ORB Scanner: runs at 09:25 (initial) + 09:45 (rescan with recycled capital) ---
@@ -4886,7 +4887,7 @@ async def start_listener() -> None:
             await asyncio.sleep(wait_next)
             first_run = True
 
-    asyncio.get_event_loop().create_task(_orb_scheduler())
+    # asyncio.get_event_loop().create_task(_orb_scheduler())
     log.info("ORB scanner started — runs at %s + %s IST (capital: ₹%.0f)",
              ORB_RUN_TIME, ORB_RESCAN_TIME, ORB_CAPITAL)
 
@@ -5201,8 +5202,8 @@ async def start_listener() -> None:
             await asyncio.sleep(wait_next)
             first_run = True
 
-    if BSQ_ENABLED:
-        asyncio.get_event_loop().create_task(_bsq_scheduler())
+    # if BSQ_ENABLED:
+    #     asyncio.get_event_loop().create_task(_bsq_scheduler())
         log.info("BSQ scanner started — runs from %s IST every %ds (capital: ₹%.0f)",
                  BSQ_RUN_TIME, BSQ_RESCAN_INTERVAL, BSQ_CAPITAL)
 

@@ -1359,11 +1359,7 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
   <button class="tab active" onclick="switchCh('oeh')" id="tab-oeh"><span class=ico>O</span> OEH</button>
   <button class="tab" onclick="switchCh('ch1')" id="tab-ch1"><span class=ico>DT</span> CH1</button>
   <button class="tab" onclick="switchCh('ch2')" id="tab-ch2"><span class=ico>SG</span> CH2</button>
-  <button class="tab" onclick="switchCh('orb_ce')" id="tab-orb_ce"><span class=ico>RC</span> ORB CE</button>
-  <button class="tab" onclick="switchCh('orb_pe')" id="tab-orb_pe"><span class=ico>RP</span> ORB PE</button>
   <button class="tab" onclick="switchCh('ch3')" id="tab-ch3"><span class=ico>BR</span> CH3</button>
-  <button class="tab" onclick="switchCh('bsq_ce')" id="tab-bsq_ce"><span class=ico>BC</span> BSQ CE</button>
-  <button class="tab" onclick="switchCh('bsq_pe')" id="tab-bsq_pe"><span class=ico>BP</span> BSQ PE</button>
 </div>
 
 <div class=wrap>
