@@ -82,6 +82,7 @@ class ParsedSignal:
 PROFIT_TARGET = 1500  # ₹1,500 net profit per trade → auto-close
 MAX_LOSS_PER_TRADE = 8000  # ₹8,000 hard cap — no trade can lose more than this
 LIVE_CHANNELS: set[str] = {"ch3"}  # channels that place real orders even when UPSTOX_SIMULATE_ORDERS=True
+CH3_ENABLED: bool = True  # toggled at runtime via /stopch3 and /startch3 Telegram commands
 CH2_MAX_LOSS = 4000  # ₹4,000 hard cap for CH2 trades
 MAX_DAILY_LOSS = 25000  # ₹25,000 global daily loss limit (for ch1/ch2 only)
 MAX_DAILY_LOSS_PER_STRATEGY = {
@@ -5528,6 +5529,19 @@ async def start_listener() -> None:
     if not _telegram_connected:
         log.info("Telegram offline — skipping channel signal handler, scanners running")
 
+    @client.on(events.NewMessage(outgoing=True, pattern=r'^/(stop|start)ch3$'))
+    async def on_ch3_command(event):
+        global CH3_ENABLED
+        cmd = event.message.text.strip().lower()
+        if cmd == "/stopch3":
+            CH3_ENABLED = False
+            log.info("[CH3] DISABLED by user command")
+            _notify("*[CH3] STOPPED* — no new trades will be placed. Open trades will still be monitored.")
+        elif cmd == "/startch3":
+            CH3_ENABLED = True
+            log.info("[CH3] ENABLED by user command")
+            _notify("*[CH3] STARTED* — live trading resumed (1 lot SENSEX).")
+
     @client.on(events.NewMessage(chats=listen_channels if _telegram_connected else []))
     async def on_signal(event):
         global _ch2_queued_signal, _ch2_queued_task, _ch2_trigger_held, _ch2_last_executed, _ch2_last_reentry_ts
@@ -5825,6 +5839,9 @@ async def start_listener() -> None:
         # --- Parse signal ---
         # --- Parse signal ---
         if channel == "ch3":
+            if not CH3_ENABLED:
+                log.info("[CH3] Disabled — ignoring signal")
+                return
             sig = parse_signal_ch3(text)
         elif channel == "ch2":
             had_pending = _ch2_pending is not None
