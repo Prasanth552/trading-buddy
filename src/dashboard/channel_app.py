@@ -850,6 +850,29 @@ def api_scan() -> JSONResponse:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
 
+_CH3_FLAG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "data", ".ch3_enabled")
+
+@app.get("/api/ch3/status")
+def api_ch3_status() -> JSONResponse:
+    try:
+        enabled = open(_CH3_FLAG_FILE).read().strip() != "0"
+    except FileNotFoundError:
+        enabled = True
+    return JSONResponse({"enabled": enabled})
+
+@app.post("/api/ch3/toggle")
+def api_ch3_toggle() -> JSONResponse:
+    try:
+        enabled = open(_CH3_FLAG_FILE).read().strip() != "0"
+    except FileNotFoundError:
+        enabled = True
+    new_state = not enabled
+    os.makedirs(os.path.dirname(_CH3_FLAG_FILE), exist_ok=True)
+    with open(_CH3_FLAG_FILE, "w") as f:
+        f.write("1" if new_state else "0")
+    return JSONResponse({"enabled": new_state})
+
+
 @app.post("/api/close/{trade_id}")
 def api_close_trade(trade_id: int) -> JSONResponse:
     _ensure_db()
@@ -1313,6 +1336,9 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
   .wrap{max-width:520px}
   .hero-pnl .val{font-size:38px}
   .hero{margin:14px 16px}
+.ch3-toggle{width:28px;height:28px;border-radius:50%;border:none;cursor:pointer;font-size:14px;line-height:28px;text-align:center;padding:0;margin-left:-4px;transition:all .2s}
+.ch3-toggle.on{background:#1a3a1a;color:#4f4}
+.ch3-toggle.off{background:#3a1a1a;color:#f44}
 }
 </style></head><body>
 
@@ -1333,6 +1359,7 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
   <button class="tab" onclick="switchCh('orb_ce')" id="tab-orb_ce"><span class=ico>RC</span> ORB CE</button>
   <button class="tab" onclick="switchCh('orb_pe')" id="tab-orb_pe"><span class=ico>RP</span> ORB PE</button>
   <button class="tab" onclick="switchCh('ch3')" id="tab-ch3"><span class=ico>BR</span> CH3</button>
+  <button class="ch3-toggle" id="ch3-toggle" onclick="toggleCh3()" title="Stop/Start CH3 live trading">⏸</button>
   <button class="tab" onclick="switchCh('bsq_ce')" id="tab-bsq_ce"><span class=ico>BC</span> BSQ CE</button>
   <button class="tab" onclick="switchCh('bsq_pe')" id="tab-bsq_pe"><span class=ico>BP</span> BSQ PE</button>
 </div>
@@ -1533,6 +1560,22 @@ let _loading=false,_abortCtrl=null,_scanCache=null,_scanCacheTs=0,_refreshTimer=
 let _stratCache=null,_stratCacheTs=0,_stratFocus='kitchen_sink';
 let _stocksCache=null,_stocksCacheTs=0,_stocksFocus='ema20_rsi50';
 const REFRESH_MS=30000,SCAN_CACHE_MS=300000,STRAT_CACHE_MS=120000,STOCKS_CACHE_MS=120000;
+
+async function loadCh3Status(){
+  try{const r=await fetch('/api/ch3/status');const d=await r.json();
+    const b=$('ch3-toggle');if(!b)return;
+    b.className='ch3-toggle '+(d.enabled?'on':'off');
+    b.textContent=d.enabled?'▶':'⏸';
+    b.title=d.enabled?'CH3 LIVE — click to stop':'CH3 STOPPED — click to start';
+  }catch(e){}}
+async function toggleCh3(){
+  const b=$('ch3-toggle');if(!b)return;b.textContent='…';
+  try{const r=await fetch('/api/ch3/toggle',{method:'POST'});const d=await r.json();
+    b.className='ch3-toggle '+(d.enabled?'on':'off');
+    b.textContent=d.enabled?'▶':'⏸';
+    b.title=d.enabled?'CH3 LIVE — click to stop':'CH3 STOPPED — click to start';
+  }catch(e){b.textContent='?'}}
+loadCh3Status();
 
 // WebSocket — live push updates
 let _ws=null,_wsRetry=1000;
