@@ -399,7 +399,7 @@ NEWS_FEEDS: list[str] = [
 # --------------------------------------------------------------------------
 LLM_FAST_MODEL: str = "claude-haiku-4-5-20251001"  # news / routine analysis
 LLM_SMART_MODEL: str = "claude-sonnet-4-6"          # trade decisions
-GEMINI_MODEL: str = "gemini-2.0-flash"               # channel message classifier (free tier)
+GEMINI_MODEL: str = "gemini-3.8-flash"               # channel message classifier (free tier)
 
 # --------------------------------------------------------------------------
 # Paths
