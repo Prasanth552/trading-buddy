@@ -2052,6 +2052,23 @@ def parse_signal_ch2(text: str) -> ParsedSignal | None:
         return None
 
     if re.fullmatch(r'\d+(?:\.\d+)?', clean):
+        # Bare number — if there's a pending partial with no trigger, use as trigger
+        if _ch2_pending and not _ch2_pending.get("trigger") and _time.time() - _ch2_pending_ts < 90:
+            price = float(clean)
+            if price > 10:
+                sym = _ch2_pending["symbol"]
+                strike = _ch2_pending["strike"]
+                ot = _ch2_pending["opt_type"]
+                sl = round(price * 0.70, 2)
+                tgt1 = round(price * 2.0, 2)
+                _ch2_last_is_above = _ch2_pending.get("is_above", False)
+                _ch2_pending = None
+                log.info("[CH2] Bare-number trigger for pending %s %s %s: price=%.0f sl=%.0f tgt=%.0f",
+                         sym, strike, ot, price, sl, tgt1)
+                return ParsedSignal(
+                    action="BUY", symbol=sym, strike=strike, option_type=ot,
+                    trigger_price=price, stop_loss=sl, targets=[tgt1],
+                )
         return None
 
     if re.search(r'NOT\s+ACTIVE\s+AVOID', upper):
