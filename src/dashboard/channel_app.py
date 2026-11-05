@@ -1332,13 +1332,13 @@ body{font-family:var(--sn);background:var(--bg);color:var(--tx);padding:0;
 ::-webkit-scrollbar-track{background:transparent}
 ::-webkit-scrollbar-thumb{background:var(--bd);border-radius:4px}
 
+.ch3-toggle{width:32px;height:32px;border-radius:50%;border:2px solid #555;cursor:pointer;font-size:16px;line-height:28px;text-align:center;padding:0;margin-left:4px;transition:all .2s;vertical-align:middle}
+.ch3-toggle.on{background:#0a5;color:#fff;border-color:#0a5}
+.ch3-toggle.off{background:#c33;color:#fff;border-color:#c33}
 @media(min-width:600px){
   .wrap{max-width:520px}
   .hero-pnl .val{font-size:38px}
   .hero{margin:14px 16px}
-.ch3-toggle{width:28px;height:28px;border-radius:50%;border:none;cursor:pointer;font-size:14px;line-height:28px;text-align:center;padding:0;margin-left:-4px;transition:all .2s}
-.ch3-toggle.on{background:#1a3a1a;color:#4f4}
-.ch3-toggle.off{background:#3a1a1a;color:#f44}
 }
 </style></head><body>
 
