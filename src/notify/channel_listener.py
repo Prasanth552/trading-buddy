@@ -4688,7 +4688,7 @@ async def start_listener() -> None:
             await asyncio.sleep(wait_next)
             first_run = True
 
-    asyncio.get_event_loop().create_task(_oeh_scheduler())
+    # asyncio.get_event_loop().create_task(_oeh_scheduler())
     log.info("OEH scanner started — runs daily at %s IST", OEH_RUN_TIME)
 
     # --- OEH Early List: send stock list at 09:16 IST ---
@@ -4716,7 +4716,7 @@ async def start_listener() -> None:
 
             await _run_oeh_list()
 
-    asyncio.get_event_loop().create_task(_oeh_list_scheduler())
+    # asyncio.get_event_loop().create_task(_oeh_list_scheduler())
     log.info("OEH early list scheduler started — runs daily at %s IST", OEH_LIST_TIME)
 
     # --- OEL Scanner: run once daily at OEL_RUN_TIME ---
