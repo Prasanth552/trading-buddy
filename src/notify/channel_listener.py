@@ -2301,12 +2301,13 @@ def parse_signal_ch3(text: str) -> ParsedSignal | None:
     )):
         return None
 
-    sym_m = re.search(r'SENSEX\s+(\d+)\s*(CE|PE)', upper)
+    sym_m = re.search(r'(SENSEX|NIFTY|BANKNIFTY|BANK\s*NIFTY)\s+(\d+)\s*(CE|PE)', upper)
     if not sym_m:
         return None
 
-    strike = float(sym_m.group(1))
-    option_type = sym_m.group(2)
+    symbol_raw = sym_m.group(1).replace(" ", "")
+    strike = float(sym_m.group(2))
+    option_type = sym_m.group(3)
 
     entry_m = re.search(r'(?:BUY\s*)?ABOVE\s*[:\s]*(\d+)\s*[-–]\s*(\d+)', upper)
     if not entry_m:
@@ -2334,7 +2335,7 @@ def parse_signal_ch3(text: str) -> ParsedSignal | None:
 
     return ParsedSignal(
         action="BUY",
-        symbol="SENSEX",
+        symbol=symbol_raw,
         strike=strike,
         option_type=option_type,
         trigger_price=round(trigger, 2),
