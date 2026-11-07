@@ -96,7 +96,7 @@ def _ch3_set_enabled(val: bool):
         f.write("1" if val else "0")
 
 CH3_ENABLED: bool = _ch3_is_enabled()
-CH2_MAX_LOSS = 4000  # ₹4,000 hard cap for CH2 trades
+CH2_MAX_LOSS = 10000  # ₹10,000 hard cap for CH2 trades (fallback; dynamic cap from SL preferred)
 MAX_DAILY_LOSS = 25000  # ₹25,000 global daily loss limit (for ch1/ch2 only)
 MAX_DAILY_LOSS_PER_STRATEGY = {
     "ch1": 25000,
@@ -4420,6 +4420,11 @@ async def start_listener() -> None:
                     # Check max loss cap FIRST (PnL-based) — catches gap-through-SL
                     ch = trade["channel"] or "ch1"
                     loss_cap = _loss_cap_for_channel(ch)
+                    # For CH2: dynamic cap = qty * (entry - SL) * 1.1 so cap never fires before real SL
+                    if ch == "ch2" and trade.get("stop_price") and trade.get("price") and trade.get("qty"):
+                        sl_dist = abs(trade["price"] - trade["stop_price"])
+                        dynamic_cap = trade["qty"] * sl_dist * 1.1
+                        loss_cap = max(loss_cap, dynamic_cap)
                     if net_pnl <= -(loss_cap):
                         log.warning("MAX LOSS CAP for %s: net_pnl=₹%.0f hit -₹%d cap. Force closing.",
                                     trade["symbol"], net_pnl, loss_cap)
