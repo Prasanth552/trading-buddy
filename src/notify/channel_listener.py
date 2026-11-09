@@ -1158,12 +1158,17 @@ def _parse_signal_regex(text: str) -> ParsedSignal | None:
 
 
 def _notify(msg: str) -> None:
-    """Push a message to the user's Telegram bot (best-effort)."""
-    try:
-        from src.notify.telegram_bot import TelegramNotifier
-        TelegramNotifier().send_message(msg)
-    except Exception:  # noqa: BLE001
-        log.warning("Could not send Telegram notification: %s", msg)
+    """Push a message to the user's Telegram bot (best-effort, non-blocking)."""
+    import threading
+
+    def _send():
+        try:
+            from src.notify.telegram_bot import TelegramNotifier
+            TelegramNotifier().send_message(msg)
+        except Exception:  # noqa: BLE001
+            log.warning("Could not send Telegram notification: %s", msg)
+
+    threading.Thread(target=_send, daemon=True).start()
 
 
 # ---------------------------------------------------------------------------
@@ -5892,7 +5897,7 @@ async def start_listener() -> None:
         else:
             # --- CH1/CH1B: Gemini-first classification (fallback to Anthropic+regex) ---
             global _ch1_queued_signal, _ch1_queued_task, _ch1_queued_channel, _ch1_queued_label
-            classification = classify_ch1_message(text, channel)
+            classification = await asyncio.to_thread(classify_ch1_message, text, channel)
 
             if classification is not None:
                 msg_type = classification.get("type", "IGNORE")
