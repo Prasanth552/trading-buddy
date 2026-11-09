@@ -4311,6 +4311,13 @@ async def start_listener() -> None:
             ch_list += " + ch3"
         _notify(f"Channel listener started as {me.first_name} ({ch_list})")
         _telegram_connected = True
+        # Pre-resolve all channel entities so Telethon's event filter works
+        for _ch_id in listen_channels:
+            try:
+                await client.get_entity(_ch_id)
+                log.info("Resolved entity for channel %s", _ch_id)
+            except Exception as _ent_err:
+                log.warning("Could not resolve entity for channel %s: %s", _ch_id, _ent_err)
     except Exception as _tg_err:
         log.warning("Telegram connection failed (%s) — running scanners only (no channel signals)", _tg_err)
         _notify(f"*[SYSTEM] Telegram offline* — {_tg_err}. Scanners (OEH/OEL/ORB/BSQ) will run normally.")
