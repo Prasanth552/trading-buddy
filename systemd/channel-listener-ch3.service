@@ -1,0 +1,16 @@
+[Unit]
+Description=Trading Buddy - CH3 (BullRun Premium) isolated listener
+After=network.target
+
+[Service]
+Type=simple
+User=pklprasanth522
+WorkingDirectory=/home/pklprasanth522/Trading-Buddy
+EnvironmentFile=/home/pklprasanth522/Trading-Buddy/.env
+Environment=PYTHONPATH=.
+ExecStart=/home/pklprasanth522/Trading-Buddy/.venv/bin/python3 -m src.notify.ch3_listener
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

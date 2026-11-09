@@ -4287,10 +4287,11 @@ async def start_listener() -> None:
     ch2_int = _normalize_channel_id(ch2_id) if ch2_id else None
     ch3_int = _normalize_channel_id(ch3_id) if ch3_id else None
 
-    listen_channels = [c for c in [ch1_int or ch1_id, ch1b_int, ch2_int, ch3_int] if c]
+    # CH3 runs in its own isolated service (ch3_listener.py) — do NOT listen here
+    listen_channels = [c for c in [ch1_int or ch1_id, ch1b_int, ch2_int] if c]
     ch1b_ids = {ch1b_int} if ch1b_int else set()
     ch2_ids = {ch2_int} if ch2_int else set()
-    ch3_ids = {ch3_int} if ch3_int else set()
+    ch3_ids: set = set()  # CH3 handled by ch3_listener
 
     session_path = os.path.join(os.path.dirname(__file__), "..", "..", "data", "telegram_user.session")
     client = TelegramClient(session_path, api_id, api_hash)
@@ -4305,8 +4306,6 @@ async def start_listener() -> None:
             ch_list += " + ch1b"
         if ch2_int:
             ch_list += " + ch2"
-        if ch3_int:
-            ch_list += " + ch3"
         _notify(f"Channel listener started as {me.first_name} ({ch_list})")
         _telegram_connected = True
         # Pre-resolve all channel entities so Telethon's event filter works
