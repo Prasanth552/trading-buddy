@@ -1463,10 +1463,22 @@ def execute_signal(sig: ParsedSignal, *, channel: str = "ch1", max_lots: int | N
                     f"({ratio:.1f}x) — wrong instrument?")
             return {"placed": False, "reason": f"LTP {entry_price} too far from signal {sig.trigger_price}"}
 
+    # For CH2 free-channel defaults, recalculate SL/TGT from actual entry price
+    # (channel gives trigger price but entry may differ, especially for ABOVE signals)
+    sig_sl = sig.stop_loss
+    sig_tgt = sig.targets[0] if sig.targets else 0
+    if channel == "ch2" and entry_price > 0 and sig.trigger_price > 0:
+        trigger_sl_pct = sig_sl / sig.trigger_price if sig_sl > 0 else 0.70
+        is_default_sl = abs(trigger_sl_pct - 0.70) < 0.02
+        if is_default_sl:
+            sig_sl = round(entry_price * 0.70, 2)
+            log.info("[CH2] Recalc SL from entry %.2f: %.2f→%.2f (TGT stays %.2f)",
+                     entry_price, sig.stop_loss, sig_sl, sig_tgt)
+
     # Recalculate SL based on actual entry price so max loss stays within cap
     max_sl_rs = _loss_cap_for_channel(channel)
-    sl_from_entry = entry_price - (max_sl_rs / qty) if qty > 0 else sig.stop_loss
-    actual_sl = round(max(sig.stop_loss, sl_from_entry), 2)
+    sl_from_entry = entry_price - (max_sl_rs / qty) if qty > 0 else sig_sl
+    actual_sl = round(max(sig_sl, sl_from_entry), 2)
 
     trade_row = {
         "ts": __import__("src.utils.market_calendar", fromlist=["now_ist"]).now_ist().isoformat(timespec="seconds"),
@@ -1475,7 +1487,7 @@ def execute_signal(sig: ParsedSignal, *, channel: str = "ch1", max_lots: int | N
         "qty": qty,
         "price": entry_price,
         "stop_price": actual_sl,
-        "target_price": sig.targets[0] if sig.targets else 0,
+        "target_price": sig_tgt,
         "broker_key": instrument_token,
         "mode": config.MODE,
         "status": "OPEN",
