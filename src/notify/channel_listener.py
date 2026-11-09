@@ -1442,6 +1442,14 @@ def execute_signal(sig: ParsedSignal, *, channel: str = "ch1", max_lots: int | N
     # Slippage: simulate buying at ask (slightly above LTP)
     entry_price = round(entry_price * (1 + SLIPPAGE_PCT), 2)
 
+    # Guard: reject if entry price is at or below SL (guaranteed loss)
+    if sig.stop_loss > 0 and entry_price <= sig.stop_loss:
+        log.warning("ENTRY REJECTED: entry %.2f <= SL %.2f — guaranteed loss. %s %s %s",
+                    entry_price, sig.stop_loss, sig.symbol, int(sig.strike), sig.option_type)
+        _notify(f"⚠️ *Entry rejected* — {sig.symbol} {int(sig.strike)} {sig.option_type}\n"
+                f"Entry {entry_price:.1f} <= SL {sig.stop_loss:.1f} — would be instant SL hit")
+        return {"placed": False, "reason": f"Entry {entry_price} <= SL {sig.stop_loss}"}
+
     # Sanity check: reject if LTP is wildly different from signal price
     if sig.trigger_price > 0:
         ratio = entry_price / sig.trigger_price
@@ -1781,6 +1789,11 @@ _ch1_queued_signal: ParsedSignal | None = None
 _ch1_queued_task: Any = None
 _ch1_queued_channel: str = ""
 _ch1_queued_label: str = ""
+
+# CH1 ABOVE trigger hold — held indefinitely until "Active"/price activation (like CH2)
+_ch1_trigger_held: ParsedSignal | None = None
+_ch1_trigger_held_channel: str = ""
+_ch1_trigger_held_label: str = ""
 
 _RE_REENTRY = re.compile(
     r'(?:'
@@ -5901,6 +5914,7 @@ async def start_listener() -> None:
         else:
             # --- CH1/CH1B: Gemini-first classification (fallback to Anthropic+regex) ---
             global _ch1_queued_signal, _ch1_queued_task, _ch1_queued_channel, _ch1_queued_label
+            global _ch1_trigger_held, _ch1_trigger_held_channel, _ch1_trigger_held_label
             classification = await asyncio.to_thread(classify_ch1_message, text, channel)
 
             if classification is not None:
@@ -5924,7 +5938,24 @@ async def start_listener() -> None:
                                  ch_label, sig.symbol, sig.strike, sig.option_type,
                                  sig.trigger_price, sig.stop_loss, is_above)
 
-                        # Queue with 5s delay for cancel/wait protection
+                        if is_above:
+                            # ABOVE signal — hold indefinitely until "Active" or price crosses trigger
+                            _ch1_trigger_held = sig
+                            _ch1_trigger_held_channel = channel
+                            _ch1_trigger_held_label = ch_label
+                            if _ch1_queued_task:
+                                _ch1_queued_task.cancel()
+                            _ch1_queued_signal = None
+                            _ch1_queued_task = None
+                            log.info("[%s] ABOVE signal — held until Active: %s %s %s trigger=%.0f",
+                                     ch_label, sig.symbol, int(sig.strike), sig.option_type, sig.trigger_price)
+                            _notify(f"[{ch_label}] Signal held (ABOVE trigger):\n"
+                                    f"{sig.symbol} {int(sig.strike)} {sig.option_type} ABOVE {sig.trigger_price}\n"
+                                    f"SL: {sig.stop_loss} | TGT: {sig.targets[0] if sig.targets else 0}\n"
+                                    f"Waiting for Active...")
+                            return
+
+                        # NEAR/immediate signal — queue with 5s delay for cancel/wait protection
                         if _ch1_queued_task:
                             _ch1_queued_task.cancel()
                         _ch1_queued_signal = sig
@@ -5968,6 +5999,7 @@ async def start_listener() -> None:
 
                 elif msg_type == "CANCEL":
                     log.info("[%s] Gemini CANCEL: %s", ch_label, classification.get("reason"))
+                    cancelled = False
                     if _ch1_queued_signal and _ch1_queued_task:
                         cancelled_sym = f"{_ch1_queued_signal.symbol} {int(_ch1_queued_signal.strike)} {_ch1_queued_signal.option_type}"
                         _ch1_queued_task.cancel()
@@ -5976,8 +6008,18 @@ async def start_listener() -> None:
                         log.info("[%s] Cancelled queued signal: %s", ch_label, cancelled_sym)
                         _notify(f"[{ch_label}] Signal cancelled: {cancelled_sym}\n"
                                 f"Reason: {classification.get('reason', 'channel instruction')}")
-                    else:
-                        log.info("[%s] CANCEL but no queued signal to cancel", ch_label)
+                        cancelled = True
+                    if _ch1_trigger_held:
+                        held_sym = f"{_ch1_trigger_held.symbol} {int(_ch1_trigger_held.strike)} {_ch1_trigger_held.option_type}"
+                        _ch1_trigger_held = None
+                        _ch1_trigger_held_channel = ""
+                        _ch1_trigger_held_label = ""
+                        log.info("[%s] Cancelled held ABOVE signal: %s", ch_label, held_sym)
+                        _notify(f"[{ch_label}] Held ABOVE signal cancelled: {held_sym}\n"
+                                f"Reason: {classification.get('reason', 'channel instruction')}")
+                        cancelled = True
+                    if not cancelled:
+                        log.info("[%s] CANCEL but no queued/held signal to cancel", ch_label)
                     return
 
                 elif msg_type == "WAIT":
@@ -6060,7 +6102,24 @@ async def start_listener() -> None:
                         f"SL: {sig.stop_loss} | TGT: {sig.targets[0] if sig.targets else 0}")
                 return
 
-            # --- Non-CH2: execute immediately (fallback path) ---
+            # --- Non-CH2: check ABOVE hold before executing ---
+            is_above_fallback = bool(re.search(r'\bABOVE\b', text, re.I))
+            if is_above_fallback and channel != "ch2":
+                _ch1_trigger_held = sig
+                _ch1_trigger_held_channel = channel
+                _ch1_trigger_held_label = ch_label
+                if _ch1_queued_task:
+                    _ch1_queued_task.cancel()
+                _ch1_queued_signal = None
+                _ch1_queued_task = None
+                log.info("[%s] ABOVE signal (fallback) — held until Active: %s %s %s trigger=%.0f",
+                         ch_label, sig.symbol, int(sig.strike), sig.option_type, sig.trigger_price)
+                _notify(f"[{ch_label}] Signal held (ABOVE trigger):\n"
+                        f"{sig.symbol} {int(sig.strike)} {sig.option_type} ABOVE {sig.trigger_price}\n"
+                        f"SL: {sig.stop_loss} | TGT: {sig.targets[0] if sig.targets else 0}\n"
+                        f"Waiting for Active...")
+                return
+
             _execute_and_notify(sig, channel, ch_label)
             return
 
@@ -6114,6 +6173,47 @@ async def start_listener() -> None:
                 else:
                     log.info("[CH2] Running price %.1f < trigger %.1f, still waiting", price_now, trig)
                     return
+
+        # --- CH1: ABOVE activation via bare number or "Active" keyword ---
+        if channel in ("ch1", "ch1b") and _ch1_trigger_held:
+            upper_stripped = text.strip().upper()
+            activated = False
+            # "Active" / "Activated" keyword
+            if re.search(r'\bACTIV(?:E|ATED)\b', upper_stripped):
+                activated = True
+            # Bare number >= trigger price
+            bare_num = re.match(r'^\s*(\d+(?:\.\d+)?)\s*$', text.strip())
+            if bare_num:
+                price_now = float(bare_num.group(1))
+                if _ch1_trigger_held.trigger_price > 0 and price_now >= _ch1_trigger_held.trigger_price:
+                    activated = True
+                else:
+                    log.info("[%s] Running price %.1f < trigger %.1f, still waiting",
+                             ch_label, price_now, _ch1_trigger_held.trigger_price)
+                    return
+            # "BOOK OR TRAIL" with a price >= trigger also activates
+            if not activated and re.search(r'BOOK\s*(?:OR|&)\s*TRAIL', upper_stripped):
+                book_price_m = re.search(r'(\d+(?:\.\d+)?)', text)
+                if book_price_m:
+                    bp = float(book_price_m.group(1))
+                    if _ch1_trigger_held.trigger_price > 0 and bp >= _ch1_trigger_held.trigger_price:
+                        log.info("[%s] BOOK OR TRAIL at %.1f >= trigger %.1f — activating + booking",
+                                 ch_label, bp, _ch1_trigger_held.trigger_price)
+                        _ch1_trigger_held = None
+                        _handle_followup("book", bp, channel, ch_label)
+                        return
+
+            if activated:
+                act_sig = _ch1_trigger_held
+                _ch1_trigger_held = None
+                _ch1_trigger_held_channel = ""
+                _ch1_trigger_held_label = ""
+                log.info("[%s] ABOVE activated — executing %s %s %s",
+                         ch_label, act_sig.symbol, int(act_sig.strike), act_sig.option_type)
+                _notify(f"[{ch_label}] ABOVE activated:\n"
+                        f"{act_sig.symbol} {int(act_sig.strike)} {act_sig.option_type}")
+                _execute_and_notify(act_sig, channel, ch_label)
+                return
 
         log.info("[%s] Not an entry signal or follow-up, skipping.", ch_label)
 
