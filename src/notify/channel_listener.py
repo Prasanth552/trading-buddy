@@ -4421,7 +4421,7 @@ async def start_listener() -> None:
                     ch = trade["channel"] or "ch1"
                     loss_cap = _loss_cap_for_channel(ch)
                     # For CH2: dynamic cap = qty * (entry - SL) * 1.1 so cap never fires before real SL
-                    if ch == "ch2" and trade.get("stop_price") and trade.get("price") and trade.get("qty"):
+                    if ch == "ch2" and trade["stop_price"] and trade["price"] and trade["qty"]:
                         sl_dist = abs(trade["price"] - trade["stop_price"])
                         dynamic_cap = trade["qty"] * sl_dist * 1.1
                         loss_cap = max(loss_cap, dynamic_cap)
