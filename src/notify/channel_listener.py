@@ -97,6 +97,7 @@ def _ch3_set_enabled(val: bool):
 
 CH3_ENABLED: bool = _ch3_is_enabled()
 CH2_MAX_LOSS = 10000  # ₹10,000 hard cap for CH2 trades (fallback; dynamic cap from SL preferred)
+CH2_FLOOR_LEVELS = [3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000]  # ₹3K trigger, ₹1K step
 MAX_DAILY_LOSS = 25000  # ₹25,000 global daily loss limit (for ch1/ch2 only)
 MAX_DAILY_LOSS_PER_STRATEGY = {
     "ch1": 25000,
@@ -1947,7 +1948,7 @@ def _loss_cap_for_channel(ch: str) -> float:
 
 
 def _floor_for_channel(ch: str) -> float:
-    if ch in ("ch1", "ch1b", "ch2", "ch3"):
+    if ch in ("ch1", "ch1b", "ch3"):
         return 0
     if ch == "ch2f":
         return CH2F_PROFIT_FLOOR
@@ -1971,6 +1972,8 @@ def _floor_levels_for_channel(ch: str) -> list[float] | None:
         return AFT_FLOOR_LEVELS
     if ch in ("bsq", "bsq_ce", "bsq_pe"):
         return BSQ_FLOOR_LEVELS
+    if ch == "ch2":
+        return CH2_FLOOR_LEVELS
     return None
 
 
