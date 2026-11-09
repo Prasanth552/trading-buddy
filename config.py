@@ -339,7 +339,7 @@ UPSTOX_INTERVALS: dict[str, tuple] = {
 # token (UPSTOX_SANDBOX_TOKEN) — no daily login on the execution side.
 # Sandbox host is api-sandbox.upstox.com (verified). For LIVE, switch to
 # https://api-hft.upstox.com/v3/order/place (or api.upstox.com/v2/order/place).
-UPSTOX_ORDER_URL: str = "https://api-sandbox.upstox.com/v3/order/place"
+UPSTOX_ORDER_URL: str = "https://api.upstox.com/v2/order/place"
 UPSTOX_INSTRUMENTS_URL: str = (
     "https://assets.upstox.com/market-quote/instruments/exchange/complete.json.gz"
 )
