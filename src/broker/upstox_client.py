@@ -91,16 +91,9 @@ class UpstoxClient:
     _shared_instruments_date: str | None = None
 
     def __init__(self, sandbox_token: str | None = None) -> None:
-        # Prefer the fresh daily OAuth token (refreshed by the data login) over
-        # the separate sandbox token, which expires unpredictably (UDAPI100050
-        # "Invalid token" on Jul 15). Fall back to UPSTOX_SANDBOX_TOKEN.
         self.token = sandbox_token
         if not self.token:
-            try:
-                from src.broker.upstox_data import load_cached_token
-                self.token = load_cached_token()
-            except Exception:  # noqa: BLE001
-                self.token = None
+            self.token = self._load_today_token()
         if not self.token:
             self.token = os.getenv("UPSTOX_SANDBOX_TOKEN")
         if not self.token and not getattr(config, "UPSTOX_SIMULATE_ORDERS", False):
@@ -113,6 +106,22 @@ class UpstoxClient:
             self._instruments = UpstoxClient._shared_instruments
         else:
             self._instruments: list[dict[str, Any]] | None = None
+
+    @staticmethod
+    def _load_today_token() -> str | None:
+        """Read today's OAuth token from the session file directly."""
+        import json as _json
+        session_path = os.path.join(
+            os.path.dirname(__file__), "..", "..", "data", ".upstox_session.json"
+        )
+        try:
+            with open(session_path) as f:
+                data = _json.load(f)
+            if data.get("date") != datetime.now().strftime("%Y-%m-%d"):
+                return None
+            return data.get("access_token") or None
+        except Exception:  # noqa: BLE001
+            return None
 
     def _headers(self) -> dict[str, str]:
         return {
