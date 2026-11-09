@@ -6123,8 +6123,7 @@ async def start_listener() -> None:
             channels_str += f", ch1b={ch1b_id}"
         if ch2_id:
             channels_str += f", ch2={ch2_id}"
-        if ch3_id:
-            channels_str += f", ch3={ch3_id}"
+        # CH3 runs in its own service (ch3_listener.py)
         log.info("Listening for signals: %s ...", channels_str)
         print(f"Listening for signals: {channels_str} ... (Ctrl-C to stop)")
         await client.run_until_disconnected()
