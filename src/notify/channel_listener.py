@@ -4490,7 +4490,7 @@ async def start_listener() -> None:
                                     stepped_floor = fl
                         else:
                             step = _floor_for_channel(ch)
-                            stepped_floor = int(peak // step) * step if peak >= step else 0
+                            stepped_floor = int(peak // step) * step if step > 0 and peak >= step else 0
                         if stepped_floor > 0 and net_pnl <= stepped_floor:
                             log.info("FLOOR EXIT for %s: peak=₹%.0f floor=₹%d current=₹%.0f",
                                      trade["symbol"], peak, stepped_floor, net_pnl)
