@@ -1543,24 +1543,22 @@ def _close_trade_by_id(trade_id: int, exit_price: float, reason: str) -> None:
             ch = row["channel"] or ""
             if ch in LIVE_CHANNELS and row["broker_key"]:
                 try:
-                    from src.broker.upstox_client import UpstoxClient, load_cached_token
-                    token = load_cached_token()
-                    if token:
-                        _uc = UpstoxClient(access_token=token)
-                        old_sim = getattr(config, "UPSTOX_SIMULATE_ORDERS", False)
-                        config.UPSTOX_SIMULATE_ORDERS = False
-                        try:
-                            _uc.place_order(
-                                instrument_token=row["broker_key"],
-                                quantity=row["qty"],
-                                transaction_type="SELL",
-                                order_type="MARKET",
-                                price=0,
-                                trigger_price=0,
-                            )
-                            log.info("[LIVE-EXIT] Sell order placed for trade %d (%s)", trade_id, row["symbol"])
-                        finally:
-                            config.UPSTOX_SIMULATE_ORDERS = old_sim
+                    from src.broker.upstox_client import UpstoxClient
+                    _uc = UpstoxClient()
+                    old_sim = getattr(config, "UPSTOX_SIMULATE_ORDERS", False)
+                    config.UPSTOX_SIMULATE_ORDERS = False
+                    try:
+                        _uc.place_order(
+                            instrument_token=row["broker_key"],
+                            quantity=row["qty"],
+                            transaction_type="SELL",
+                            order_type="MARKET",
+                            price=0,
+                            trigger_price=0,
+                        )
+                        log.info("[LIVE-EXIT] Sell order placed for trade %d (%s)", trade_id, row["symbol"])
+                    finally:
+                        config.UPSTOX_SIMULATE_ORDERS = old_sim
                 except Exception as sell_exc:
                     log.error("[LIVE-EXIT] Failed to place sell order for trade %d: %s", trade_id, sell_exc)
 
