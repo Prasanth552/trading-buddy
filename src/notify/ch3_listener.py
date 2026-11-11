@@ -763,6 +763,27 @@ async def start_listener() -> None:
 
         log.info("[CH3] Not an entry signal or follow-up, skipping.")
 
+    # Connection health check — ping Telegram every 60s, reconnect if dead
+    async def _health_check():
+        while True:
+            await asyncio.sleep(60)
+            try:
+                if not client.is_connected():
+                    log.warning("[CH3] Connection lost — reconnecting...")
+                    await client.connect()
+                    log.info("[CH3] Reconnected after health check")
+                else:
+                    await client.get_me()
+            except Exception as exc:
+                log.warning("[CH3] Health check failed (%s) — reconnecting...", exc)
+                try:
+                    await client.connect()
+                    log.info("[CH3] Reconnected after health check failure")
+                except Exception as exc2:
+                    log.error("[CH3] Reconnect failed: %s — will retry in 60s", exc2)
+
+    asyncio.get_event_loop().create_task(_health_check())
+
     log.info("Listening for CH3 signals: ch3=%s ...", ch3_int)
     print(f"Listening for CH3 signals: ch3={ch3_int} ... (Ctrl-C to stop)")
     await client.run_until_disconnected()
