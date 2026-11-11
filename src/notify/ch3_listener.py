@@ -312,18 +312,13 @@ def execute_signal(sig: ParsedSignal, *, filter_score: int | None = None) -> dic
 
     entry_price = round(entry_price * (1 + SLIPPAGE_PCT), 2)
 
-    # Reject if LTP is too far above the entry range (e.g. entered late)
+    # Only enter within the signal's entry range (+ small slippage buffer)
     if sig.entry_high > 0:
-        max_entry = sig.entry_high * 1.15
+        max_entry = sig.entry_high + 10  # ₹10 buffer for slippage
         if entry_price > max_entry:
-            log.warning("ENTRY REJECTED: LTP %.2f > %.2f (entry_high %.2f + 15%%)", entry_price, max_entry, sig.entry_high)
-            _notify(f"⚠️ *ENTRY REJECTED*\nLTP ₹{entry_price:.2f} too far above entry range {sig.entry_low}-{sig.entry_high}\n{trade_symbol}")
-            return {"placed": False, "reason": f"LTP {entry_price} above max entry {max_entry:.2f}"}
-    elif sig.trigger_price > 0:
-        ratio = entry_price / sig.trigger_price
-        if ratio > 1.20 or ratio < 0.25:
-            log.warning("ENTRY REJECTED: LTP %.2f is %.1fx signal %.2f", entry_price, ratio, sig.trigger_price)
-            return {"placed": False, "reason": f"LTP {entry_price} too far from signal {sig.trigger_price}"}
+            log.warning("ENTRY REJECTED: LTP %.2f > %.2f (entry range %d-%d)", entry_price, max_entry, sig.entry_low, sig.entry_high)
+            _notify(f"⚠️ *ENTRY REJECTED — price already past entry range*\nLTP ₹{entry_price:.2f} > range {sig.entry_low}-{sig.entry_high}\n{trade_symbol}")
+            return {"placed": False, "reason": f"LTP {entry_price} past entry range {sig.entry_low}-{sig.entry_high}"}
 
     # SL cap
     sl_from_entry = entry_price - (MAX_LOSS_PER_TRADE / qty) if qty > 0 else sig.stop_loss
