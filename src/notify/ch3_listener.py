@@ -320,9 +320,13 @@ def execute_signal(sig: ParsedSignal, *, filter_score: int | None = None) -> dic
 
     entry_price = round(entry_price * (1 + SLIPPAGE_PCT), 2)
 
-    # Only enter within the signal's entry range (+ small slippage buffer)
+    # Only enter within the signal's entry range
+    if sig.entry_low > 0 and entry_price < sig.entry_low:
+        log.warning("ENTRY REJECTED: LTP %.2f < entry_low %d (trigger not yet hit)", entry_price, sig.entry_low)
+        _notify(f"⚠️ *ENTRY REJECTED — trigger not yet hit*\nLTP ₹{entry_price:.2f} < ABOVE {sig.entry_low}\n{trade_symbol}")
+        return {"placed": False, "reason": f"LTP {entry_price} below trigger {sig.entry_low}"}
     if sig.entry_high > 0:
-        max_entry = sig.entry_high + 10  # ₹10 buffer for slippage
+        max_entry = sig.entry_high + 10
         if entry_price > max_entry:
             log.warning("ENTRY REJECTED: LTP %.2f > %.2f (entry range %d-%d)", entry_price, max_entry, sig.entry_low, sig.entry_high)
             _notify(f"⚠️ *ENTRY REJECTED — price already past entry range*\nLTP ₹{entry_price:.2f} > range {sig.entry_low}-{sig.entry_high}\n{trade_symbol}")
