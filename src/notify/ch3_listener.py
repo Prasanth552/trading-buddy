@@ -665,6 +665,15 @@ async def start_listener() -> None:
         log.error("Telegram connection failed: %s", err)
         return
 
+    # Pre-load instrument master so first trade doesn't wait 14s
+    try:
+        from src.broker.upstox_client import UpstoxClient
+        uc = UpstoxClient()
+        uc.load_instruments()
+        log.info("[CH3] Instrument master pre-loaded")
+    except Exception as exc:
+        log.warning("[CH3] Instrument pre-load failed (will retry on first trade): %s", exc)
+
     # Start position monitor
     asyncio.get_event_loop().create_task(_monitor_positions())
     log.info("[CH3] Position monitor started (check every 1s)")
@@ -690,14 +699,19 @@ async def start_listener() -> None:
                      sig.symbol, sig.strike, sig.option_type,
                      sig.trigger_price, sig.stop_loss, sig.targets)
 
-            # Smart filter
+            # Smart filter (5s timeout — never delay the order for external API slowness)
             filt = None
             filter_score = None
             try:
+                import concurrent.futures
                 from src.signals.smart_filter import evaluate_signal
-                filt = evaluate_signal(sig.symbol, sig.option_type, "ch3", sig.trigger_price)
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    future = pool.submit(evaluate_signal, sig.symbol, sig.option_type, "ch3", sig.trigger_price)
+                    filt = future.result(timeout=5)
                 filter_score = filt.score
                 log.info("[CH3] FILTER: score=%d action=%s reasons=%s", filt.score, filt.action, filt.reasons)
+            except concurrent.futures.TimeoutError:
+                log.warning("[CH3] Smart filter timed out (5s) — proceeding without filter")
             except Exception as exc:
                 log.warning("[CH3] Smart filter failed: %s", exc)
 
