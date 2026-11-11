@@ -302,29 +302,47 @@ def execute_signal(sig: ParsedSignal, *, filter_score: int | None = None) -> dic
 
     instrument_token = opt.get("instrument_key") or opt.get("instrument_token", "")
 
-    # Fetch live LTP
-    entry_price = sig.trigger_price
-    try:
-        from src.broker.upstox_data import UpstoxData
-        ud = UpstoxData()
-        ltp_data = ud._get("/v2/market-quote/ltp",
-                           params={"instrument_key": instrument_token}).get("data", {})
-        for item in ltp_data.values():
-            lp = item.get("last_price")
-            if lp and lp > 0:
-                entry_price = float(lp)
-                log.info("Live LTP for %s: %.2f (signal: %.2f)", instrument_token, entry_price, sig.trigger_price)
+    # Fetch live LTP and wait for trigger if needed
+    import time as _time
+    from src.broker.upstox_data import UpstoxData
+
+    def _fetch_ltp() -> float:
+        try:
+            ud = UpstoxData()
+            ltp_data = ud._get("/v2/market-quote/ltp",
+                               params={"instrument_key": instrument_token}).get("data", {})
+            for item in ltp_data.values():
+                lp = item.get("last_price")
+                if lp and lp > 0:
+                    return float(lp)
+        except Exception as exc:
+            log.warning("LTP fetch failed: %s", exc)
+        return 0.0
+
+    entry_price = _fetch_ltp() or sig.trigger_price
+    log.info("Live LTP for %s: %.2f (signal: %.2f)", instrument_token, entry_price, sig.trigger_price)
+
+    # Wait for trigger: if LTP < entry_low, poll every 2s for up to 15 min
+    if sig.entry_low > 0 and entry_price < sig.entry_low:
+        log.info("[CH3] WAITING for trigger: LTP %.2f < ABOVE %d — polling every 2s (max 15 min)", entry_price, sig.entry_low)
+        _notify(f"⏳ *Waiting for trigger*\nLTP ₹{entry_price:.2f} < ABOVE {sig.entry_low}\n{trade_symbol}")
+        deadline = _time.time() + 900  # 15 minutes
+        while _time.time() < deadline:
+            _time.sleep(2)
+            entry_price = _fetch_ltp()
+            if entry_price <= 0:
+                continue
+            if entry_price >= sig.entry_low:
+                log.info("[CH3] TRIGGER HIT: LTP %.2f >= %d — entering now", entry_price, sig.entry_low)
                 break
-    except Exception as exc:
-        log.warning("LTP fetch failed, using signal price: %s", exc)
+        else:
+            log.warning("[CH3] Trigger wait expired (15 min): LTP %.2f < %d", entry_price, sig.entry_low)
+            _notify(f"⚠️ *Signal expired* — trigger {sig.entry_low} not hit in 15 min\n{trade_symbol}")
+            return {"placed": False, "reason": f"Trigger {sig.entry_low} not hit in 15 min (LTP {entry_price})"}
 
     entry_price = round(entry_price * (1 + SLIPPAGE_PCT), 2)
 
-    # Only enter within the signal's entry range
-    if sig.entry_low > 0 and entry_price < sig.entry_low:
-        log.warning("ENTRY REJECTED: LTP %.2f < entry_low %d (trigger not yet hit)", entry_price, sig.entry_low)
-        _notify(f"⚠️ *ENTRY REJECTED — trigger not yet hit*\nLTP ₹{entry_price:.2f} < ABOVE {sig.entry_low}\n{trade_symbol}")
-        return {"placed": False, "reason": f"LTP {entry_price} below trigger {sig.entry_low}"}
+    # Reject if price already past entry range
     if sig.entry_high > 0:
         max_entry = sig.entry_high + 10
         if entry_price > max_entry:
@@ -736,8 +754,9 @@ async def start_listener() -> None:
             elif filt and filt.action == "REDUCE":
                 filter_tag = " (filter: REDUCE)"
 
-            # Execute FIRST, notify after — don't waste time on notifications before order
-            result = execute_signal(sig, filter_score=filter_score)
+            # Execute in executor so trigger-wait polling doesn't block the event loop
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, lambda: execute_signal(sig, filter_score=filter_score))
 
             _notify(
                 f"*[CH3] Signal received — {'executed' if result['placed'] else 'skipped'}{filter_tag}*\n"
