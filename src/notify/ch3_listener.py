@@ -197,11 +197,18 @@ def _classify_followup(text: str) -> tuple[str, float | None]:
 # ---------------------------------------------------------------------------
 # Option resolution (reuse from main client)
 # ---------------------------------------------------------------------------
+_option_cache: dict[str, tuple] = {}  # (symbol, strike, ot) -> (opt, lot_size)
+
 def _resolve_channel_option(uc, symbol: str, strike: float, option_type: str):
     """Search the Upstox instrument master for a specific option contract."""
     from datetime import date, datetime
     from zoneinfo import ZoneInfo
     from src.broker.upstox_client import _expiry_to_date
+
+    cache_key = f"{symbol}|{strike}|{option_type}"
+    if cache_key in _option_cache:
+        log.info("Option cache hit: %s", cache_key)
+        return _option_cache[cache_key]
 
     IST = ZoneInfo(config.TIMEZONE)
     today = datetime.now(IST).date()
@@ -230,6 +237,7 @@ def _resolve_channel_option(uc, symbol: str, strike: float, option_type: str):
     candidates.sort(key=lambda x: x[0])
     chosen = candidates[0][1]
     lot_size = int(chosen.get("lot_size", 1)) or 1
+    _option_cache[cache_key] = (chosen, lot_size)
     return chosen, lot_size
 
 
@@ -699,19 +707,20 @@ async def start_listener() -> None:
                      sig.symbol, sig.strike, sig.option_type,
                      sig.trigger_price, sig.stop_loss, sig.targets)
 
-            # Smart filter (5s timeout — never delay the order for external API slowness)
+            # Smart filter (3s timeout — never delay the order for external API slowness)
             filt = None
             filter_score = None
             try:
-                import concurrent.futures
                 from src.signals.smart_filter import evaluate_signal
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                    future = pool.submit(evaluate_signal, sig.symbol, sig.option_type, "ch3", sig.trigger_price)
-                    filt = future.result(timeout=5)
+                loop = asyncio.get_event_loop()
+                filt = await asyncio.wait_for(
+                    loop.run_in_executor(None, evaluate_signal, sig.symbol, sig.option_type, "ch3", sig.trigger_price),
+                    timeout=3,
+                )
                 filter_score = filt.score
                 log.info("[CH3] FILTER: score=%d action=%s reasons=%s", filt.score, filt.action, filt.reasons)
-            except concurrent.futures.TimeoutError:
-                log.warning("[CH3] Smart filter timed out (5s) — proceeding without filter")
+            except asyncio.TimeoutError:
+                log.warning("[CH3] Smart filter timed out (3s) — proceeding without filter")
             except Exception as exc:
                 log.warning("[CH3] Smart filter failed: %s", exc)
 
@@ -723,15 +732,16 @@ async def start_listener() -> None:
             elif filt and filt.action == "REDUCE":
                 filter_tag = " (filter: REDUCE)"
 
+            # Execute FIRST, notify after — don't waste time on notifications before order
+            result = execute_signal(sig, filter_score=filter_score)
+
             _notify(
-                f"*[CH3] Signal received — executing{filter_tag}*\n"
+                f"*[CH3] Signal received — {'executed' if result['placed'] else 'skipped'}{filter_tag}*\n"
                 f"{sig.action} {sig.symbol} {int(sig.strike)} {sig.option_type}\n"
                 f"Entry ABOVE {sig.trigger_price} | SL: {sig.stop_loss} | "
                 f"Targets: {', '.join(str(t) for t in sig.targets)}\n"
                 f"{filter_line}\n{reason_lines}"
             )
-
-            result = execute_signal(sig, filter_score=filter_score)
             if result["placed"]:
                 _notify(
                     f"*[CH3] Order placed*\n"
