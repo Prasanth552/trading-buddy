@@ -37,6 +37,8 @@ class ParsedSignal:
     trigger_price: float
     stop_loss: float
     targets: list[float]
+    entry_low: float = 0.0
+    entry_high: float = 0.0
 
 
 def calc_charges(entry_price: float, exit_price: float, qty: int) -> dict[str, float]:
@@ -159,6 +161,8 @@ def parse_signal_ch3(text: str) -> ParsedSignal | None:
         trigger_price=round(trigger, 2),
         stop_loss=sl,
         targets=targets,
+        entry_low=float(entry_low),
+        entry_high=float(entry_high),
     )
 
 
@@ -166,16 +170,22 @@ def parse_signal_ch3(text: str) -> ParsedSignal | None:
 # Follow-up classifier
 # ---------------------------------------------------------------------------
 _RE_CLOSE_NEAR_COST = re.compile(r'(?:CLOSE|CUT|EXIT)\s+(?:NEAR|AT)\s+COST|COST\s+TO\s+COST', re.I)
-_RE_BOOK_OR_TRAIL = re.compile(r'BOOK\s+(?:OR\s+TRAIL|PROFIT|PARTIAL)', re.I)
+_RE_FULL_EXIT = re.compile(r'(?:CLOSE|CUT|EXIT)\s+(?:ALL|FULL|POSITION|NOW|IMMEDIATELY)', re.I)
 _RE_BARE_SL = re.compile(r'^\s*SL\s*$', re.I)
-_RE_BARE_CUT = re.compile(r'^\s*(?:CUT|EXIT|CLOSE|BOOK)\s*$', re.I)
+_RE_BARE_CUT = re.compile(r'^\s*(?:CUT|EXIT|CLOSE)\s*$', re.I)
+# "Book partial" / "book or trail" / "target achieved" are NOT exit signals —
+# we trade 1 lot so partial booking is impossible; trailing SL handles the rest.
+_RE_PARTIAL_IGNORE = re.compile(r'BOOK\s+PARTIAL|TRAIL\s+(?:THE\s+)?REMAIN|TARGET\s+ACHIEVED', re.I)
 
 
 def _classify_followup(text: str) -> tuple[str, float | None]:
     text = text.strip()
+    # Explicitly ignore partial-book / target-achieved messages
+    if _RE_PARTIAL_IGNORE.search(text):
+        return "unknown", None
     if _RE_CLOSE_NEAR_COST.search(text):
         return "book", None
-    if _RE_BOOK_OR_TRAIL.search(text):
+    if _RE_FULL_EXIT.search(text):
         return "book", None
     if _RE_BARE_SL.search(text):
         return "book", None
@@ -302,10 +312,16 @@ def execute_signal(sig: ParsedSignal, *, filter_score: int | None = None) -> dic
 
     entry_price = round(entry_price * (1 + SLIPPAGE_PCT), 2)
 
-    # Sanity check
-    if sig.trigger_price > 0:
+    # Reject if LTP is too far above the entry range (e.g. entered late)
+    if sig.entry_high > 0:
+        max_entry = sig.entry_high * 1.15
+        if entry_price > max_entry:
+            log.warning("ENTRY REJECTED: LTP %.2f > %.2f (entry_high %.2f + 15%%)", entry_price, max_entry, sig.entry_high)
+            _notify(f"⚠️ *ENTRY REJECTED*\nLTP ₹{entry_price:.2f} too far above entry range {sig.entry_low}-{sig.entry_high}\n{trade_symbol}")
+            return {"placed": False, "reason": f"LTP {entry_price} above max entry {max_entry:.2f}"}
+    elif sig.trigger_price > 0:
         ratio = entry_price / sig.trigger_price
-        if ratio > 3.0 or ratio < 0.25:
+        if ratio > 1.20 or ratio < 0.25:
             log.warning("ENTRY REJECTED: LTP %.2f is %.1fx signal %.2f", entry_price, ratio, sig.trigger_price)
             return {"placed": False, "reason": f"LTP {entry_price} too far from signal {sig.trigger_price}"}
 
