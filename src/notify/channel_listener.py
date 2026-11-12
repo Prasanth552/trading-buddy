@@ -97,7 +97,7 @@ def _ch3_set_enabled(val: bool):
 
 CH3_ENABLED: bool = _ch3_is_enabled()
 CH2_MAX_LOSS = 2000  # ₹2,000 hard cap for CH2 trades
-CH2_FLOOR_LEVELS = [1500, 2500, 3500, 4500, 5500, 6500, 7500, 8500]  # ₹1.5K trigger, ₹1K step
+CH2_FLOOR_LEVELS = [1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000]  # ₹1.5K trigger, ₹500 step
 MAX_DAILY_LOSS = 25000  # ₹25,000 global daily loss limit (for ch1/ch2 only)
 MAX_DAILY_LOSS_PER_STRATEGY = {
     "ch1": 25000,
