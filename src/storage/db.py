@@ -66,6 +66,22 @@ CREATE TABLE IF NOT EXISTS daily_state (
     kill_switch_tripped INTEGER DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS skipped_signals (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts          TEXT NOT NULL,
+    symbol      TEXT NOT NULL,
+    side        TEXT NOT NULL,
+    trigger_price REAL,
+    stop_loss   REAL,
+    targets     TEXT,
+    entry_price REAL,
+    qty         INTEGER,
+    premium_cost REAL,
+    available_capital REAL,
+    reason      TEXT,
+    channel     TEXT
+);
+
 CREATE TABLE IF NOT EXISTS app_log (
     id      INTEGER PRIMARY KEY AUTOINCREMENT,
     ts      TEXT NOT NULL,

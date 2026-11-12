@@ -35,6 +35,7 @@ WATCH_ONLY: list[str] = []   # all analysed symbols are now traded
 # Sandbox capital raised to gather trade data (dummy money). For a REAL ₹50k
 # account, drop these back to 50_000 / 500 / 3 / 1_500 before going live.
 CAPITAL: int = 200_000            # Rs sandbox capital (dummy)
+CH1_CAPITAL: int = 100_000        # Rs paper-trade capital for CH1 (1-lot live simulation)
 MAX_RISK_PER_TRADE: int = 10_000  # Rs sandbox — sized for NIFTY lot 65
 # Effectively uncapped for the sandbox hedge-recovery week: the compensation
 # chain must not be cut off mid-rescue (Jul-9: the 10-trade cap blocked the

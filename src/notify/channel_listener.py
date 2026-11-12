@@ -1464,6 +1464,37 @@ def execute_signal(sig: ParsedSignal, *, channel: str = "ch1", max_lots: int | N
                     f"({ratio:.1f}x) — wrong instrument?")
             return {"placed": False, "reason": f"LTP {entry_price} too far from signal {sig.trigger_price}"}
 
+    # Capital check: ensure we have enough to cover this trade's premium
+    if channel in ("ch1", "ch1b"):
+        premium_cost = qty * entry_price
+        # Sum premium locked in open CH1 trades
+        with db.get_conn() as conn:
+            open_locked = conn.execute(
+                "SELECT COALESCE(SUM(price * qty), 0) as locked "
+                "FROM trades WHERE status = 'OPEN' AND channel IN ('ch1', 'ch1b')"
+            ).fetchone()["locked"]
+        available = config.CH1_CAPITAL - open_locked
+        if premium_cost > available:
+            from src.utils.market_calendar import now_ist
+            skip_ts = now_ist().isoformat(timespec="seconds")
+            skip_sym = f"{sig.symbol} {int(sig.strike)} {sig.option_type}"
+            log.warning("CAPITAL SKIP [%s]: premium ₹%.0f > available ₹%.0f (locked ₹%.0f). %s",
+                        channel, premium_cost, available, open_locked, skip_sym)
+            _notify(f"💰 *Capital insufficient* — {skip_sym}\n"
+                    f"Premium: ₹{premium_cost:,.0f} | Available: ₹{available:,.0f}\n"
+                    f"Locked in open: ₹{open_locked:,.0f} / ₹{config.CH1_CAPITAL:,}\n"
+                    f"Signal saved for analysis.")
+            with db.get_conn() as conn:
+                conn.execute(
+                    "INSERT INTO skipped_signals (ts, symbol, side, trigger_price, stop_loss, "
+                    "targets, entry_price, qty, premium_cost, available_capital, reason, channel) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (skip_ts, skip_sym, sig.action, sig.trigger_price, sig.stop_loss,
+                     ",".join(str(t) for t in sig.targets), entry_price, qty,
+                     premium_cost, available, "capital_insufficient", channel),
+                )
+            return {"placed": False, "reason": f"Capital: need ₹{premium_cost:,.0f}, have ₹{available:,.0f}"}
+
     # For CH2 free-channel defaults, recalculate SL/TGT from actual entry price
     # (channel gives trigger price but entry may differ, especially for ABOVE signals)
     sig_sl = sig.stop_loss
