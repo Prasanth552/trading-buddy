@@ -820,6 +820,8 @@ async def start_listener() -> None:
         log.info("[CH3] Not an entry signal or follow-up, skipping.")
 
     # Connection health check — detect dead update streams and force reconnect
+    # IMPORTANT: never call client.disconnect() — it ends run_until_disconnected()
+    # and kills the process. Use client._reconnect() or _sender.reconnect() instead.
     async def _health_check():
         import time as _t
         while True:
@@ -829,25 +831,25 @@ async def start_listener() -> None:
             try:
                 if not client.is_connected():
                     log.warning("[CH3] Health: connection lost — reconnecting...")
-                    await client.disconnect()
                     await client.connect()
                     log.info("[CH3] Health: reconnected (was disconnected)")
                 elif silence > 180:
-                    # No messages for 3+ min during market hours — update stream likely dead
                     from src.utils.market_calendar import now_ist
                     ist_now = now_ist()
                     if 9 <= ist_now.hour < 16:
                         log.warning("[CH3] Health: no messages for %.0fs — forcing reconnect", silence)
-                        await client.disconnect()
+                        # Drop TCP + re-establish without ending the event loop
+                        if client._sender and client._sender._transport:
+                            client._sender._transport.close()
+                        await asyncio.sleep(2)
                         await client.connect()
                         _last_msg_time[0] = now
                         log.info("[CH3] Health: forced reconnect done (stale stream)")
                 else:
                     await client.get_me()
             except Exception as exc:
-                log.warning("[CH3] Health check failed (%s) — forcing reconnect...", exc)
+                log.warning("[CH3] Health check failed (%s) — reconnecting...", exc)
                 try:
-                    await client.disconnect()
                     await client.connect()
                     _last_msg_time[0] = _t.time()
                     log.info("[CH3] Health: reconnected after failure")
