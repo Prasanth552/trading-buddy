@@ -35,7 +35,7 @@ WATCH_ONLY: list[str] = []   # all analysed symbols are now traded
 # Sandbox capital raised to gather trade data (dummy money). For a REAL ₹50k
 # account, drop these back to 50_000 / 500 / 3 / 1_500 before going live.
 CAPITAL: int = 200_000            # Rs sandbox capital (dummy)
-MAX_RISK_PER_TRADE: int = 10_000  # Rs sandbox — sized for NIFTY lot 65
+MAX_RISK_PER_TRADE: int = 10_000  # Rs sandbox — sized for NIFTY lot 75
 # Effectively uncapped for the sandbox hedge-recovery week: the compensation
 # chain must not be cut off mid-rescue (Jul-9: the 10-trade cap blocked the
 # compensating trades and turned a ~10k day into -45k).
@@ -53,7 +53,7 @@ MIN_DAYS_TO_EXPIRY: int = 1
 
 # Lot sizes (Jan 2026 SEBI/NSE revision) — VERIFY against broker before live use.
 LOT_SIZES: dict[str, int] = {
-    "NIFTY": 65, "SENSEX": 20, "BANKNIFTY": 30,
+    "NIFTY": 75, "SENSEX": 20, "BANKNIFTY": 30,
     "RELIANCE": 250, "HDFCBANK": 550, "ICICIBANK": 700,
     "INFY": 400, "TCS": 175, "SBIN": 750, "AXISBANK": 625,
     "KOTAKBANK": 400, "ITC": 1600, "LT": 150, "BHARTIARTL": 475,
