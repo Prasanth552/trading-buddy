@@ -17,7 +17,7 @@ trades = [
 
 total = 0
 for t in trades:
-    url = f"https://api.upstox.com/v2/historical-candle/{t['key']}/1minute/2026-11-12/2026-11-12"
+    url = f"https://api.upstox.com/v2/historical-candle/intraday/{t['key']}/1minute"
     resp = requests.get(url, headers=headers, timeout=15)
     data = resp.json()
     candles = data.get("data", {}).get("candles", [])
