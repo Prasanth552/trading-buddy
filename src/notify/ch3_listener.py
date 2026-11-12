@@ -728,8 +728,11 @@ async def start_listener() -> None:
     asyncio.get_event_loop().create_task(_monitor_positions())
     log.info("[CH3] Position monitor started (check every 1s)")
 
+    _last_msg_time = [__import__("time").time()]  # mutable container for closure
+
     @client.on(events.NewMessage(chats=[ch3_int] if _telegram_connected else []))
     async def handler(event):
+        _last_msg_time[0] = __import__("time").time()
         text = event.message.text or ""
         if not text.strip():
             return
@@ -816,24 +819,40 @@ async def start_listener() -> None:
 
         log.info("[CH3] Not an entry signal or follow-up, skipping.")
 
-    # Connection health check — ping Telegram every 60s, reconnect if dead
+    # Connection health check — detect dead update streams and force reconnect
     async def _health_check():
+        import time as _t
         while True:
-            await asyncio.sleep(60)
+            await asyncio.sleep(30)
+            now = _t.time()
+            silence = now - _last_msg_time[0]
             try:
                 if not client.is_connected():
-                    log.warning("[CH3] Connection lost — reconnecting...")
+                    log.warning("[CH3] Health: connection lost — reconnecting...")
+                    await client.disconnect()
                     await client.connect()
-                    log.info("[CH3] Reconnected after health check")
+                    log.info("[CH3] Health: reconnected (was disconnected)")
+                elif silence > 180:
+                    # No messages for 3+ min during market hours — update stream likely dead
+                    from src.utils.market_calendar import now_ist
+                    ist_now = now_ist()
+                    if 9 <= ist_now.hour < 16:
+                        log.warning("[CH3] Health: no messages for %.0fs — forcing reconnect", silence)
+                        await client.disconnect()
+                        await client.connect()
+                        _last_msg_time[0] = now
+                        log.info("[CH3] Health: forced reconnect done (stale stream)")
                 else:
                     await client.get_me()
             except Exception as exc:
-                log.warning("[CH3] Health check failed (%s) — reconnecting...", exc)
+                log.warning("[CH3] Health check failed (%s) — forcing reconnect...", exc)
                 try:
+                    await client.disconnect()
                     await client.connect()
-                    log.info("[CH3] Reconnected after health check failure")
+                    _last_msg_time[0] = _t.time()
+                    log.info("[CH3] Health: reconnected after failure")
                 except Exception as exc2:
-                    log.error("[CH3] Reconnect failed: %s — will retry in 60s", exc2)
+                    log.error("[CH3] Health: reconnect failed: %s — will retry in 30s", exc2)
 
     asyncio.get_event_loop().create_task(_health_check())
 
