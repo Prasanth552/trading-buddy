@@ -1807,6 +1807,11 @@ _ch1_queued_label: str = ""
 # Each entry: { "sym_key": { "sig": ParsedSignal, "channel": str, "label": str, "broker_key": str } }
 _ch1_held_above: dict = {}
 
+# CH1 split-message buffer — holds incomplete "BUY X" headers for combining with details
+_ch1_msg_buffer: str = ""
+_ch1_msg_buffer_ts: float = 0.0
+_CH1_BUFFER_WINDOW = 5.0  # seconds to wait for completion message
+
 _RE_REENTRY = re.compile(
     r'(?:'
     r'(?:ABOVE|NEAR)\.?\s+(?:LAST\s+SWING\s+HIGH|HIGH|SAME\s+(?:RANGE|LEVEL)|THIS\s+LEVEL|(\d+))\s*'
@@ -5973,8 +5978,22 @@ async def start_listener() -> None:
         else:
             # --- CH1/CH1B: Gemini-first classification (fallback to Anthropic+regex) ---
             global _ch1_queued_signal, _ch1_queued_task, _ch1_queued_channel, _ch1_queued_label
-            global _ch1_held_above
-            classification = await asyncio.to_thread(classify_ch1_message, text, channel)
+            global _ch1_held_above, _ch1_msg_buffer, _ch1_msg_buffer_ts
+
+            # Combine with buffered header if within window
+            combined_text = text
+            if _ch1_msg_buffer and (_time.time() - _ch1_msg_buffer_ts) < _CH1_BUFFER_WINDOW:
+                combined_text = _ch1_msg_buffer + "\n" + text
+                log.info("[%s] Combined buffered header with new message: %s", ch_label, combined_text[:120])
+                _ch1_msg_buffer = ""
+                _ch1_msg_buffer_ts = 0.0
+            elif _ch1_msg_buffer:
+                log.info("[%s] Buffer expired (%.1fs), discarding: %s",
+                         ch_label, _time.time() - _ch1_msg_buffer_ts, _ch1_msg_buffer[:60])
+                _ch1_msg_buffer = ""
+                _ch1_msg_buffer_ts = 0.0
+
+            classification = await asyncio.to_thread(classify_ch1_message, combined_text, channel)
 
             if classification is not None:
                 msg_type = classification.get("type", "IGNORE")
@@ -6101,7 +6120,7 @@ async def start_listener() -> None:
 
             # --- Gemini didn't classify or returned unexpected type: fallback to Anthropic + regex ---
             log.info("[%s] Falling back to Anthropic+regex parser", ch_label)
-            sig = parse_signal(text)
+            sig = parse_signal(combined_text)
 
         if sig is not None:
             log.info("[%s] Parsed signal: %s %s %s %s trigger=%.2f SL=%.2f targets=%s",
@@ -6172,7 +6191,7 @@ async def start_listener() -> None:
                 return
 
             # --- Non-CH2: check ABOVE hold before executing ---
-            is_above_fallback = bool(re.search(r'\bABOVE\b', text, re.I))
+            is_above_fallback = bool(re.search(r'\bABOVE\b', combined_text, re.I))
             if is_above_fallback and channel != "ch2":
                 sym_key = f"{sig.symbol} {int(sig.strike)} {sig.option_type}"
                 broker_key = ""
@@ -6297,6 +6316,13 @@ async def start_listener() -> None:
                                      ch_label, bp, trig, sym_key)
                             _handle_followup("book", bp, channel, ch_label)
                             return
+
+        # --- CH1 split-message buffer: if this looks like a "BUY X" header, buffer it ---
+        if channel in ("ch1", "ch1b") and re.match(r'^\s*(?:BUY|SELL)\s+[A-Z]{2,}(?:\s+[A-Z]+)?\s*$', text.strip(), re.I):
+            _ch1_msg_buffer = text.strip()
+            _ch1_msg_buffer_ts = _time.time()
+            log.info("[%s] Buffered incomplete signal header: %s", ch_label, _ch1_msg_buffer)
+            return
 
         log.info("[%s] Not an entry signal or follow-up, skipping.", ch_label)
 
