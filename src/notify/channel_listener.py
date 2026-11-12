@@ -96,8 +96,8 @@ def _ch3_set_enabled(val: bool):
         f.write("1" if val else "0")
 
 CH3_ENABLED: bool = _ch3_is_enabled()
-CH2_MAX_LOSS = 10000  # ₹10,000 hard cap for CH2 trades (fallback; dynamic cap from SL preferred)
-CH2_FLOOR_LEVELS = [3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000]  # ₹3K trigger, ₹1K step
+CH2_MAX_LOSS = 2000  # ₹2,000 hard cap for CH2 trades
+CH2_FLOOR_LEVELS = [1500, 2500, 3500, 4500, 5500, 6500, 7500, 8500]  # ₹1.5K trigger, ₹1K step
 MAX_DAILY_LOSS = 25000  # ₹25,000 global daily loss limit (for ch1/ch2 only)
 MAX_DAILY_LOSS_PER_STRATEGY = {
     "ch1": 25000,
@@ -1408,9 +1408,9 @@ def execute_signal(sig: ParsedSignal, *, channel: str = "ch1", max_lots: int | N
     elif channel == "ch3":
         lots = 1
     elif channel in ("ch2", "ch2f"):
-        lots = 3 if is_index else 2
+        lots = 1
     elif channel in ("ch1", "ch1b"):
-        lots = 2
+        lots = 1
     else:
         lots = 1
     if max_lots is not None and channel not in scanner_channels:
