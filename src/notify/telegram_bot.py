@@ -113,11 +113,20 @@ class TelegramNotifier:
 
     def send_message(self, text: str, markdown: bool = True) -> None:
         """Send text to every configured chat, chunking if needed."""
+        failed: list[str] = []
         for cid in self.chat_ids:
-            for chunk in chunk_message(text):
-                self._send_chunk(cid, chunk, markdown)
-        log.info("Sent Telegram message (%d chars) to %d chat(s).",
-                 len(text), len(self.chat_ids))
+            try:
+                for chunk in chunk_message(text):
+                    self._send_chunk(cid, chunk, markdown)
+            except TelegramError:
+                log.warning("Telegram send failed for chat_id=%s — skipping.", cid)
+                failed.append(cid)
+        sent = len(self.chat_ids) - len(failed)
+        if sent:
+            log.info("Sent Telegram message (%d chars) to %d/%d chat(s).",
+                     len(text), sent, len(self.chat_ids))
+        if len(failed) == len(self.chat_ids):
+            raise TelegramError(f"All chat IDs failed: {failed}")
 
     def send_signal_alert(self, signal: dict[str, Any]) -> None:
         self.send_message(format_signal_alert(signal))
