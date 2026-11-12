@@ -1408,7 +1408,7 @@ def execute_signal(sig: ParsedSignal, *, channel: str = "ch1", max_lots: int | N
     elif channel == "ch3":
         lots = 1
     elif channel in ("ch2", "ch2f"):
-        lots = 1
+        lots = 2
     elif channel in ("ch1", "ch1b"):
         lots = 1
     else:
