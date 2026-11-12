@@ -1803,11 +1803,9 @@ _ch1_queued_task: Any = None
 _ch1_queued_channel: str = ""
 _ch1_queued_label: str = ""
 
-# CH1 ABOVE trigger hold — held indefinitely until price crosses trigger or channel activates
-_ch1_trigger_held: ParsedSignal | None = None
-_ch1_trigger_held_channel: str = ""
-_ch1_trigger_held_label: str = ""
-_ch1_trigger_held_broker_key: str = ""  # resolved instrument key for live price monitoring
+# CH1 ABOVE trigger hold — multiple signals held until price crosses trigger or channel activates
+# Each entry: { "sym_key": { "sig": ParsedSignal, "channel": str, "label": str, "broker_key": str } }
+_ch1_held_above: dict = {}
 
 _RE_REENTRY = re.compile(
     r'(?:'
@@ -4358,43 +4356,49 @@ async def start_listener() -> None:
     async def _monitor_positions():
         """Periodically check open positions and auto-close on target/SL/floor."""
         nonlocal _monitor_fail_count, _ch1_above_check_counter
-        global _ch1_trigger_held, _ch1_trigger_held_channel, _ch1_trigger_held_label, _ch1_trigger_held_broker_key
+        global _ch1_held_above
         from src.storage import db
         while True:
             await asyncio.sleep(1)
             try:
-                # --- CH1 ABOVE price monitor: check if held signal's price crossed trigger ---
+                # --- CH1 ABOVE price monitor: check ALL held signals for trigger cross ---
                 _ch1_above_check_counter += 1
-                if _ch1_trigger_held and _ch1_trigger_held_broker_key and _ch1_above_check_counter % 3 == 0:
+                if _ch1_held_above and _ch1_above_check_counter % 3 == 0:
                     try:
                         from src.broker.upstox_data import UpstoxData, load_cached_token
                         _above_token = load_cached_token()
                         if _above_token:
-                            _above_ud = UpstoxData(access_token=_above_token)
-                            _above_ltp_data = _above_ud._get(
-                                "/v2/market-quote/ltp",
-                                params={"instrument_key": _ch1_trigger_held_broker_key}
-                            ).get("data", {})
-                            for _above_item in _above_ltp_data.values():
-                                _above_ltp = _above_item.get("last_price")
-                                if _above_ltp and _above_ltp > 0:
-                                    trig = _ch1_trigger_held.trigger_price
-                                    if trig > 0 and _above_ltp >= trig:
-                                        act_sig = _ch1_trigger_held
-                                        act_ch = _ch1_trigger_held_channel
-                                        act_lbl = _ch1_trigger_held_label
-                                        _ch1_trigger_held = None
-                                        _ch1_trigger_held_broker_key = ""
-                                        _ch1_trigger_held_channel = ""
-                                        _ch1_trigger_held_label = ""
-                                        log.info("[%s] ABOVE auto-activated: LTP %.2f >= trigger %.2f — executing %s %s %s",
-                                                 act_lbl, _above_ltp, trig, act_sig.symbol,
-                                                 int(act_sig.strike), act_sig.option_type)
-                                        _notify(f"[{act_lbl}] ABOVE auto-activated:\n"
-                                                f"LTP {_above_ltp:.1f} crossed trigger {trig:.0f}\n"
-                                                f"{act_sig.symbol} {int(act_sig.strike)} {act_sig.option_type}")
-                                        _execute_and_notify(act_sig, act_ch, act_lbl)
-                                    break
+                            # Batch all broker keys into one LTP call
+                            broker_keys = [h["broker_key"] for h in _ch1_held_above.values() if h.get("broker_key")]
+                            if broker_keys:
+                                _above_ud = UpstoxData(access_token=_above_token)
+                                _above_ltp_data = _above_ud._get(
+                                    "/v2/market-quote/ltp",
+                                    params={"instrument_key": ",".join(broker_keys)}
+                                ).get("data", {})
+                                activated_keys = []
+                                for sym_key, hold in list(_ch1_held_above.items()):
+                                    bk = hold.get("broker_key", "")
+                                    if not bk:
+                                        continue
+                                    for _above_item in _above_ltp_data.values():
+                                        item_key = _above_item.get("instrument_token") or ""
+                                        if bk not in item_key and item_key not in bk:
+                                            continue
+                                        _above_ltp = _above_item.get("last_price")
+                                        if _above_ltp and _above_ltp > 0:
+                                            trig = hold["sig"].trigger_price
+                                            if trig > 0 and _above_ltp >= trig:
+                                                activated_keys.append(sym_key)
+                                                log.info("[%s] ABOVE auto-activated: LTP %.2f >= trigger %.2f — executing %s",
+                                                         hold["label"], _above_ltp, trig, sym_key)
+                                                _notify(f"[{hold['label']}] ABOVE auto-activated:\n"
+                                                        f"LTP {_above_ltp:.1f} crossed trigger {trig:.0f}\n"
+                                                        f"{sym_key}")
+                                                _execute_and_notify(hold["sig"], hold["channel"], hold["label"])
+                                            break
+                                for k in activated_keys:
+                                    _ch1_held_above.pop(k, None)
                     except Exception as exc:
                         if _ch1_above_check_counter % 60 == 0:
                             log.warning("CH1 ABOVE price monitor error: %s", exc)
@@ -5969,7 +5973,7 @@ async def start_listener() -> None:
         else:
             # --- CH1/CH1B: Gemini-first classification (fallback to Anthropic+regex) ---
             global _ch1_queued_signal, _ch1_queued_task, _ch1_queued_channel, _ch1_queued_label
-            global _ch1_trigger_held, _ch1_trigger_held_channel, _ch1_trigger_held_label, _ch1_trigger_held_broker_key
+            global _ch1_held_above
             classification = await asyncio.to_thread(classify_ch1_message, text, channel)
 
             if classification is not None:
@@ -5994,12 +5998,8 @@ async def start_listener() -> None:
                                  sig.trigger_price, sig.stop_loss, is_above)
 
                         if is_above:
-                            # ABOVE signal — hold until live price crosses trigger or channel activates
-                            _ch1_trigger_held = sig
-                            _ch1_trigger_held_channel = channel
-                            _ch1_trigger_held_label = ch_label
-                            # Pre-resolve instrument key for live price monitoring
-                            _ch1_trigger_held_broker_key = ""
+                            sym_key = f"{sig.symbol} {int(sig.strike)} {sig.option_type}"
+                            broker_key = ""
                             try:
                                 from src.broker.upstox_client import UpstoxClient
                                 uc = UpstoxClient()
@@ -6007,20 +6007,23 @@ async def start_listener() -> None:
                                 opt, _ = _resolve_channel_option(
                                     uc, sig.symbol, sig.strike, sig.option_type, monthly=use_monthly)
                                 if opt:
-                                    _ch1_trigger_held_broker_key = opt.get("instrument_key") or opt.get("instrument_token", "")
-                                    log.info("[%s] ABOVE hold resolved instrument: %s", ch_label, _ch1_trigger_held_broker_key)
+                                    broker_key = opt.get("instrument_key") or opt.get("instrument_token", "")
+                                    log.info("[%s] ABOVE hold resolved instrument: %s", ch_label, broker_key)
                             except Exception as exc:
                                 log.warning("[%s] Could not resolve instrument for ABOVE hold: %s", ch_label, exc)
+                            _ch1_held_above[sym_key] = {
+                                "sig": sig, "channel": channel, "label": ch_label, "broker_key": broker_key
+                            }
                             if _ch1_queued_task:
                                 _ch1_queued_task.cancel()
                             _ch1_queued_signal = None
                             _ch1_queued_task = None
-                            log.info("[%s] ABOVE signal — held (price monitor + channel): %s %s %s trigger=%.0f",
-                                     ch_label, sig.symbol, int(sig.strike), sig.option_type, sig.trigger_price)
+                            log.info("[%s] ABOVE signal — held (price monitor + channel): %s trigger=%.0f [total held: %d]",
+                                     ch_label, sym_key, sig.trigger_price, len(_ch1_held_above))
                             _notify(f"[{ch_label}] Signal held (ABOVE trigger):\n"
-                                    f"{sig.symbol} {int(sig.strike)} {sig.option_type} ABOVE {sig.trigger_price}\n"
+                                    f"{sym_key} ABOVE {sig.trigger_price}\n"
                                     f"SL: {sig.stop_loss} | TGT: {sig.targets[0] if sig.targets else 0}\n"
-                                    f"Monitoring live price for auto-entry...")
+                                    f"Monitoring live price for auto-entry... [{len(_ch1_held_above)} held]")
                             return
 
                         # NEAR/immediate signal — queue with 5s delay for cancel/wait protection
@@ -6077,14 +6080,11 @@ async def start_listener() -> None:
                         _notify(f"[{ch_label}] Signal cancelled: {cancelled_sym}\n"
                                 f"Reason: {classification.get('reason', 'channel instruction')}")
                         cancelled = True
-                    if _ch1_trigger_held:
-                        held_sym = f"{_ch1_trigger_held.symbol} {int(_ch1_trigger_held.strike)} {_ch1_trigger_held.option_type}"
-                        _ch1_trigger_held = None
-                        _ch1_trigger_held_channel = ""
-                        _ch1_trigger_held_label = ""
-                        _ch1_trigger_held_broker_key = ""
-                        log.info("[%s] Cancelled held ABOVE signal: %s", ch_label, held_sym)
-                        _notify(f"[{ch_label}] Held ABOVE signal cancelled: {held_sym}\n"
+                    if _ch1_held_above:
+                        held_syms = list(_ch1_held_above.keys())
+                        _ch1_held_above.clear()
+                        log.info("[%s] Cancelled all held ABOVE signals: %s", ch_label, held_syms)
+                        _notify(f"[{ch_label}] All held ABOVE signals cancelled: {', '.join(held_syms)}\n"
                                 f"Reason: {classification.get('reason', 'channel instruction')}")
                         cancelled = True
                     if not cancelled:
@@ -6174,10 +6174,8 @@ async def start_listener() -> None:
             # --- Non-CH2: check ABOVE hold before executing ---
             is_above_fallback = bool(re.search(r'\bABOVE\b', text, re.I))
             if is_above_fallback and channel != "ch2":
-                _ch1_trigger_held = sig
-                _ch1_trigger_held_channel = channel
-                _ch1_trigger_held_label = ch_label
-                _ch1_trigger_held_broker_key = ""
+                sym_key = f"{sig.symbol} {int(sig.strike)} {sig.option_type}"
+                broker_key = ""
                 try:
                     from src.broker.upstox_client import UpstoxClient
                     uc = UpstoxClient()
@@ -6185,19 +6183,22 @@ async def start_listener() -> None:
                     opt, _ = _resolve_channel_option(
                         uc, sig.symbol, sig.strike, sig.option_type, monthly=use_monthly)
                     if opt:
-                        _ch1_trigger_held_broker_key = opt.get("instrument_key") or opt.get("instrument_token", "")
+                        broker_key = opt.get("instrument_key") or opt.get("instrument_token", "")
                 except Exception as exc:
                     log.warning("[%s] Could not resolve instrument for ABOVE hold: %s", ch_label, exc)
+                _ch1_held_above[sym_key] = {
+                    "sig": sig, "channel": channel, "label": ch_label, "broker_key": broker_key
+                }
                 if _ch1_queued_task:
                     _ch1_queued_task.cancel()
                 _ch1_queued_signal = None
                 _ch1_queued_task = None
-                log.info("[%s] ABOVE signal (fallback) — held (price monitor + channel): %s %s %s trigger=%.0f",
-                         ch_label, sig.symbol, int(sig.strike), sig.option_type, sig.trigger_price)
+                log.info("[%s] ABOVE signal (fallback) — held (price monitor + channel): %s trigger=%.0f [total held: %d]",
+                         ch_label, sym_key, sig.trigger_price, len(_ch1_held_above))
                 _notify(f"[{ch_label}] Signal held (ABOVE trigger):\n"
-                        f"{sig.symbol} {int(sig.strike)} {sig.option_type} ABOVE {sig.trigger_price}\n"
+                        f"{sym_key} ABOVE {sig.trigger_price}\n"
                         f"SL: {sig.stop_loss} | TGT: {sig.targets[0] if sig.targets else 0}\n"
-                        f"Monitoring live price for auto-entry...")
+                        f"Monitoring live price for auto-entry... [{len(_ch1_held_above)} held]")
                 return
 
             _execute_and_notify(sig, channel, ch_label)
@@ -6254,48 +6255,48 @@ async def start_listener() -> None:
                     log.info("[CH2] Running price %.1f < trigger %.1f, still waiting", price_now, trig)
                     return
 
-        # --- CH1: ABOVE activation via bare number or "Active" keyword ---
-        if channel in ("ch1", "ch1b") and _ch1_trigger_held:
+        # --- CH1: ABOVE activation via bare number or "Active" keyword (multi-hold) ---
+        if channel in ("ch1", "ch1b") and _ch1_held_above:
             upper_stripped = text.strip().upper()
-            activated = False
-            # "Active" / "Activated" keyword
+            # "Active" / "Activated" keyword — activate ALL held signals
             if re.search(r'\bACTIV(?:E|ATED)\b', upper_stripped):
-                activated = True
-            # Bare number >= trigger price
+                to_activate = list(_ch1_held_above.items())
+                _ch1_held_above.clear()
+                for sym_key, hold in to_activate:
+                    log.info("[%s] ABOVE activated (Active keyword) — executing %s", ch_label, sym_key)
+                    _notify(f"[{ch_label}] ABOVE activated:\n{sym_key}")
+                    _execute_and_notify(hold["sig"], hold["channel"], hold["label"])
+                return
+            # Bare number — activate any held signal whose trigger is met
             bare_num = re.match(r'^\s*(\d+(?:\.\d+)?)\s*$', text.strip())
             if bare_num:
                 price_now = float(bare_num.group(1))
-                if _ch1_trigger_held.trigger_price > 0 and price_now >= _ch1_trigger_held.trigger_price:
-                    activated = True
-                else:
-                    log.info("[%s] Running price %.1f < trigger %.1f, still waiting",
-                             ch_label, price_now, _ch1_trigger_held.trigger_price)
-                    return
-            # "BOOK OR TRAIL" with a price >= trigger also activates
-            if not activated and re.search(r'BOOK\s*(?:OR|&)\s*TRAIL', upper_stripped):
+                activated_any = False
+                for sym_key, hold in list(_ch1_held_above.items()):
+                    trig = hold["sig"].trigger_price
+                    if trig > 0 and price_now >= trig:
+                        _ch1_held_above.pop(sym_key, None)
+                        log.info("[%s] ABOVE activated (bare number %.1f >= trigger %.1f) — executing %s",
+                                 ch_label, price_now, trig, sym_key)
+                        _notify(f"[{ch_label}] ABOVE activated:\n{sym_key}")
+                        _execute_and_notify(hold["sig"], hold["channel"], hold["label"])
+                        activated_any = True
+                if not activated_any:
+                    log.info("[%s] Price %.1f didn't cross any held trigger", ch_label, price_now)
+                return
+            # "BOOK OR TRAIL" with a price >= trigger — activate matching held signal
+            if re.search(r'BOOK\s*(?:OR|&)\s*TRAIL', upper_stripped):
                 book_price_m = re.search(r'(\d+(?:\.\d+)?)', text)
                 if book_price_m:
                     bp = float(book_price_m.group(1))
-                    if _ch1_trigger_held.trigger_price > 0 and bp >= _ch1_trigger_held.trigger_price:
-                        log.info("[%s] BOOK OR TRAIL at %.1f >= trigger %.1f — activating + booking",
-                                 ch_label, bp, _ch1_trigger_held.trigger_price)
-                        _ch1_trigger_held = None
-                        _ch1_trigger_held_broker_key = ""
-                        _handle_followup("book", bp, channel, ch_label)
-                        return
-
-            if activated:
-                act_sig = _ch1_trigger_held
-                _ch1_trigger_held = None
-                _ch1_trigger_held_channel = ""
-                _ch1_trigger_held_label = ""
-                _ch1_trigger_held_broker_key = ""
-                log.info("[%s] ABOVE activated — executing %s %s %s",
-                         ch_label, act_sig.symbol, int(act_sig.strike), act_sig.option_type)
-                _notify(f"[{ch_label}] ABOVE activated:\n"
-                        f"{act_sig.symbol} {int(act_sig.strike)} {act_sig.option_type}")
-                _execute_and_notify(act_sig, channel, ch_label)
-                return
+                    for sym_key, hold in list(_ch1_held_above.items()):
+                        trig = hold["sig"].trigger_price
+                        if trig > 0 and bp >= trig:
+                            _ch1_held_above.pop(sym_key, None)
+                            log.info("[%s] BOOK OR TRAIL at %.1f >= trigger %.1f — activating %s",
+                                     ch_label, bp, trig, sym_key)
+                            _handle_followup("book", bp, channel, ch_label)
+                            return
 
         log.info("[%s] Not an entry signal or follow-up, skipping.", ch_label)
 
