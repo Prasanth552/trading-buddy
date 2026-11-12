@@ -174,7 +174,7 @@ _RE_FULL_EXIT = re.compile(r'(?:CLOSE|CUT|EXIT)\s+(?:ALL|FULL|POSITION|NOW|IMMED
 _RE_BARE_SL = re.compile(r'^\s*SL\s*$', re.I)
 _RE_BARE_CUT = re.compile(r'^\s*(?:CUT|EXIT|CLOSE)\s*$', re.I)
 # "Book partial" / "book or trail" / "target achieved" are NOT exit signals —
-# we trade 1 lot so partial booking is impossible; trailing SL handles the rest.
+# we handle partial booking internally via the position monitor.
 _RE_PARTIAL_IGNORE = re.compile(r'BOOK\s+PARTIAL|TRAIL\s+(?:THE\s+)?REMAIN|TARGET\s+ACHIEVED', re.I)
 
 
@@ -318,7 +318,7 @@ def execute_signal(sig: ParsedSignal, *, filter_score: int | None = None) -> dic
 
     lot_key = sig.symbol.replace(" ", "").upper()
     lot_size = config.LOT_SIZES.get(lot_key, master_lot_size)
-    qty = 1 * lot_size  # CH3 always 1 lot
+    qty = 1 * lot_size  # CH3: 1 lot
 
     instrument_token = opt.get("instrument_key") or opt.get("instrument_token", "")
 
@@ -431,6 +431,8 @@ def execute_signal(sig: ParsedSignal, *, filter_score: int | None = None) -> dic
 # Close trade (with live sell order)
 # ---------------------------------------------------------------------------
 _peak_net: dict[int, float] = {}
+_tgt_levels_hit: dict[int, int] = {}   # trade_id -> number of targets hit so far
+_peak_ltp: dict[int, float] = {}       # trade_id -> peak LTP (for dynamic trailing)
 
 
 def _close_trade_by_id(trade_id: int, exit_price: float, reason: str) -> None:
@@ -494,6 +496,51 @@ def _close_trade_by_id(trade_id: int, exit_price: float, reason: str) -> None:
             )
     except Exception as exc:
         log.error("Failed to close trade %d: %s", trade_id, exc)
+
+
+def _partial_sell(trade_id: int, sell_qty: int, ltp: float, reason: str) -> None:
+    """Sell part of an open position and reduce DB qty accordingly."""
+    try:
+        from src.storage import db
+        db.init_db()
+        with db.get_conn() as conn:
+            row = conn.execute(
+                "SELECT id, qty, symbol, broker_key FROM trades WHERE id = ? AND status = 'OPEN'",
+                (trade_id,),
+            ).fetchone()
+            if not row or row["qty"] <= sell_qty:
+                _close_trade_by_id(trade_id, ltp, reason)
+                return
+
+            if row["broker_key"]:
+                try:
+                    from src.broker.upstox_client import UpstoxClient
+                    _uc = UpstoxClient()
+                    old_sim = getattr(config, "UPSTOX_SIMULATE_ORDERS", False)
+                    config.UPSTOX_SIMULATE_ORDERS = False
+                    try:
+                        _uc.place_order(
+                            instrument_token=row["broker_key"],
+                            quantity=sell_qty,
+                            transaction_type="SELL",
+                            order_type="MARKET",
+                            price=0,
+                            trigger_price=0,
+                        )
+                        log.info("[PARTIAL-SELL] Sold %d of %d for trade %d (%s)",
+                                 sell_qty, row["qty"], trade_id, row["symbol"])
+                    finally:
+                        config.UPSTOX_SIMULATE_ORDERS = old_sim
+                except Exception as sell_exc:
+                    log.error("[PARTIAL-SELL] Failed for trade %d: %s", trade_id, sell_exc)
+                    return
+
+            new_qty = row["qty"] - sell_qty
+            conn.execute("UPDATE trades SET qty = ? WHERE id = ?", (new_qty, trade_id))
+            log.info("[PARTIAL-SELL] Trade %d qty %d → %d (%s)", trade_id, row["qty"], new_qty, reason)
+            _notify(f"📊 *Partial exit: {reason}*\n{row['symbol']}\nSold {sell_qty} @ ~{ltp:.0f} | Remaining: {new_qty}")
+    except Exception as exc:
+        log.error("Failed partial sell trade %d: %s", trade_id, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -617,12 +664,12 @@ async def _monitor_positions():
                     _peak_net.pop(tid, None)
                     _notify(f"🛑 *MAX LOSS CAP* — {trade['symbol']}\nLoss: ₹{abs(net_pnl):,.0f} (cap: ₹{MAX_LOSS_PER_TRADE:,})")
 
-                # Target trailing
+                # Target trailing — SL = target - 10 (breathing room)
                 elif trade["target_price"] and ltp >= trade["target_price"]:
                     remaining = trade["targets_remaining"] or ""
                     if remaining:
                         next_tgts = [float(t) for t in remaining.split(",") if t.strip()]
-                        new_sl = trade["target_price"]
+                        new_sl = trade["target_price"] - 10
                         if next_tgts:
                             new_tgt = next_tgts.pop(0)
                             new_remaining = ",".join(str(t) for t in next_tgts) if next_tgts else None
@@ -630,9 +677,9 @@ async def _monitor_positions():
                                 conn.execute(
                                     "UPDATE trades SET stop_price=?, target_price=?, targets_remaining=? WHERE id=?",
                                     (new_sl, new_tgt, new_remaining, tid))
-                            log.info("[CH3] TGT TRAIL %s: SL→%.0f TGT→%.0f remaining=%s",
+                            log.info("[CH3] TGT TRAIL %s: SL→%.0f (tgt-10) TGT→%.0f remaining=%s",
                                      trade["symbol"], new_sl, new_tgt, new_remaining)
-                            _notify(f"🎯 *TGT hit* — {trade['symbol']}\nSL trailed → {new_sl} | Next TGT → {new_tgt}")
+                            _notify(f"🎯 *TGT hit* — {trade['symbol']}\nSL → {new_sl:.0f} (tgt-10) | Next TGT → {new_tgt:.0f}")
                         else:
                             log.info("[CH3] ALL TGT hit for %s: LTP=%.2f", trade["symbol"], ltp)
                             _close_trade_by_id(tid, ltp, "all_tgt_hit")
@@ -649,8 +696,6 @@ async def _monitor_positions():
                              trade["symbol"], ltp, trade["stop_price"], net_pnl)
                     _close_trade_by_id(tid, ltp, "sl_hit")
                     _peak_net.pop(tid, None)
-
-                # No profit floor for CH3 — targets handle exit
 
         except Exception as exc:
             fail_count += 1
