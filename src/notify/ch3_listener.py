@@ -198,44 +198,64 @@ def _classify_followup(text: str) -> tuple[str, float | None]:
 # Option resolution (reuse from main client)
 # ---------------------------------------------------------------------------
 _option_cache: dict[str, tuple] = {}  # (symbol, strike, ot) -> (opt, lot_size)
+_instrument_index: dict[str, list[tuple]] = {}  # "SYM|STRIKE|CE" -> [(expiry_date, inst)]
+_instrument_index_date: str | None = None
 
-def _resolve_channel_option(uc, symbol: str, strike: float, option_type: str):
-    """Search the Upstox instrument master for a specific option contract."""
-    from datetime import date, datetime
+def _build_instrument_index(instruments: list) -> None:
+    """Build a dict index keyed by (symbol, strike, option_type) for O(1) lookup."""
+    global _instrument_index, _instrument_index_date
+    from datetime import datetime
     from zoneinfo import ZoneInfo
     from src.broker.upstox_client import _expiry_to_date
 
+    IST = ZoneInfo(config.TIMEZONE)
+    today = datetime.now(IST).date()
+    today_str = today.isoformat()
+
+    if _instrument_index_date == today_str and _instrument_index:
+        return
+
+    idx: dict[str, list[tuple]] = {}
+    for inst in instruments:
+        seg = inst.get("segment", "")
+        if seg not in ("NSE_FO", "BSE_FO"):
+            continue
+        sym = (inst.get("asset_symbol") or "").upper()
+        ot = inst.get("instrument_type", "")
+        sp = inst.get("strike_price")
+        if not sym or not ot or sp is None:
+            continue
+        exp = _expiry_to_date(inst.get("expiry"))
+        if exp is None or exp < today:
+            continue
+        key = f"{sym}|{float(sp)}|{ot}"
+        idx.setdefault(key, []).append((exp, inst))
+
+    for v in idx.values():
+        v.sort(key=lambda x: x[0])
+
+    _instrument_index = idx
+    _instrument_index_date = today_str
+    log.info("Instrument index built: %d keys", len(idx))
+
+def _resolve_channel_option(uc, symbol: str, strike: float, option_type: str):
+    """Resolve option contract using the pre-built index (O(1) lookup)."""
     cache_key = f"{symbol}|{strike}|{option_type}"
     if cache_key in _option_cache:
         log.info("Option cache hit: %s", cache_key)
         return _option_cache[cache_key]
 
-    IST = ZoneInfo(config.TIMEZONE)
-    today = datetime.now(IST).date()
-    sym = symbol.replace(" ", "").upper()
     instruments = uc.load_instruments()
+    _build_instrument_index(instruments)
 
-    candidates = []
-    for inst in instruments:
-        seg = inst.get("segment", "")
-        if seg not in ("NSE_FO", "BSE_FO"):
-            continue
-        if inst.get("asset_symbol", "").upper() != sym:
-            continue
-        if inst.get("instrument_type") != option_type:
-            continue
-        if abs(float(inst.get("strike_price", -1)) - strike) > 0.01:
-            continue
-        exp = _expiry_to_date(inst.get("expiry"))
-        if exp is None or exp < today:
-            continue
-        candidates.append((exp, inst))
+    sym = symbol.replace(" ", "").upper()
+    idx_key = f"{sym}|{strike}|{option_type}"
+    candidates = _instrument_index.get(idx_key, [])
 
     if not candidates:
         return None, 1
 
-    candidates.sort(key=lambda x: x[0])
-    chosen = candidates[0][1]
+    chosen = candidates[0][1]  # nearest expiry (already sorted)
     lot_size = int(chosen.get("lot_size", 1)) or 1
     _option_cache[cache_key] = (chosen, lot_size)
     return chosen, lot_size
@@ -342,13 +362,12 @@ def execute_signal(sig: ParsedSignal, *, filter_score: int | None = None) -> dic
 
     entry_price = round(entry_price * (1 + SLIPPAGE_PCT), 2)
 
-    # Reject if price already past entry range
-    if sig.entry_high > 0:
-        max_entry = sig.entry_high + 10
-        if entry_price > max_entry:
-            log.warning("ENTRY REJECTED: LTP %.2f > %.2f (entry range %d-%d)", entry_price, max_entry, sig.entry_low, sig.entry_high)
-            _notify(f"⚠️ *ENTRY REJECTED — price already past entry range*\nLTP ₹{entry_price:.2f} > range {sig.entry_low}-{sig.entry_high}\n{trade_symbol}")
-            return {"placed": False, "reason": f"LTP {entry_price} past entry range {sig.entry_low}-{sig.entry_high}"}
+    # Reject if price already past first target (still a valid trade up to T1)
+    max_entry = sig.targets[0] if sig.targets else (sig.entry_high + 30 if sig.entry_high > 0 else 0)
+    if max_entry > 0 and entry_price > max_entry:
+        log.warning("ENTRY REJECTED: LTP %.2f > T1 %.2f (too far past entry)", entry_price, max_entry)
+        _notify(f"⚠️ *ENTRY REJECTED — price past T1*\nLTP ₹{entry_price:.2f} > T1 {max_entry}\n{trade_symbol}")
+        return {"placed": False, "reason": f"LTP {entry_price} past T1 {max_entry}"}
 
     # SL cap
     sl_from_entry = entry_price - (MAX_LOSS_PER_TRADE / qty) if qty > 0 else sig.stop_loss
@@ -699,8 +718,9 @@ async def start_listener() -> None:
     try:
         from src.broker.upstox_client import UpstoxClient
         uc = UpstoxClient()
-        uc.load_instruments()
-        log.info("[CH3] Instrument master pre-loaded")
+        instruments = uc.load_instruments()
+        _build_instrument_index(instruments)
+        log.info("[CH3] Instrument master pre-loaded + indexed")
     except Exception as exc:
         log.warning("[CH3] Instrument pre-load failed (will retry on first trade): %s", exc)
 
