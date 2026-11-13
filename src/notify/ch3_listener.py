@@ -878,14 +878,16 @@ async def start_listener() -> None:
                     log.warning("[CH3] Health: connection lost — reconnecting...")
                     await client.connect()
                     log.info("[CH3] Health: reconnected (was disconnected)")
-                elif silence > 180:
+                elif silence > 300:
                     from src.utils.market_calendar import now_ist
                     ist_now = now_ist()
                     if 9 <= ist_now.hour < 16:
                         log.warning("[CH3] Health: no messages for %.0fs — forcing reconnect", silence)
-                        # Drop TCP + re-establish without ending the event loop
-                        if client._sender and client._sender._transport:
-                            client._sender._transport.close()
+                        try:
+                            if client._sender and getattr(client._sender, '_transport', None):
+                                client._sender._transport.close()
+                        except Exception:
+                            pass
                         await asyncio.sleep(2)
                         await client.connect()
                         _last_msg_time[0] = now
