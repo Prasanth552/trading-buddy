@@ -5699,11 +5699,15 @@ async def start_listener() -> None:
             log.info("[CH3] ENABLED by user command")
             _notify("*[CH3] STARTED* — live trading resumed (1 lot SENSEX).")
 
+    _last_msg_time = [_time.time()]
+
     @client.on(events.NewMessage(chats=listen_channels if _telegram_connected else []))
     async def on_signal(event):
         global _ch2_queued_signal, _ch2_queued_task, _ch2_trigger_held, _ch2_last_executed, _ch2_last_reentry_ts
         global _ch2_trigger_held_msg_id, _ch2_trigger_held_is_fallback, _ch2_trigger_held_is_reentry
         global _ch2_buffer_start_id, _ch2_reentry_origins
+
+        _last_msg_time[0] = _time.time()
 
         text = event.message.text or ""
         if not text.strip():
@@ -6357,7 +6361,44 @@ async def start_listener() -> None:
 
         log.info("[%s] Not an entry signal or follow-up, skipping.", ch_label)
 
+    # Stale-stream health check — detect dead Telethon update streams and reconnect.
+    # NEVER call client.disconnect() — it ends run_until_disconnected() and kills the process.
+    async def _health_check():
+        while True:
+            await asyncio.sleep(20)
+            now = _time.time()
+            silence = now - _last_msg_time[0]
+            try:
+                if not client.is_connected():
+                    log.warning("[HEALTH] Connection lost — reconnecting...")
+                    await client.connect()
+                    log.info("[HEALTH] Reconnected (was disconnected)")
+                elif silence > 120:
+                    ist_now = mc.now_ist()
+                    if 9 <= ist_now.hour < 16:
+                        log.warning("[HEALTH] No messages for %.0fs — forcing reconnect", silence)
+                        try:
+                            if client._sender and getattr(client._sender, '_transport', None):
+                                client._sender._transport.close()
+                        except Exception:
+                            pass
+                        await asyncio.sleep(2)
+                        await client.connect()
+                        _last_msg_time[0] = now
+                        log.info("[HEALTH] Forced reconnect done (stale stream)")
+                else:
+                    await client.get_me()
+            except Exception as exc:
+                log.warning("[HEALTH] Check failed (%s) — reconnecting...", exc)
+                try:
+                    await client.connect()
+                    _last_msg_time[0] = _time.time()
+                    log.info("[HEALTH] Reconnected after failure")
+                except Exception as exc2:
+                    log.error("[HEALTH] Reconnect failed: %s — will retry in 20s", exc2)
+
     if _telegram_connected:
+        asyncio.get_event_loop().create_task(_health_check())
         channels_str = f"ch1={ch1_id}"
         if ch1b_id:
             channels_str += f", ch1b={ch1b_id}"
