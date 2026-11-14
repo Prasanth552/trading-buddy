@@ -4339,7 +4339,9 @@ async def start_listener() -> None:
     ch1_id = os.getenv("SIGNAL_CHANNEL_ID", "")
     ch1b_id = os.getenv("SIGNAL_CHANNEL1B_ID", "")
     ch2_id = os.getenv("SIGNAL_CHANNEL2_ID", "")
+    ch2_vip_id = os.getenv("SIGNAL_CH2_VIP_ID", "")
     ch3_id = os.getenv("SIGNAL_CHANNEL3_ID", "")
+    ch2_vip_phone = os.getenv("TELEGRAM_VIP_PHONE", "")
 
     if not all([api_id, api_hash, phone, ch1_id]):
         log.error("Missing env vars: TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_PHONE, SIGNAL_CHANNEL_ID")
@@ -4348,18 +4350,31 @@ async def start_listener() -> None:
     ch1_int = _normalize_channel_id(ch1_id)
     ch1b_int = _normalize_channel_id(ch1b_id) if ch1b_id else None
     ch2_int = _normalize_channel_id(ch2_id) if ch2_id else None
+    ch2_vip_int = _normalize_channel_id(ch2_vip_id) if ch2_vip_id else None
     ch3_int = _normalize_channel_id(ch3_id) if ch3_id else None
 
     # CH3 runs in its own isolated service (ch3_listener.py) — do NOT listen here
     listen_channels = [c for c in [ch1_int or ch1_id, ch1b_int, ch2_int] if c]
     ch1b_ids = {ch1b_int} if ch1b_int else set()
     ch2_ids = {ch2_int} if ch2_int else set()
+    if ch2_vip_int:
+        ch2_ids.add(ch2_vip_int)
     ch3_ids: set = set()  # CH3 handled by ch3_listener
+
+    # VIP channel lives on a separate Telegram account — needs its own client
+    vip_listen_channels = [ch2_vip_int] if ch2_vip_int else []
 
     session_path = os.path.join(os.path.dirname(__file__), "..", "..", "data", "telegram_user.session")
     client = TelegramClient(session_path, api_id, api_hash)
 
+    # Second client for VIP channel (different Telegram account)
+    vip_client = None
+    if ch2_vip_int and ch2_vip_phone:
+        vip_session = os.path.join(os.path.dirname(__file__), "..", "..", "data", "telegram_vip.session")
+        vip_client = TelegramClient(vip_session, api_id, api_hash)
+
     _telegram_connected = False
+    _vip_connected = False
     try:
         await client.start(phone=phone)
         me = await client.get_me()
@@ -4369,6 +4384,8 @@ async def start_listener() -> None:
             ch_list += " + ch1b"
         if ch2_int:
             ch_list += " + ch2"
+        if ch2_vip_int:
+            ch_list += " + ch2vip"
         _notify(f"Channel listener started as {me.first_name} ({ch_list})")
         _telegram_connected = True
         # Pre-resolve all channel entities so Telethon's event filter works
@@ -4381,6 +4398,22 @@ async def start_listener() -> None:
     except Exception as _tg_err:
         log.warning("Telegram connection failed (%s) — running scanners only (no channel signals)", _tg_err)
         _notify(f"*[SYSTEM] Telegram offline* — {_tg_err}. Scanners (OEH/OEL/ORB/BSQ) will run normally.")
+
+    # Connect VIP client
+    if vip_client:
+        try:
+            await vip_client.start(phone=ch2_vip_phone)
+            vip_me = await vip_client.get_me()
+            log.info("VIP client logged in as %s (id=%s)", vip_me.first_name, vip_me.id)
+            _vip_connected = True
+            for _ch_id in vip_listen_channels:
+                try:
+                    await vip_client.get_entity(_ch_id)
+                    log.info("VIP: Resolved entity for channel %s", _ch_id)
+                except Exception as _ent_err:
+                    log.warning("VIP: Could not resolve entity for channel %s: %s", _ch_id, _ent_err)
+        except Exception as _vip_err:
+            log.warning("VIP Telegram connection failed: %s", _vip_err)
 
     # --- Background position monitor: checks LTP every 5s, auto-closes ---
     global _peak_net
@@ -5701,6 +5734,8 @@ async def start_listener() -> None:
 
     _last_msg_time = [_time.time()]
 
+    _all_listen = listen_channels + vip_listen_channels  # for reference
+
     @client.on(events.NewMessage(chats=listen_channels if _telegram_connected else []))
     async def on_signal(event):
         global _ch2_queued_signal, _ch2_queued_task, _ch2_trigger_held, _ch2_last_executed, _ch2_last_reentry_ts
@@ -6397,6 +6432,12 @@ async def start_listener() -> None:
                 except Exception as exc2:
                     log.error("[HEALTH] Reconnect failed: %s — will retry in 20s", exc2)
 
+    # Register on_signal on VIP client too (same handler, different Telegram account)
+    if vip_client and _vip_connected:
+        @vip_client.on(events.NewMessage(chats=vip_listen_channels))
+        async def on_vip_signal(event):
+            await on_signal(event)
+
     if _telegram_connected:
         asyncio.get_event_loop().create_task(_health_check())
         channels_str = f"ch1={ch1_id}"
@@ -6404,10 +6445,20 @@ async def start_listener() -> None:
             channels_str += f", ch1b={ch1b_id}"
         if ch2_id:
             channels_str += f", ch2={ch2_id}"
+        if ch2_vip_id:
+            channels_str += f", ch2vip={ch2_vip_id}"
         # CH3 runs in its own service (ch3_listener.py)
         log.info("Listening for signals: %s ...", channels_str)
         print(f"Listening for signals: {channels_str} ... (Ctrl-C to stop)")
-        await client.run_until_disconnected()
+
+        # Run both clients concurrently if VIP is connected
+        if vip_client and _vip_connected:
+            await asyncio.gather(
+                client.run_until_disconnected(),
+                vip_client.run_until_disconnected(),
+            )
+        else:
+            await client.run_until_disconnected()
     else:
         log.info("Running in scanner-only mode (no Telegram). Ctrl-C to stop.")
         print("Running in scanner-only mode (no Telegram). Ctrl-C to stop.")
