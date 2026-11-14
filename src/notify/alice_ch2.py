@@ -45,20 +45,20 @@ SESSION_FILE = os.path.expanduser("~/Trading-Buddy/data/alice_ch2_session")
 
 # Lot sizes
 NIFTY_LOT = 65
-NIFTY_LOTS = 3
-STOCK_LOTS = 2
+NIFTY_LOTS = 1
+STOCK_LOTS = 1
 
 # Exit strategy
 SL_PCT = 0.30        # 30% SL from entry
-FLOOR_TRIGGER = 3000  # activate trailing floor after ₹3K profit
-FLOOR_STEP = 1000     # floor ratchets every ₹1K
-MAX_LOSS = 10000      # hard loss cap per trade
+FLOOR_TRIGGER = 1000  # activate trailing floor after ₹1K profit (1 lot)
+FLOOR_STEP = 500      # floor ratchets every ₹500
+MAX_LOSS = 3000       # hard loss cap per trade (1 lot)
 
 # Monitor interval
 MONITOR_INTERVAL = 3  # seconds
 
 # Daily loss limit
-MAX_DAILY_LOSS = 25000
+MAX_DAILY_LOSS = 8000  # daily loss limit (1 lot)
 
 # ── signal parsing ──────────────────────────────────────────────────
 @dataclass
