@@ -50,15 +50,16 @@ STOCK_LOTS = 1
 
 # Exit strategy
 SL_PCT = 0.30        # 30% SL from entry
-FLOOR_TRIGGER = 1000  # activate trailing floor after ₹1K profit (1 lot)
+FLOOR_TRIGGER = 500   # activate trailing floor after ₹500 profit
 FLOOR_STEP = 500      # floor ratchets every ₹500
-MAX_LOSS = 3000       # hard loss cap per trade (1 lot)
+MAX_LOSS = 1000       # hard loss cap per trade
 
 # Monitor interval
 MONITOR_INTERVAL = 3  # seconds
 
 # Daily loss limit
-MAX_DAILY_LOSS = 8000  # daily loss limit (1 lot)
+MAX_DAILY_LOSS = 3000   # daily loss limit
+MAX_DAILY_PROFIT = 2000 # daily profit limit — stop trading after ₹2K profit
 
 # ── signal parsing ──────────────────────────────────────────────────
 @dataclass
@@ -289,11 +290,15 @@ async def _execute_signal(sig: ParsedSignal):
                  sig.symbol, sig.strike, sig.option_type)
         return
 
-    # Daily loss check
+    # Daily loss/profit check
     daily_pnl = _today_pnl()
     if daily_pnl <= -MAX_DAILY_LOSS:
         log.warning("[AB-CH2] Daily loss limit hit: ₹%.0f", daily_pnl)
         _notify(f"⚠️ Daily loss limit hit: ₹{daily_pnl:,.0f}")
+        return
+    if daily_pnl >= MAX_DAILY_PROFIT:
+        log.info("[AB-CH2] Daily profit target hit: ₹%.0f — done for today", daily_pnl)
+        _notify(f"✅ Daily profit target hit: ₹{daily_pnl:,.0f} — stopping")
         return
 
     qty = _get_qty(sig.symbol)
