@@ -881,7 +881,7 @@ async def start_listener() -> None:
                 elif silence > 300:
                     from src.utils.market_calendar import now_ist
                     ist_now = now_ist()
-                    if 9 <= ist_now.hour < 16:
+                    if ist_now.weekday() < 5 and 9 <= ist_now.hour < 16:
                         log.warning("[CH3] Health: no messages for %.0fs — forcing reconnect", silence)
                         try:
                             if client._sender and getattr(client._sender, '_transport', None):
