@@ -5752,7 +5752,8 @@ async def start_listener() -> None:
         if chat_id in ch3_ids:
             channel, ch_label = "ch3", "CH3"
         elif chat_id in ch2_ids:
-            channel, ch_label = "ch2", "CH2"
+            _is_vip = (ch2_vip_int and chat_id == ch2_vip_int)
+            channel, ch_label = "ch2", ("CH2-VIP" if _is_vip else "CH2")
         elif chat_id in ch1b_ids:
             channel, ch_label = "ch1b", "CH1B"
         else:
