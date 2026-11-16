@@ -103,6 +103,12 @@ def _notify(msg: str) -> None:
 # ---------------------------------------------------------------------------
 _KNOWN_STOCK_SYMBOLS: set[str] = set()  # populated from instrument master
 
+# Common channel misspellings → correct Upstox asset_symbol
+_SYMBOL_ALIASES: dict[str, str] = {
+    "LARUSLABS": "LAURUSLABS",
+    "LAURUS": "LAURUSLABS",
+}
+
 
 def _load_stock_symbols(instruments: list) -> None:
     """Build set of known stock option symbols from instrument master."""
@@ -160,6 +166,9 @@ def parse_signal_ch4(text: str) -> ParsedSignal | None:
     # Skip index names — those belong to CH3
     if symbol_raw in ("SENSEX", "NIFTY", "BANKNIFTY", "NIFTYBANK", "FINNIFTY", "MIDCPNIFTY"):
         return None
+
+    # Fix common misspellings
+    symbol_raw = _SYMBOL_ALIASES.get(symbol_raw, symbol_raw)
 
     # Validate against known stock symbols if loaded
     if _KNOWN_STOCK_SYMBOLS and symbol_raw not in _KNOWN_STOCK_SYMBOLS:
