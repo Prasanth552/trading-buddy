@@ -349,11 +349,11 @@ def execute_signal(sig: ParsedSignal, *, filter_score: int | None = None) -> dic
 
     # Wait for trigger: if LTP < entry_low, poll every 2s for up to 15 min
     if sig.entry_low > 0 and entry_price < sig.entry_low:
-        log.info("[CH3] WAITING for trigger: LTP %.2f < ABOVE %d — polling every 2s (max 15 min)", entry_price, sig.entry_low)
+        log.info("[CH3] WAITING for trigger: LTP %.2f < ABOVE %d — polling every 1s (max 15 min)", entry_price, sig.entry_low)
         _notify(f"⏳ *Waiting for trigger*\nLTP ₹{entry_price:.2f} < ABOVE {sig.entry_low}\n{trade_symbol}")
         deadline = _time.time() + 900  # 15 minutes
         while _time.time() < deadline:
-            _time.sleep(2)
+            _time.sleep(1)
             entry_price = _fetch_ltp()
             if entry_price <= 0:
                 continue
