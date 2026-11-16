@@ -148,6 +148,8 @@ def init_db() -> None:
             conn.execute("ALTER TABLE trades ADD COLUMN filter_score INTEGER")
         if "targets_remaining" not in cols:
             conn.execute("ALTER TABLE trades ADD COLUMN targets_remaining TEXT")
+        if "gtt_order_id" not in cols:
+            conn.execute("ALTER TABLE trades ADD COLUMN gtt_order_id TEXT")
         # Trade-journal context (JSON) on the signal: the conditions at decision time.
         sig_cols = {r[1] for r in conn.execute("PRAGMA table_info(signals)")}
         if "context" not in sig_cols:

@@ -419,6 +419,29 @@ def execute_signal(sig: ParsedSignal, *, filter_score: int | None = None) -> dic
 
     trade_id = db.insert_trade(trade_row)
 
+    # Place GTT SL order on Upstox server for instant SL protection
+    gtt_id = None
+    try:
+        old_sim2 = getattr(config, "UPSTOX_SIMULATE_ORDERS", False)
+        config.UPSTOX_SIMULATE_ORDERS = False
+        try:
+            gtt_id = uc.place_gtt_sl(
+                instrument_token=instrument_token,
+                quantity=qty,
+                trigger_price=sig.stop_loss,
+                product=config.UPSTOX_PRODUCT,
+            )
+        finally:
+            config.UPSTOX_SIMULATE_ORDERS = old_sim2
+        if gtt_id:
+            with db.get_conn() as conn:
+                conn.execute("UPDATE trades SET gtt_order_id=? WHERE id=?", (gtt_id, trade_id))
+            log.info("[CH3] GTT SL placed: id=%s trade=%d trigger=%.2f", gtt_id, trade_id, sig.stop_loss)
+        else:
+            log.warning("[CH3] GTT SL placement failed for trade %d — monitor SL only", trade_id)
+    except Exception as gtt_exc:
+        log.warning("[CH3] GTT SL error for trade %d: %s — monitor SL only", trade_id, gtt_exc)
+
     return {
         "placed": True,
         "trade_id": trade_id,
@@ -429,6 +452,7 @@ def execute_signal(sig: ParsedSignal, *, filter_score: int | None = None) -> dic
         "sl": sig.stop_loss,
         "target": sig.targets[0] if sig.targets else 0,
         "broker_key": instrument_token,
+        "gtt_order_id": gtt_id,
     }
 
 
@@ -448,11 +472,26 @@ def _close_trade_by_id(trade_id: int, exit_price: float, reason: str) -> None:
         db.init_db()
         with db.get_conn() as conn:
             row = conn.execute(
-                "SELECT id, price, qty, symbol, channel, broker_key FROM trades WHERE id = ? AND status = 'OPEN'",
+                "SELECT id, price, qty, symbol, channel, broker_key, gtt_order_id FROM trades WHERE id = ? AND status = 'OPEN'",
                 (trade_id,),
             ).fetchone()
             if not row:
                 return
+
+            # Cancel GTT SL order before placing sell
+            gtt_id = row["gtt_order_id"] if "gtt_order_id" in row.keys() else None
+            if gtt_id:
+                try:
+                    from src.broker.upstox_client import UpstoxClient as _Uc
+                    _gc = _Uc()
+                    old_sim_g = getattr(config, "UPSTOX_SIMULATE_ORDERS", False)
+                    config.UPSTOX_SIMULATE_ORDERS = False
+                    try:
+                        _gc.cancel_gtt(gtt_id)
+                    finally:
+                        config.UPSTOX_SIMULATE_ORDERS = old_sim_g
+                except Exception as gtt_exc:
+                    log.warning("[LIVE-EXIT] GTT cancel failed for trade %d: %s", trade_id, gtt_exc)
 
             # Place real sell order
             if row["broker_key"]:
@@ -619,7 +658,7 @@ async def _monitor_positions():
             with db.get_conn() as conn:
                 rows = conn.execute(
                     "SELECT id, symbol, price, qty, stop_price, target_price, "
-                    "broker_key, channel, targets_remaining, peak_price, ts "
+                    "broker_key, channel, targets_remaining, peak_price, ts, gtt_order_id "
                     "FROM trades WHERE status = 'OPEN' AND channel = 'ch3' AND broker_key IS NOT NULL"
                 ).fetchall()
             if not rows:
@@ -682,6 +721,21 @@ async def _monitor_positions():
                                 conn.execute(
                                     "UPDATE trades SET stop_price=?, target_price=?, targets_remaining=? WHERE id=?",
                                     (new_sl, new_tgt, new_remaining, tid))
+                            # Modify GTT SL to new trigger price
+                            _gtt_id = trade.get("gtt_order_id")
+                            if _gtt_id:
+                                try:
+                                    from src.broker.upstox_client import UpstoxClient as _Uc2
+                                    _guc = _Uc2()
+                                    _old_s = getattr(config, "UPSTOX_SIMULATE_ORDERS", False)
+                                    config.UPSTOX_SIMULATE_ORDERS = False
+                                    try:
+                                        _guc.modify_gtt_sl(_gtt_id, new_sl, qty)
+                                    finally:
+                                        config.UPSTOX_SIMULATE_ORDERS = _old_s
+                                    log.info("[CH3] GTT SL modified: %s → %.0f", _gtt_id, new_sl)
+                                except Exception as _ge:
+                                    log.warning("[CH3] GTT SL modify failed: %s", _ge)
                             log.info("[CH3] TGT TRAIL %s: SL→%.0f (tgt-10) TGT→%.0f remaining=%s",
                                      trade["symbol"], new_sl, new_tgt, new_remaining)
                             _notify(f"🎯 *TGT hit* — {trade['symbol']}\nSL → {new_sl:.0f} (tgt-10) | Next TGT → {new_tgt:.0f}")

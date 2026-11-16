@@ -195,3 +195,90 @@ class UpstoxClient:
         order_ids = data.get("data", {}).get("order_ids", [])
         log.info("UPSTOX ORDER ok ids=%s", order_ids)
         return {"order_ids": order_ids, "raw": data}
+
+    # --- GTT orders -----------------------------------------------------------
+    GTT_BASE = "https://api.upstox.com/v3/order/gtt"
+
+    def place_gtt_sl(
+        self,
+        instrument_token: str,
+        quantity: int,
+        trigger_price: float,
+        product: str = "I",
+    ) -> str | None:
+        """Place a GTT SELL stop-loss order. Returns the gtt_order_id or None."""
+        if getattr(config, "UPSTOX_SIMULATE_ORDERS", False):
+            import time as _t
+            gid = f"GTT-SIM-{int(_t.time()*1000)}"
+            log.info("GTT SL simulated: %s trigger=%.2f", instrument_token, trigger_price)
+            return gid
+        body = {
+            "type": "SINGLE",
+            "quantity": quantity,
+            "product": product,
+            "instrument_token": instrument_token,
+            "transaction_type": "SELL",
+            "rules": [{
+                "strategy": "STOPLOSS",
+                "trigger_type": "IMMEDIATE",
+                "trigger_price": trigger_price,
+            }],
+        }
+        try:
+            resp = requests.post(f"{self.GTT_BASE}/place", json=body, headers=self._headers(), timeout=15)
+            data = resp.json()
+            if data.get("status") != "success":
+                log.error("GTT SL place failed: %s", data)
+                return None
+            gtt_id = data.get("data", {}).get("gtt_order_id") or data.get("data", {}).get("order_id")
+            log.info("GTT SL placed: id=%s token=%s trigger=%.2f", gtt_id, instrument_token, trigger_price)
+            return gtt_id
+        except Exception as exc:
+            log.error("GTT SL place error: %s", exc)
+            return None
+
+    def modify_gtt_sl(self, gtt_order_id: str, trigger_price: float, quantity: int) -> bool:
+        """Modify an existing GTT SL order's trigger price."""
+        if getattr(config, "UPSTOX_SIMULATE_ORDERS", False):
+            log.info("GTT SL modify simulated: %s → %.2f", gtt_order_id, trigger_price)
+            return True
+        body = {
+            "gtt_order_id": gtt_order_id,
+            "quantity": quantity,
+            "rules": [{
+                "strategy": "STOPLOSS",
+                "trigger_type": "IMMEDIATE",
+                "trigger_price": trigger_price,
+            }],
+        }
+        try:
+            resp = requests.put(self.GTT_BASE, json=body, headers=self._headers(), timeout=15)
+            data = resp.json()
+            if data.get("status") != "success":
+                log.error("GTT SL modify failed: %s", data)
+                return False
+            log.info("GTT SL modified: %s → trigger=%.2f", gtt_order_id, trigger_price)
+            return True
+        except Exception as exc:
+            log.error("GTT SL modify error: %s", exc)
+            return False
+
+    def cancel_gtt(self, gtt_order_id: str) -> bool:
+        """Cancel an existing GTT order."""
+        if getattr(config, "UPSTOX_SIMULATE_ORDERS", False):
+            log.info("GTT cancel simulated: %s", gtt_order_id)
+            return True
+        try:
+            resp = requests.delete(
+                self.GTT_BASE, params={"gtt_order_id": gtt_order_id},
+                headers=self._headers(), timeout=15,
+            )
+            data = resp.json()
+            if data.get("status") != "success":
+                log.error("GTT cancel failed: %s", data)
+                return False
+            log.info("GTT cancelled: %s", gtt_order_id)
+            return True
+        except Exception as exc:
+            log.error("GTT cancel error: %s", exc)
+            return False
