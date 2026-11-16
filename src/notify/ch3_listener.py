@@ -117,9 +117,14 @@ def parse_signal_ch3(text: str) -> ParsedSignal | None:
 
     if any(kw in upper for kw in (
         "TRIGGERED", "TARGET ACHIEVED", "TARGETS ACHIEVED", "DONE FOR THE DAY",
-        "ADD WATCHLIST", "WATCHLIST", "PREMIUM PERFORMANCE",
+        "PREMIUM PERFORMANCE",
     )):
         return None
+
+    # Strip "Add to Watchlist: ..." header — the signal may follow in the same message
+    clean = re.sub(r'(?im)^.*add\s+to\s+watchlist.*$', '', clean).strip()
+    clean = re.sub(r'\s+', ' ', clean)
+    upper = clean.upper()
 
     sym_m = re.search(r'(SENSEX|NIFTY|BANKNIFTY|BANK\s*NIFTY)\s+(\d+)\s*(CE|PE)', upper)
     if not sym_m:
