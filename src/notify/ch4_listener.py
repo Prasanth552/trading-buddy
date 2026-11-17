@@ -70,7 +70,6 @@ def calc_charges(entry_price: float, exit_price: float, qty: int) -> dict[str, f
 MAX_LOSS_PER_TRADE = 8000
 MAX_DAILY_LOSS_CH4 = 25000
 SLIPPAGE_PCT = 0.005
-TGT_BUFFER = 5  # stock options use TGT-5 (not TGT-10 like index)
 
 _CH4_FLAG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "data", ".ch4_enabled")
 
@@ -696,7 +695,7 @@ async def _monitor_positions():
                     remaining = trade["targets_remaining"] or ""
                     if remaining:
                         next_tgts = [float(t) for t in remaining.split(",") if t.strip()]
-                        new_sl = trade["target_price"] - TGT_BUFFER
+                        new_sl = trade["target_price"]
                         if next_tgts:
                             new_tgt = next_tgts.pop(0)
                             new_remaining = ",".join(str(t) for t in next_tgts) if next_tgts else None
@@ -718,9 +717,9 @@ async def _monitor_positions():
                                     log.info("[CH4] GTT SL modified: %s → %.0f", _gtt_id, new_sl)
                                 except Exception as _ge:
                                     log.warning("[CH4] GTT SL modify failed: %s", _ge)
-                            log.info("[CH4] TGT TRAIL %s: SL→%.0f (tgt-%d) TGT→%.0f remaining=%s",
-                                     trade["symbol"], new_sl, TGT_BUFFER, new_tgt, new_remaining)
-                            _notify(f"🎯 *[CH4] TGT hit* — {trade['symbol']}\nSL → {new_sl:.0f} (tgt-{TGT_BUFFER}) | Next TGT → {new_tgt:.0f}")
+                            log.info("[CH4] TGT TRAIL %s: SL→%.0f TGT→%.0f remaining=%s",
+                                     trade["symbol"], new_sl, new_tgt, new_remaining)
+                            _notify(f"🎯 *[CH4] TGT hit* — {trade['symbol']}\nSL → {new_sl:.0f} | Next TGT → {new_tgt:.0f}")
                         else:
                             log.info("[CH4] ALL TGT hit for %s: LTP=%.2f", trade["symbol"], ltp)
                             _close_trade_by_id(tid, ltp, "all_tgt_hit")
@@ -812,7 +811,7 @@ async def start_listener() -> None:
         log.warning("[CH4] Instrument pre-load failed (will retry on first trade): %s", exc)
 
     asyncio.get_event_loop().create_task(_monitor_positions())
-    log.info("[CH4] Position monitor started (check every 1s, TGT-%d buffer)", TGT_BUFFER)
+    log.info("[CH4] Position monitor started (check every 1s, SL at TGT price)")
 
     # Catch-up: check recent messages we may have missed during restart
     try:

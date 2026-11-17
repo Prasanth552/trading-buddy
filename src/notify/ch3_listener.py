@@ -713,7 +713,7 @@ async def _monitor_positions():
                     remaining = trade["targets_remaining"] or ""
                     if remaining:
                         next_tgts = [float(t) for t in remaining.split(",") if t.strip()]
-                        new_sl = trade["target_price"] - 10
+                        new_sl = trade["target_price"]
                         if next_tgts:
                             new_tgt = next_tgts.pop(0)
                             new_remaining = ",".join(str(t) for t in next_tgts) if next_tgts else None
@@ -736,9 +736,9 @@ async def _monitor_positions():
                                     log.info("[CH3] GTT SL modified: %s → %.0f", _gtt_id, new_sl)
                                 except Exception as _ge:
                                     log.warning("[CH3] GTT SL modify failed: %s", _ge)
-                            log.info("[CH3] TGT TRAIL %s: SL→%.0f (tgt-10) TGT→%.0f remaining=%s",
+                            log.info("[CH3] TGT TRAIL %s: SL→%.0f TGT→%.0f remaining=%s",
                                      trade["symbol"], new_sl, new_tgt, new_remaining)
-                            _notify(f"🎯 *TGT hit* — {trade['symbol']}\nSL → {new_sl:.0f} (tgt-10) | Next TGT → {new_tgt:.0f}")
+                            _notify(f"🎯 *TGT hit* — {trade['symbol']}\nSL → {new_sl:.0f} | Next TGT → {new_tgt:.0f}")
                         else:
                             log.info("[CH3] ALL TGT hit for %s: LTP=%.2f", trade["symbol"], ltp)
                             _close_trade_by_id(tid, ltp, "all_tgt_hit")
