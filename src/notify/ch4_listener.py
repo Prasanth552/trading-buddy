@@ -814,6 +814,32 @@ async def start_listener() -> None:
     asyncio.get_event_loop().create_task(_monitor_positions())
     log.info("[CH4] Position monitor started (check every 1s, TGT-%d buffer)", TGT_BUFFER)
 
+    # Catch-up: check recent messages we may have missed during restart
+    try:
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+        _IST = ZoneInfo(config.TIMEZONE)
+        _cutoff = datetime.now(_IST) - timedelta(seconds=120)
+        _entity = await client.get_entity(ch4_int)
+        async for _msg in client.iter_messages(_entity, limit=5):
+            if not _msg.text or _msg.date.astimezone(_IST) < _cutoff:
+                continue
+            _sig = parse_signal_ch4(_msg.text)
+            if _sig:
+                log.info("[CH4] CATCH-UP signal found (%s ago): %s %s %s",
+                         datetime.now(_IST) - _msg.date.astimezone(_IST), _sig.symbol, _sig.strike, _sig.option_type)
+                loop = asyncio.get_event_loop()
+                _res = await loop.run_in_executor(None, lambda: execute_signal(_sig))
+                if _res["placed"]:
+                    _notify(f"*[CH4] CATCH-UP order placed*\n{_res['symbol']} x{_res['qty']}\nEntry: {_res['entry']}")
+                    log.info("[CH4] Catch-up order placed: %s", _res)
+                else:
+                    log.info("[CH4] Catch-up signal not executed: %s", _res["reason"])
+                break
+        log.info("[CH4] Catch-up check done")
+    except Exception as exc:
+        log.warning("[CH4] Catch-up check failed: %s", exc)
+
     _last_msg_time = [_time.time()]
 
     @client.on(events.NewMessage(chats=[ch4_int] if _telegram_connected else []))
@@ -912,7 +938,7 @@ async def start_listener() -> None:
                     log.warning("[CH4] Health: connection lost — reconnecting...")
                     await client.connect()
                     log.info("[CH4] Health: reconnected (was disconnected)")
-                elif silence > 300:
+                elif silence > 600:
                     from src.utils.market_calendar import now_ist
                     ist_now = now_ist()
                     if ist_now.weekday() < 5 and 9 <= ist_now.hour < 16:
