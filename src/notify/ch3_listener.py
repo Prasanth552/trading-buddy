@@ -941,16 +941,9 @@ async def start_listener() -> None:
                     from src.utils.market_calendar import now_ist
                     ist_now = now_ist()
                     if ist_now.weekday() < 5 and 9 <= ist_now.hour < 16:
-                        log.warning("[CH3] Health: no messages for %.0fs — forcing reconnect", silence)
-                        try:
-                            if client._sender and getattr(client._sender, '_transport', None):
-                                client._sender._transport.close()
-                        except Exception:
-                            pass
-                        await asyncio.sleep(2)
-                        await client.connect()
-                        _last_msg_time[0] = now
-                        log.info("[CH3] Health: forced reconnect done (stale stream)")
+                        log.error("[CH3] Health: no messages for %.0fs — EXITING for systemd restart", silence)
+                        _notify(f"⚠️ [CH3] Stale stream ({silence:.0f}s) — restarting process")
+                        os._exit(1)
                 else:
                     await client.get_me()
             except Exception as exc:
