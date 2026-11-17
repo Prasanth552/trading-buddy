@@ -840,10 +840,20 @@ async def start_listener() -> None:
         log.warning("[CH4] Catch-up check failed: %s", exc)
 
     _last_msg_time = [_time.time()]
+    _last_seen_msg_id = [0]
+    try:
+        _init_entity = await client.get_entity(ch4_int)
+        _init_msgs = await client.get_messages(_init_entity, limit=1)
+        if _init_msgs:
+            _last_seen_msg_id[0] = _init_msgs[0].id
+            log.info("[CH4] Seeded last_seen_msg_id=%d", _last_seen_msg_id[0])
+    except Exception as _e:
+        log.warning("[CH4] Could not seed last_seen_msg_id: %s", _e)
 
     @client.on(events.NewMessage(chats=[ch4_int] if _telegram_connected else []))
     async def handler(event):
         _last_msg_time[0] = _time.time()
+        _last_seen_msg_id[0] = event.message.id
         text = event.message.text or ""
         if not text.strip():
             return
@@ -925,49 +935,42 @@ async def start_listener() -> None:
 
         log.info("[CH4] Not an entry signal or follow-up, skipping.")
 
-    # Health check — catch_up() first, os._exit as last resort
-    _catchup_attempted = [False]
-
+    # Health check — poll channel for new messages every 60s to detect stale stream
     async def _health_check():
         import time as _t
         while True:
-            await asyncio.sleep(30)
-            now = _t.time()
-            silence = now - _last_msg_time[0]
+            await asyncio.sleep(60)
             try:
                 if not client.is_connected():
                     log.warning("[CH4] Health: connection lost — reconnecting...")
                     await client.connect()
                     log.info("[CH4] Health: reconnected (was disconnected)")
-                    _catchup_attempted[0] = False
-                elif silence > 1800:
-                    from src.utils.market_calendar import now_ist
-                    ist_now = now_ist()
-                    if ist_now.weekday() < 5 and 9 <= ist_now.hour < 16:
-                        if not _catchup_attempted[0]:
-                            log.warning("[CH4] Health: no messages for %.0fs — trying catch_up()", silence)
-                            try:
-                                await client.catch_up()
-                                log.info("[CH4] Health: catch_up() completed — waiting for updates")
-                            except Exception as ce:
-                                log.warning("[CH4] Health: catch_up() failed: %s", ce)
-                            _catchup_attempted[0] = True
-                        elif silence > 3600:
-                            log.error("[CH4] Health: still silent after catch_up (%.0fs) — EXITING for systemd restart", silence)
-                            _notify(f"⚠️ [CH4] Stale stream ({silence:.0f}s) — restarting process")
-                            os._exit(1)
+                    continue
+
+                from src.utils.market_calendar import now_ist
+                ist_now = now_ist()
+                if not (ist_now.weekday() < 5 and 9 <= ist_now.hour < 16):
+                    await client.get_me()
+                    continue
+
+                entity = await client.get_entity(ch4_int)
+                msgs = await client.get_messages(entity, limit=1)
+                if msgs and msgs[0].id > _last_seen_msg_id[0]:
+                    if _last_seen_msg_id[0] > 0:
+                        log.warning("[CH4] Health: channel has msg id=%d but handler last saw id=%d — stream is STALE, restarting",
+                                    msgs[0].id, _last_seen_msg_id[0])
+                        _notify(f"⚠️ [CH4] Stale stream detected (missed msg {msgs[0].id}) — restarting")
+                        os._exit(1)
+                    _last_seen_msg_id[0] = msgs[0].id
                 else:
-                    _catchup_attempted[0] = False
                     await client.get_me()
             except Exception as exc:
                 log.warning("[CH4] Health check failed (%s) — reconnecting...", exc)
                 try:
                     await client.connect()
-                    _last_msg_time[0] = _t.time()
-                    _catchup_attempted[0] = False
                     log.info("[CH4] Health: reconnected after failure")
                 except Exception as exc2:
-                    log.error("[CH4] Health: reconnect failed: %s — will retry in 30s", exc2)
+                    log.error("[CH4] Health: reconnect failed: %s — will retry in 60s", exc2)
 
     asyncio.get_event_loop().create_task(_health_check())
 
