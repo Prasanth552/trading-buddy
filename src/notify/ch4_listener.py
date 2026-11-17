@@ -940,7 +940,7 @@ async def start_listener() -> None:
                     await client.connect()
                     log.info("[CH4] Health: reconnected (was disconnected)")
                     _catchup_attempted[0] = False
-                elif silence > 300:
+                elif silence > 1800:
                     from src.utils.market_calendar import now_ist
                     ist_now = now_ist()
                     if ist_now.weekday() < 5 and 9 <= ist_now.hour < 16:
@@ -952,7 +952,7 @@ async def start_listener() -> None:
                             except Exception as ce:
                                 log.warning("[CH4] Health: catch_up() failed: %s", ce)
                             _catchup_attempted[0] = True
-                        elif silence > 600:
+                        elif silence > 3600:
                             log.error("[CH4] Health: still silent after catch_up (%.0fs) — EXITING for systemd restart", silence)
                             _notify(f"⚠️ [CH4] Stale stream ({silence:.0f}s) — restarting process")
                             os._exit(1)
