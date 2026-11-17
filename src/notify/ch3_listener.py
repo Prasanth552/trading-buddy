@@ -949,9 +949,11 @@ async def start_listener() -> None:
 
         log.info("[CH3] Not an entry signal or follow-up, skipping.")
 
-    # Connection health check — detect dead update streams and force reconnect
-    # IMPORTANT: never call client.disconnect() — it ends run_until_disconnected()
-    # and kills the process. Use client._reconnect() or _sender.reconnect() instead.
+    # Connection health check — detect dead update streams and recover
+    # Strategy: periodic catch_up() to re-sync update state with Telegram servers,
+    # plus os._exit as last resort if catch_up doesn't fix it.
+    _catchup_attempted = [False]
+
     async def _health_check():
         import time as _t
         while True:
@@ -963,20 +965,32 @@ async def start_listener() -> None:
                     log.warning("[CH3] Health: connection lost — reconnecting...")
                     await client.connect()
                     log.info("[CH3] Health: reconnected (was disconnected)")
-                elif silence > 600:
+                    _catchup_attempted[0] = False
+                elif silence > 300:
                     from src.utils.market_calendar import now_ist
                     ist_now = now_ist()
                     if ist_now.weekday() < 5 and 9 <= ist_now.hour < 16:
-                        log.error("[CH3] Health: no messages for %.0fs — EXITING for systemd restart", silence)
-                        _notify(f"⚠️ [CH3] Stale stream ({silence:.0f}s) — restarting process")
-                        os._exit(1)
+                        if not _catchup_attempted[0]:
+                            log.warning("[CH3] Health: no messages for %.0fs — trying catch_up()", silence)
+                            try:
+                                await client.catch_up()
+                                log.info("[CH3] Health: catch_up() completed — waiting for updates")
+                            except Exception as ce:
+                                log.warning("[CH3] Health: catch_up() failed: %s", ce)
+                            _catchup_attempted[0] = True
+                        elif silence > 600:
+                            log.error("[CH3] Health: still silent after catch_up (%.0fs) — EXITING for systemd restart", silence)
+                            _notify(f"⚠️ [CH3] Stale stream ({silence:.0f}s) — restarting process")
+                            os._exit(1)
                 else:
+                    _catchup_attempted[0] = False
                     await client.get_me()
             except Exception as exc:
                 log.warning("[CH3] Health check failed (%s) — reconnecting...", exc)
                 try:
                     await client.connect()
                     _last_msg_time[0] = _t.time()
+                    _catchup_attempted[0] = False
                     log.info("[CH3] Health: reconnected after failure")
                 except Exception as exc2:
                     log.error("[CH3] Health: reconnect failed: %s — will retry in 30s", exc2)
