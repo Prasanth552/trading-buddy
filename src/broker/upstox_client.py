@@ -218,11 +218,18 @@ class UpstoxClient:
             "product": product,
             "instrument_token": instrument_token,
             "transaction_type": "SELL",
-            "rules": [{
-                "strategy": "STOPLOSS",
-                "trigger_type": "IMMEDIATE",
-                "trigger_price": trigger_price,
-            }],
+            "rules": [
+                {
+                    "strategy": "ENTRY",
+                    "trigger_type": "IMMEDIATE",
+                    "trigger_price": trigger_price,
+                },
+                {
+                    "strategy": "STOPLOSS",
+                    "trigger_type": "BELOW",
+                    "trigger_price": trigger_price,
+                },
+            ],
         }
         try:
             resp = requests.post(f"{self.GTT_BASE}/place", json=body, headers=self._headers(), timeout=15)
