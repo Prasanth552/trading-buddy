@@ -221,11 +221,6 @@ class UpstoxClient:
             "rules": [
                 {
                     "strategy": "ENTRY",
-                    "trigger_type": "IMMEDIATE",
-                    "trigger_price": trigger_price,
-                },
-                {
-                    "strategy": "STOPLOSS",
                     "trigger_type": "BELOW",
                     "trigger_price": trigger_price,
                 },
@@ -253,8 +248,8 @@ class UpstoxClient:
             "gtt_order_id": gtt_order_id,
             "quantity": quantity,
             "rules": [{
-                "strategy": "STOPLOSS",
-                "trigger_type": "IMMEDIATE",
+                "strategy": "ENTRY",
+                "trigger_type": "BELOW",
                 "trigger_price": trigger_price,
             }],
         }
