@@ -34,7 +34,7 @@ class ParsedSignal:
     action: str          # BUY / SELL
     symbol: str          # e.g. "AMBER", "LAURUSLABS"
     strike: float
-    option_type: str     # CE / PE
+    option_type: str | None     # CE / PE / None (resolve at execution)
     trigger_price: float
     stop_loss: float
     targets: list[float]
@@ -151,16 +151,22 @@ def parse_signal_ch4(text: str) -> ParsedSignal | None:
     clean = re.sub(r'\s+', ' ', clean)
     upper = clean.upper()
 
-    # Match: STOCKNAME STRIKE CE/PE
-    # Stock names can be multi-word but typically one word (AMBER, LAURUSLABS, etc.)
-    # Use known symbols if available, otherwise match any word before a number+CE/PE
+    # Match: STOCKNAME STRIKE CE/PE  (CE/PE may be absent)
     sym_m = re.search(r'([A-Z][A-Z0-9&]+)\s+(\d+)\s*(CE|PE)', upper)
     if not sym_m:
-        return None
+        # Try without CE/PE — channel sometimes omits it
+        sym_m = re.search(r'([A-Z][A-Z0-9&]+)\s+(\d+)', upper)
+        if not sym_m:
+            return None
+        # Must also have ABOVE/BELOW + targets to be a real signal (not just any "WORD NUMBER")
+        if not re.search(r'(?:ABOVE|BELOW)', upper):
+            return None
+        if not re.search(r'(?:TARGET|STOP\s*LOSS|SL)', upper):
+            return None
 
     symbol_raw = sym_m.group(1)
     strike = float(sym_m.group(2))
-    option_type = sym_m.group(3)
+    option_type = sym_m.group(3) if sym_m.lastindex >= 3 else None
 
     # Skip index names — those belong to CH3
     if symbol_raw in ("SENSEX", "NIFTY", "BANKNIFTY", "NIFTYBANK", "FINNIFTY", "MIDCPNIFTY"):
@@ -352,9 +358,57 @@ def execute_signal(sig: ParsedSignal, *, filter_score: int | None = None) -> dic
 
     try:
         uc = UpstoxClient()
-        opt, lot_size = _resolve_stock_option(uc, sig.symbol, sig.strike, sig.option_type)
     except Exception as exc:
-        return {"placed": False, "reason": f"Option resolution failed: {exc}"}
+        return {"placed": False, "reason": f"UpstoxClient init failed: {exc}"}
+
+    from src.broker.upstox_data import UpstoxData
+
+    # When CE/PE is missing, resolve both and pick the one whose LTP is closer
+    # to the entry range.
+    if sig.option_type is None:
+        log.info("[CH4] No CE/PE in signal — resolving both for %s %s", sig.symbol, sig.strike)
+        best_ot, best_opt, best_lot, best_diff = None, None, 1, float("inf")
+        for ot in ("CE", "PE"):
+            try:
+                _opt, _lot = _resolve_stock_option(uc, sig.symbol, sig.strike, ot)
+            except Exception:
+                continue
+            if _opt is None:
+                continue
+            _tok = _opt.get("instrument_key") or _opt.get("instrument_token", "")
+            try:
+                ud = UpstoxData()
+                ltp_data = ud._get("/v2/market-quote/ltp",
+                                   params={"instrument_key": _tok}).get("data", {})
+                ltp = 0.0
+                for item in ltp_data.values():
+                    lp = item.get("last_price")
+                    if lp and lp > 0:
+                        ltp = float(lp)
+                        break
+            except Exception:
+                ltp = 0.0
+            mid = (sig.entry_low + sig.entry_high) / 2.0
+            diff = abs(ltp - mid) if ltp > 0 else float("inf")
+            log.info("[CH4]   %s LTP=%.2f diff_from_entry=%.2f", ot, ltp, diff)
+            if diff < best_diff:
+                best_ot, best_opt, best_lot, best_diff = ot, _opt, _lot, diff
+        if best_ot is None:
+            return {"placed": False, "reason": f"Could not resolve {sig.symbol} {sig.strike} CE or PE"}
+        sig = ParsedSignal(
+            action=sig.action, symbol=sig.symbol, strike=sig.strike,
+            option_type=best_ot, trigger_price=sig.trigger_price,
+            stop_loss=sig.stop_loss, targets=sig.targets,
+            entry_low=sig.entry_low, entry_high=sig.entry_high,
+        )
+        log.info("[CH4] Resolved option_type=%s for %s %s (LTP diff=%.2f)",
+                 best_ot, sig.symbol, sig.strike, best_diff)
+        opt, lot_size = best_opt, best_lot
+    else:
+        try:
+            opt, lot_size = _resolve_stock_option(uc, sig.symbol, sig.strike, sig.option_type)
+        except Exception as exc:
+            return {"placed": False, "reason": f"Option resolution failed: {exc}"}
 
     if opt is None:
         return {"placed": False, "reason": f"Could not resolve {sig.symbol} {sig.strike} {sig.option_type}"}
@@ -364,9 +418,6 @@ def execute_signal(sig: ParsedSignal, *, filter_score: int | None = None) -> dic
 
     log.info("[CH4] Resolved %s %s %s: lot_size=%d qty=%d token=%s",
              sig.symbol, sig.strike, sig.option_type, lot_size, qty, instrument_token)
-
-    # Fetch live LTP
-    from src.broker.upstox_data import UpstoxData
 
     def _fetch_ltp() -> float:
         try:
