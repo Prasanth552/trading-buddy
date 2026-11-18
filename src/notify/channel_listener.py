@@ -1121,29 +1121,47 @@ def parse_signal(text: str) -> ParsedSignal | None:
 
 
 def _parse_signal_regex(text: str) -> ParsedSignal | None:
-    """Fallback regex parser if LLM is unavailable."""
+    """Pure regex signal parser — no LLM needed."""
     text = text.strip().upper()
     lines = [l.strip() for l in text.splitlines() if l.strip()]
-    if len(lines) < 2:
+    if not lines:
         return None
 
     joined = " ".join(lines)
 
+    # Pattern: BUY SYMBOL STRIKE CE/PE [ABOVE/BELOW/NEAR/@] PRICE
     m = re.match(
-        r'(BUY|SELL)\s+(.+?)\s+(\d+(?:\.\d+)?)\s+(CE|PE)\s+(?:ABOVE|BELOW|@|AT)\s+(\d+(?:\.\d+)?)',
+        r'(BUY|SELL)\s+(.+?)\s+(\d+(?:\.\d+)?)\s+(CE|PE)\s+(?:ABOVE|BELOW|NEAR|@|AT)\s+(\d+(?:\.\d+)?)',
         joined,
     )
     if not m:
+        # Also try without trigger keyword: BUY SYMBOL STRIKE CE/PE (market order)
+        m2 = re.match(
+            r'(BUY|SELL)\s+(.+?)\s+(\d+(?:\.\d+)?)\s+(CE|PE)\b',
+            joined,
+        )
+        if m2:
+            rest = joined[m2.end():]
+            sl_m = re.search(r'SL\s+(\d+(?:\.\d+)?)', rest)
+            stop_loss = float(sl_m.group(1)) if sl_m else 0.0
+            targets = _extract_targets(rest)
+            if targets and stop_loss > 0:
+                return ParsedSignal(
+                    action=m2.group(1),
+                    symbol=m2.group(2).strip(),
+                    strike=float(m2.group(3)),
+                    option_type=m2.group(4),
+                    trigger_price=0.0,
+                    stop_loss=stop_loss,
+                    targets=targets,
+                )
         return None
 
     rest = joined[m.end():]
     sl_m = re.search(r'SL\s+(\d+(?:\.\d+)?)', rest)
     stop_loss = float(sl_m.group(1)) if sl_m else 0.0
 
-    targets: list[float] = []
-    tgt_m = re.search(r'(?:TARGET|TGT|T)\s+([\d.\s]+)', rest)
-    if tgt_m:
-        targets = [float(x) for x in tgt_m.group(1).split() if re.match(r'\d+\.?\d*$', x)]
+    targets = _extract_targets(rest)
 
     if not targets or stop_loss <= 0:
         return None
@@ -1157,6 +1175,15 @@ def _parse_signal_regex(text: str) -> ParsedSignal | None:
         stop_loss=stop_loss,
         targets=targets,
     )
+
+
+def _extract_targets(text: str) -> list[float]:
+    """Extract target prices from text like 'TGT 42/48' or 'TARGET 29 32'."""
+    tgt_m = re.search(r'(?:TARGET|TGT|T)\s+([\d./\s]+)', text)
+    if not tgt_m:
+        return []
+    raw = tgt_m.group(1).replace('/', ' ')
+    return [float(x) for x in raw.split() if re.match(r'\d+\.?\d*$', x)]
 
 
 def _notify(msg: str) -> None:
@@ -6114,170 +6141,38 @@ async def start_listener() -> None:
                 _notify(f"[{ch_label}] NOT ACTIVATED — all pending signals cancelled")
                 return
 
-            # --- End fast regex; fall through to Gemini for new signals + other ---
-            classification = await asyncio.to_thread(classify_ch1_message, combined_text, channel)
+            # "WAIT TO ACTIVATE" → keep signal queued, don't cancel
+            if re.search(r'WAIT\s*(TO|FOR)\s*ACTIVAT', _upper):
+                log.info("[%s] FAST: WAIT TO ACTIVATE — keeping signal queued", ch_label)
+                return
 
-            if classification is not None:
-                msg_type = classification.get("type", "IGNORE")
+            # "BOOK PROFIT" / bare "BOOK" with a price → close trade
+            _book_m = re.match(r'^[\s]*(\d+\.?\d*)\s*,?\s*BOOK\s*(PROFIT)?\s*$', _upper)
+            if _book_m:
+                log.info("[%s] FAST: BOOK (PROFIT) — closing trade", ch_label)
+                await asyncio.to_thread(_handle_followup, "book", None, channel, ch_label)
+                return
 
-                if msg_type == "NEW_SIGNAL":
-                    targets = classification.get("targets") or []
-                    sl = classification.get("stop_loss", 0)
-                    if targets and sl > 0:
-                        sig = ParsedSignal(
-                            action=classification.get("action", "BUY"),
-                            symbol=classification["symbol"],
-                            strike=float(classification["strike"]),
-                            option_type=classification["option_type"],
-                            trigger_price=float(classification.get("trigger_price", 0)),
-                            stop_loss=float(sl),
-                            targets=[float(t) for t in targets],
-                        )
-                        is_above = classification.get("is_above", False)
-                        log.info("[%s] Gemini NEW_SIGNAL: %s %s %s trigger=%.2f SL=%.2f above=%s",
-                                 ch_label, sig.symbol, sig.strike, sig.option_type,
-                                 sig.trigger_price, sig.stop_loss, is_above)
+            # "AFTER SL" / bare "SL" → already hit SL, ignore
+            if re.match(r'^[\s]*(\d+\.?\d*\s*,?\s*)?AFTER\s+SL\s*$', _upper) or _upper.strip() == 'SL':
+                log.info("[%s] FAST: AFTER SL / SL — ignoring (already handled by monitor)", ch_label)
+                return
 
-                        if is_above:
-                            sym_key = f"{sig.symbol} {int(sig.strike)} {sig.option_type}"
+            # Short non-signal messages (greetings, commentary) — skip
+            if len(combined_text.strip()) < 10 and not re.search(r'\d+\s*(CE|PE)', _upper):
+                log.info("[%s] Short message, not a signal — skipping", ch_label)
+                return
 
-                            def _resolve_above_and_check(sig, channel, ch_label, sym_key):
-                                """Resolve instrument + LTP check in thread (non-blocking)."""
-                                broker_key = ""
-                                try:
-                                    from src.broker.upstox_client import UpstoxClient
-                                    uc = UpstoxClient()
-                                    use_monthly = channel in ("ch1", "ch1b")
-                                    opt, _ = _resolve_channel_option(
-                                        uc, sig.symbol, sig.strike, sig.option_type, monthly=use_monthly)
-                                    if opt:
-                                        broker_key = opt.get("instrument_key") or opt.get("instrument_token", "")
-                                        log.info("[%s] ABOVE hold resolved instrument: %s", ch_label, broker_key)
-                                except Exception as exc:
-                                    log.warning("[%s] Could not resolve instrument for ABOVE hold: %s", ch_label, exc)
+            # Header-only "BUY SYMBOL" — buffer for next message to combine
+            _header_m = re.match(r'^(BUY|SELL)\s+([A-Z][A-Z\s]*[A-Z])\s*$', _upper)
+            if _header_m and not re.search(r'\d', combined_text):
+                _ch1_msg_buffer = combined_text.strip()
+                _ch1_msg_buffer_ts = _time.time()
+                log.info("[%s] Buffered header: %s (waiting for details)", ch_label, _ch1_msg_buffer)
+                return
 
-                                if broker_key and sig.trigger_price > 0:
-                                    try:
-                                        from src.broker.upstox_data import UpstoxData, load_cached_token
-                                        _imm_token = load_cached_token()
-                                        if _imm_token:
-                                            _imm_ud = UpstoxData(access_token=_imm_token)
-                                            _imm_ltp_data = _imm_ud._get(
-                                                "/v2/market-quote/ltp",
-                                                params={"instrument_key": broker_key}
-                                            ).get("data", {})
-                                            for _imm_item in _imm_ltp_data.values():
-                                                _imm_ltp = _imm_item.get("last_price")
-                                                if _imm_ltp and _imm_ltp > 0 and _imm_ltp >= sig.trigger_price:
-                                                    log.info("[%s] ABOVE immediate entry: LTP %.2f >= trigger %.2f — entering NOW",
-                                                             ch_label, _imm_ltp, sig.trigger_price)
-                                                    _notify(f"[{ch_label}] ABOVE immediate entry:\n"
-                                                            f"LTP {_imm_ltp:.1f} already >= trigger {sig.trigger_price:.0f}\n"
-                                                            f"{sym_key} — entering now!")
-                                                    _execute_and_notify(sig, channel, ch_label)
-                                                    return broker_key, True
-                                                break
-                                    except Exception as exc:
-                                        log.warning("[%s] ABOVE immediate LTP check failed: %s", ch_label, exc)
-                                return broker_key, False
-
-                            broker_key, _entered_immediately = await asyncio.to_thread(
-                                _resolve_above_and_check, sig, channel, ch_label, sym_key)
-
-                            if _entered_immediately:
-                                return
-
-                            _ch1_held_above[sym_key] = {
-                                "sig": sig, "channel": channel, "label": ch_label, "broker_key": broker_key
-                            }
-                            if _ch1_queued_task:
-                                _ch1_queued_task.cancel()
-                            _ch1_queued_signal = None
-                            _ch1_queued_task = None
-                            log.info("[%s] ABOVE signal — held (price monitor + channel): %s trigger=%.0f [total held: %d]",
-                                     ch_label, sym_key, sig.trigger_price, len(_ch1_held_above))
-                            _notify(f"[{ch_label}] Signal held (ABOVE trigger):\n"
-                                    f"{sym_key} ABOVE {sig.trigger_price}\n"
-                                    f"SL: {sig.stop_loss} | TGT: {sig.targets[0] if sig.targets else 0}\n"
-                                    f"Monitoring live price for auto-entry... [{len(_ch1_held_above)} held]")
-                            return
-
-                        # NEAR/immediate signal — queue with 5s delay for cancel/wait protection
-                        if _ch1_queued_task:
-                            _ch1_queued_task.cancel()
-                        _ch1_queued_signal = sig
-                        _ch1_queued_channel = channel
-                        _ch1_queued_label = ch_label
-                        _frozen_sig = sig
-
-                        async def _ch1_delayed_exec():
-                            global _ch1_queued_signal, _ch1_queued_task
-                            await asyncio.sleep(5)
-                            if _ch1_queued_signal is _frozen_sig:
-                                _ch1_queued_signal = None
-                                _ch1_queued_task = None
-                                await asyncio.to_thread(_execute_and_notify, _frozen_sig, _ch1_queued_channel, _ch1_queued_label)
-
-                        _ch1_queued_task = asyncio.create_task(_ch1_delayed_exec())
-                        log.info("[%s] Signal queued (5s): %s %s %s",
-                                 ch_label, sig.symbol, int(sig.strike), sig.option_type)
-                        _notify(f"[{ch_label}] Signal detected (5s queue):\n"
-                                f"{sig.symbol} {int(sig.strike)} {sig.option_type} @ {sig.trigger_price}\n"
-                                f"SL: {sig.stop_loss} | TGT: {sig.targets[0] if sig.targets else 0}")
-                        return
-                    else:
-                        log.info("[%s] Gemini NEW_SIGNAL but missing SL/targets, trying Anthropic fallback", ch_label)
-
-                elif msg_type == "BOOK_PROFIT":
-                    log.info("[%s] Gemini BOOK_PROFIT: symbol=%s price=%s",
-                             ch_label, classification.get("symbol"), classification.get("price"))
-                    _handle_followup("book", classification.get("price"), channel, ch_label)
-                    return
-
-                elif msg_type == "MOVE_SL":
-                    log.info("[%s] Gemini MOVE_SL: symbol=%s new_sl=%s to_cost=%s",
-                             ch_label, classification.get("symbol"),
-                             classification.get("new_sl"), classification.get("to_cost"))
-                    _move_sl(channel, ch_label,
-                             classification.get("symbol"),
-                             classification.get("new_sl"),
-                             classification.get("to_cost", False))
-                    return
-
-                elif msg_type == "CANCEL":
-                    log.info("[%s] Gemini CANCEL: %s", ch_label, classification.get("reason"))
-                    cancelled = False
-                    if _ch1_queued_signal and _ch1_queued_task:
-                        cancelled_sym = f"{_ch1_queued_signal.symbol} {int(_ch1_queued_signal.strike)} {_ch1_queued_signal.option_type}"
-                        _ch1_queued_task.cancel()
-                        _ch1_queued_signal = None
-                        _ch1_queued_task = None
-                        log.info("[%s] Cancelled queued signal: %s", ch_label, cancelled_sym)
-                        _notify(f"[{ch_label}] Signal cancelled: {cancelled_sym}\n"
-                                f"Reason: {classification.get('reason', 'channel instruction')}")
-                        cancelled = True
-                    if _ch1_held_above:
-                        held_syms = list(_ch1_held_above.keys())
-                        _ch1_held_above.clear()
-                        log.info("[%s] Cancelled all held ABOVE signals: %s", ch_label, held_syms)
-                        _notify(f"[{ch_label}] All held ABOVE signals cancelled: {', '.join(held_syms)}\n"
-                                f"Reason: {classification.get('reason', 'channel instruction')}")
-                        cancelled = True
-                    if not cancelled:
-                        log.info("[%s] CANCEL but no queued/held signal to cancel", ch_label)
-                    return
-
-                elif msg_type == "WAIT":
-                    log.info("[%s] Gemini WAIT: %s — keeping signal queued", ch_label, classification.get("reason"))
-                    return
-
-                elif msg_type == "IGNORE":
-                    log.info("[%s] Gemini IGNORE: not a trading instruction", ch_label)
-                    return
-
-            # --- Gemini didn't classify or returned unexpected type: fallback to Anthropic + regex ---
-            log.info("[%s] Falling back to Anthropic+regex parser", ch_label)
-            sig = await asyncio.to_thread(parse_signal, combined_text)
+            # --- Pure regex signal parsing (no LLM) ---
+            sig = _parse_signal_regex(combined_text)
 
         if sig is not None:
             log.info("[%s] Parsed signal: %s %s %s %s trigger=%.2f SL=%.2f targets=%s",
@@ -6348,10 +6243,13 @@ async def start_listener() -> None:
                 return
 
             # --- Non-CH2: check ABOVE hold before executing ---
-            is_above_fallback = bool(re.search(r'\bABOVE\b', combined_text, re.I))
-            if is_above_fallback and channel != "ch2":
+            is_above_ch1 = bool(re.search(r'\bABOVE\b', combined_text, re.I))
+            if is_above_ch1 and channel != "ch2":
                 sym_key = f"{sig.symbol} {int(sig.strike)} {sig.option_type}"
-                def _resolve_fallback_above(sig, channel):
+
+                def _resolve_above_and_check(sig, channel, ch_label, sym_key):
+                    """Resolve instrument + immediate LTP check in thread."""
+                    broker_key = ""
                     try:
                         from src.broker.upstox_client import UpstoxClient
                         uc = UpstoxClient()
@@ -6359,11 +6257,42 @@ async def start_listener() -> None:
                         opt, _ = _resolve_channel_option(
                             uc, sig.symbol, sig.strike, sig.option_type, monthly=use_monthly)
                         if opt:
-                            return opt.get("instrument_key") or opt.get("instrument_token", "")
+                            broker_key = opt.get("instrument_key") or opt.get("instrument_token", "")
+                            log.info("[%s] ABOVE hold resolved instrument: %s", ch_label, broker_key)
                     except Exception as exc:
                         log.warning("[%s] Could not resolve instrument for ABOVE hold: %s", ch_label, exc)
-                    return ""
-                broker_key = await asyncio.to_thread(_resolve_fallback_above, sig, channel)
+
+                    if broker_key and sig.trigger_price > 0:
+                        try:
+                            from src.broker.upstox_data import UpstoxData, load_cached_token
+                            _imm_token = load_cached_token()
+                            if _imm_token:
+                                _imm_ud = UpstoxData(access_token=_imm_token)
+                                _imm_ltp_data = _imm_ud._get(
+                                    "/v2/market-quote/ltp",
+                                    params={"instrument_key": broker_key}
+                                ).get("data", {})
+                                for _imm_item in _imm_ltp_data.values():
+                                    _imm_ltp = _imm_item.get("last_price")
+                                    if _imm_ltp and _imm_ltp > 0 and _imm_ltp >= sig.trigger_price:
+                                        log.info("[%s] ABOVE immediate entry: LTP %.2f >= trigger %.2f — entering NOW",
+                                                 ch_label, _imm_ltp, sig.trigger_price)
+                                        _notify(f"[{ch_label}] ABOVE immediate entry:\n"
+                                                f"LTP {_imm_ltp:.1f} already >= trigger {sig.trigger_price:.0f}\n"
+                                                f"{sym_key} — entering now!")
+                                        _execute_and_notify(sig, channel, ch_label)
+                                        return broker_key, True
+                                    break
+                        except Exception as exc:
+                            log.warning("[%s] ABOVE immediate LTP check failed: %s", ch_label, exc)
+                    return broker_key, False
+
+                broker_key, _entered_immediately = await asyncio.to_thread(
+                    _resolve_above_and_check, sig, channel, ch_label, sym_key)
+
+                if _entered_immediately:
+                    return
+
                 _ch1_held_above[sym_key] = {
                     "sig": sig, "channel": channel, "label": ch_label, "broker_key": broker_key
                 }
@@ -6371,12 +6300,37 @@ async def start_listener() -> None:
                     _ch1_queued_task.cancel()
                 _ch1_queued_signal = None
                 _ch1_queued_task = None
-                log.info("[%s] ABOVE signal (fallback) — held (price monitor + channel): %s trigger=%.0f [total held: %d]",
+                log.info("[%s] ABOVE signal — held (price monitor + channel): %s trigger=%.0f [total held: %d]",
                          ch_label, sym_key, sig.trigger_price, len(_ch1_held_above))
                 _notify(f"[{ch_label}] Signal held (ABOVE trigger):\n"
                         f"{sym_key} ABOVE {sig.trigger_price}\n"
                         f"SL: {sig.stop_loss} | TGT: {sig.targets[0] if sig.targets else 0}\n"
                         f"Monitoring live price for auto-entry... [{len(_ch1_held_above)} held]")
+                return
+
+            # Non-ABOVE CH1: queue with 5s delay for cancel/wait protection
+            if channel in ("ch1", "ch1b"):
+                if _ch1_queued_task:
+                    _ch1_queued_task.cancel()
+                _ch1_queued_signal = sig
+                _ch1_queued_channel = channel
+                _ch1_queued_label = ch_label
+                _frozen_sig = sig
+
+                async def _ch1_delayed_exec():
+                    global _ch1_queued_signal, _ch1_queued_task
+                    await asyncio.sleep(5)
+                    if _ch1_queued_signal is _frozen_sig:
+                        _ch1_queued_signal = None
+                        _ch1_queued_task = None
+                        await asyncio.to_thread(_execute_and_notify, _frozen_sig, _ch1_queued_channel, _ch1_queued_label)
+
+                _ch1_queued_task = asyncio.create_task(_ch1_delayed_exec())
+                log.info("[%s] Signal queued (5s): %s %s %s",
+                         ch_label, sig.symbol, int(sig.strike), sig.option_type)
+                _notify(f"[{ch_label}] Signal detected (5s queue):\n"
+                        f"{sig.symbol} {int(sig.strike)} {sig.option_type} @ {sig.trigger_price}\n"
+                        f"SL: {sig.stop_loss} | TGT: {sig.targets[0] if sig.targets else 0}")
                 return
 
             await asyncio.to_thread(_execute_and_notify, sig, channel, ch_label)
@@ -6395,7 +6349,7 @@ async def start_listener() -> None:
                         elif channel == "ch2":
                             original_sig = parse_signal_ch2(orig_msg.text)
                         else:
-                            original_sig = await asyncio.to_thread(parse_signal, orig_msg.text)
+                            original_sig = _parse_signal_regex(orig_msg.text)
                         log.info("[%s] Reply-to signal: %s %s %s",
                                  ch_label, original_sig.symbol if original_sig else "?",
                                  original_sig.strike if original_sig else "?",
