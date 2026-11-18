@@ -938,8 +938,12 @@ async def start_listener() -> None:
     # Health check — poll channel for new messages every 60s to detect stale stream
     async def _health_check():
         import time as _t
+        _consecutive_stale = [0]
         while True:
-            await asyncio.sleep(60)
+            from src.utils.market_calendar import now_ist
+            ist_now = now_ist()
+            is_market = ist_now.weekday() < 5 and 9 <= ist_now.hour < 16
+            await asyncio.sleep(15 if is_market else 60)
             try:
                 if not client.is_connected():
                     log.warning("[CH4] Health: connection lost — reconnecting...")
@@ -947,22 +951,51 @@ async def start_listener() -> None:
                     log.info("[CH4] Health: reconnected (was disconnected)")
                     continue
 
-                from src.utils.market_calendar import now_ist
-                ist_now = now_ist()
-                if not (ist_now.weekday() < 5 and 9 <= ist_now.hour < 16):
+                if not is_market:
                     await client.get_me()
+                    _consecutive_stale[0] = 0
                     continue
 
                 entity = await client.get_entity(ch4_int)
                 msgs = await client.get_messages(entity, limit=1)
                 if msgs and msgs[0].id > _last_seen_msg_id[0]:
                     if _last_seen_msg_id[0] > 0:
-                        log.warning("[CH4] Health: channel has msg id=%d but handler last saw id=%d — stream is STALE, restarting",
-                                    msgs[0].id, _last_seen_msg_id[0])
-                        _notify(f"⚠️ [CH4] Stale stream detected (missed msg {msgs[0].id}) — restarting")
-                        os._exit(1)
-                    _last_seen_msg_id[0] = msgs[0].id
+                        missed_count = msgs[0].id - _last_seen_msg_id[0]
+                        log.warning("[CH4] Poll: handler missed %d msg(s) (last_seen=%d, channel=%d) — fetching & processing",
+                                    missed_count, _last_seen_msg_id[0], msgs[0].id)
+                        _consecutive_stale[0] += 1
+                        try:
+                            missed = await client.get_messages(entity, min_id=_last_seen_msg_id[0], limit=20)
+                            missed = list(reversed(missed))
+                            for m in missed:
+                                if not m.text or not m.text.strip():
+                                    continue
+                                log.info("[CH4] Poll processing msg %d: %s", m.id, m.text[:120])
+                                sig = parse_signal_ch4(m.text)
+                                if sig:
+                                    log.info("[CH4] POLL signal: %s %s %s trigger=%.2f",
+                                             sig.symbol, sig.strike, sig.option_type, sig.trigger_price)
+                                    _notify(f"📡 [CH4] Poll caught signal: {sig.symbol} {sig.strike} {sig.option_type}")
+                                    loop = asyncio.get_event_loop()
+                                    res = await loop.run_in_executor(None, lambda s=sig: execute_signal(s))
+                                    if res["placed"]:
+                                        _notify(f"✅ [CH4] POLL order placed\n{res['symbol']} x{res['qty']}\nEntry: {res['entry']}")
+                                        log.info("[CH4] Poll order placed: %s", res)
+                                    else:
+                                        log.info("[CH4] Poll signal not executed: %s", res.get("reason"))
+                                else:
+                                    log.info("[CH4] Poll msg %d: not a signal, skipping", m.id)
+                        except Exception as fetch_exc:
+                            log.error("[CH4] Poll fetch failed: %s", fetch_exc)
+                        _last_seen_msg_id[0] = msgs[0].id
+                        if _consecutive_stale[0] >= 20:
+                            log.error("[CH4] Stream stale 20 times in a row — restarting process")
+                            _notify("⚠️ [CH4] Stream permanently stale — restarting")
+                            os._exit(1)
+                    else:
+                        _last_seen_msg_id[0] = msgs[0].id
                 else:
+                    _consecutive_stale[0] = 0
                     await client.get_me()
             except Exception as exc:
                 log.warning("[CH4] Health check failed (%s) — reconnecting...", exc)
@@ -970,7 +1003,7 @@ async def start_listener() -> None:
                     await client.connect()
                     log.info("[CH4] Health: reconnected after failure")
                 except Exception as exc2:
-                    log.error("[CH4] Health: reconnect failed: %s — will retry in 60s", exc2)
+                    log.error("[CH4] Health: reconnect failed: %s — will retry", exc2)
 
     asyncio.get_event_loop().create_task(_health_check())
 
