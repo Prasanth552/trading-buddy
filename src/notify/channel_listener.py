@@ -969,7 +969,8 @@ Rules:
 - A message with JUST a number like "15.3" or "103.35" followed by a trading action word \
 is BOOK_PROFIT or MOVE_SL depending on context.
 - "SL COST" means MOVE_SL with to_cost=true, NOT a stop loss hit.
-- "BOOK OR TRAIL" = BOOK_PROFIT
+- "BOOK OR TRAIL" = MOVE_SL (trail SL to the given price, do NOT close the trade). \
+Set new_sl to the number before "BOOK OR TRAIL", to_cost=false.
 - "BOOK SMALL" = BOOK_PROFIT
 - Messages like "GOOD MORNING", "CLICK ON NOTIFICATION", payment links = IGNORE
 - If a message has BOTH a signal AND "WAIT TO ACTIVATE", classify as NEW_SIGNAL \
@@ -6064,6 +6065,52 @@ async def start_listener() -> None:
                 _ch1_msg_buffer = ""
                 _ch1_msg_buffer_ts = 0.0
 
+            # --- FAST REGEX PRE-CLASSIFICATION (before Gemini) ---
+            _upper = combined_text.upper().strip()
+
+            # "SL COST" → move SL to entry price (instant, no LLM)
+            _sl_cost_m = re.match(r'^[\s]*(\d+\.?\d*)\s*,?\s*SL\s*COST\s*$', _upper)
+            if _sl_cost_m:
+                log.info("[%s] FAST: SL COST detected — moving SL to entry", ch_label)
+                _move_sl(channel, ch_label, None, None, to_cost=True)
+                return
+
+            # "BOOK OR TRAIL" → trail SL to the given price (NOT close)
+            _trail_m = re.match(r'^[\s]*(\d+\.?\d*)\s*,?\s*BOOK\s*(?:OR|/)\s*TRAIL\s*$', _upper)
+            if _trail_m:
+                trail_price = float(_trail_m.group(1))
+                log.info("[%s] FAST: BOOK OR TRAIL %.2f — trailing SL", ch_label, trail_price)
+                _move_sl(channel, ch_label, None, trail_price, to_cost=False)
+                return
+
+            # "BOOK SMALL" → close trade at market
+            _book_small_m = re.match(r'^[\s]*(\d+\.?\d*)\s*,?\s*BOOK\s*SMALL\s*$', _upper)
+            if _book_small_m:
+                log.info("[%s] FAST: BOOK SMALL — closing trade", ch_label)
+                _handle_followup("book", None, channel, ch_label)
+                return
+
+            # "CLOSE NEAR COST" / "CLOSE AT COST" → close trade
+            if re.search(r'CLOSE\s*(NEAR|AT)\s*COST', _upper):
+                log.info("[%s] FAST: CLOSE NEAR COST — closing trade", ch_label)
+                _handle_followup("book", None, channel, ch_label)
+                return
+
+            # "NOT ACTIVATED IGNORE" / "IGNORE NOT ACTIVATED" → cancel
+            if re.search(r'(NOT\s*ACTIVATED\s*(IGNORE)?|IGNORE\s*NOT\s*ACTIVATED)', _upper):
+                log.info("[%s] FAST: NOT ACTIVATED — cancelling", ch_label)
+                if _ch1_queued_signal and _ch1_queued_task:
+                    _ch1_queued_task.cancel()
+                    _ch1_queued_signal = None
+                    _ch1_queued_task = None
+                if _ch1_held_above:
+                    held_syms = list(_ch1_held_above.keys())
+                    _ch1_held_above.clear()
+                    log.info("[%s] Cancelled held ABOVE: %s", ch_label, held_syms)
+                _notify(f"[{ch_label}] NOT ACTIVATED — all pending signals cancelled")
+                return
+
+            # --- End fast regex; fall through to Gemini for new signals + other ---
             classification = await asyncio.to_thread(classify_ch1_message, combined_text, channel)
 
             if classification is not None:
@@ -6101,6 +6148,36 @@ async def start_listener() -> None:
                                     log.info("[%s] ABOVE hold resolved instrument: %s", ch_label, broker_key)
                             except Exception as exc:
                                 log.warning("[%s] Could not resolve instrument for ABOVE hold: %s", ch_label, exc)
+
+                            # FAST CHECK: if LTP already >= trigger, enter NOW (skip hold)
+                            _entered_immediately = False
+                            if broker_key and sig.trigger_price > 0:
+                                try:
+                                    from src.broker.upstox_data import UpstoxData, load_cached_token
+                                    _imm_token = load_cached_token()
+                                    if _imm_token:
+                                        _imm_ud = UpstoxData(access_token=_imm_token)
+                                        _imm_ltp_data = _imm_ud._get(
+                                            "/v2/market-quote/ltp",
+                                            params={"instrument_key": broker_key}
+                                        ).get("data", {})
+                                        for _imm_item in _imm_ltp_data.values():
+                                            _imm_ltp = _imm_item.get("last_price")
+                                            if _imm_ltp and _imm_ltp > 0 and _imm_ltp >= sig.trigger_price:
+                                                log.info("[%s] ABOVE immediate entry: LTP %.2f >= trigger %.2f — entering NOW",
+                                                         ch_label, _imm_ltp, sig.trigger_price)
+                                                _notify(f"[{ch_label}] ABOVE immediate entry:\n"
+                                                        f"LTP {_imm_ltp:.1f} already >= trigger {sig.trigger_price:.0f}\n"
+                                                        f"{sym_key} — entering now!")
+                                                _execute_and_notify(sig, channel, ch_label)
+                                                _entered_immediately = True
+                                            break
+                                except Exception as exc:
+                                    log.warning("[%s] ABOVE immediate LTP check failed: %s", ch_label, exc)
+
+                            if _entered_immediately:
+                                return
+
                             _ch1_held_above[sym_key] = {
                                 "sig": sig, "channel": channel, "label": ch_label, "broker_key": broker_key
                             }
