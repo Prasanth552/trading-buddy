@@ -892,7 +892,7 @@ async def start_listener() -> None:
                      sig.symbol, sig.strike, sig.option_type,
                      sig.trigger_price, sig.stop_loss, sig.targets)
 
-            # Smart filter (3s timeout — never delay the order for external API slowness)
+            # Smart filter (1s timeout — never delay entry for filter)
             filt = None
             filter_score = None
             try:
@@ -900,12 +900,12 @@ async def start_listener() -> None:
                 loop = asyncio.get_event_loop()
                 filt = await asyncio.wait_for(
                     loop.run_in_executor(None, evaluate_signal, sig.symbol, sig.option_type, "ch3", sig.trigger_price),
-                    timeout=3,
+                    timeout=1,
                 )
                 filter_score = filt.score
                 log.info("[CH3] FILTER: score=%d action=%s reasons=%s", filt.score, filt.action, filt.reasons)
             except asyncio.TimeoutError:
-                log.warning("[CH3] Smart filter timed out (3s) — proceeding without filter")
+                log.warning("[CH3] Smart filter timed out (1s) — proceeding without filter")
             except Exception as exc:
                 log.warning("[CH3] Smart filter failed: %s", exc)
 
