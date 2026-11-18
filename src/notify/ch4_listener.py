@@ -832,7 +832,7 @@ async def start_listener() -> None:
         return
 
     session_path = os.path.join(os.path.dirname(__file__), "..", "..", "data", "telegram_ch4.session")
-    client = TelegramClient(session_path, api_id, api_hash)
+    client = TelegramClient(session_path, api_id, api_hash, catch_up=True)
 
     _telegram_connected = False
     try:
@@ -986,7 +986,7 @@ async def start_listener() -> None:
 
         log.info("[CH4] Not an entry signal or follow-up, skipping.")
 
-    # Health check — poll channel for new messages every 60s to detect stale stream
+    # Polling fallback — poll channel every 5s during market hours.
     async def _health_check():
         import time as _t
         _consecutive_stale = [0]
@@ -994,7 +994,7 @@ async def start_listener() -> None:
             from src.utils.market_calendar import now_ist
             ist_now = now_ist()
             is_market = ist_now.weekday() < 5 and 9 <= ist_now.hour < 16
-            await asyncio.sleep(15 if is_market else 60)
+            await asyncio.sleep(5 if is_market else 60)
             try:
                 if not client.is_connected():
                     log.warning("[CH4] Health: connection lost — reconnecting...")
