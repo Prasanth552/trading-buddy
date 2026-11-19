@@ -106,6 +106,7 @@ _KNOWN_STOCK_SYMBOLS: set[str] = set()  # populated from instrument master
 _SYMBOL_ALIASES: dict[str, str] = {
     "LARUSLABS": "LAURUSLABS",
     "LAURUS": "LAURUSLABS",
+    "SOLARINDSS": "SOLARINDS",
 }
 
 
