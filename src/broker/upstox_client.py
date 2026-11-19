@@ -193,7 +193,9 @@ class UpstoxClient:
         if data.get("status") != "success":
             raise UpstoxError(f"Upstox order failed: {data}")
         order_ids = data.get("data", {}).get("order_ids", [])
-        log.info("UPSTOX ORDER ok ids=%s", order_ids)
+        log.info("UPSTOX ORDER ok ids=%s full_response=%s", order_ids, data)
+        if not order_ids:
+            raise UpstoxError(f"Upstox returned success but empty order_ids — order likely rejected: {data}")
         return {"order_ids": order_ids, "raw": data}
 
     # --- GTT orders -----------------------------------------------------------
