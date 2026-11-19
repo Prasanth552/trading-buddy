@@ -175,10 +175,10 @@ def parse_signal_ch4(text: str) -> ParsedSignal | None:
     # Fix common misspellings
     symbol_raw = _SYMBOL_ALIASES.get(symbol_raw, symbol_raw)
 
-    # Validate against known stock symbols if loaded
+    # Log unknown symbols but still attempt to trade — instrument resolution will
+    # catch truly invalid ones, and we must not silently drop valid signals like SOLARINDSS
     if _KNOWN_STOCK_SYMBOLS and symbol_raw not in _KNOWN_STOCK_SYMBOLS:
-        log.warning("[CH4] Unknown stock symbol: %s — skipping", symbol_raw)
-        return None
+        log.warning("[CH4] Symbol %s not in pre-loaded set — will attempt resolution anyway", symbol_raw)
 
     entry_m = re.search(r'(?:BUY\s*)?ABOVE\s*[:\s]*(\d+)\s*[-–]\s*(\d+)', upper)
     if not entry_m:
@@ -435,11 +435,11 @@ def execute_signal(sig: ParsedSignal, *, filter_score: int | None = None) -> dic
     entry_price = _fetch_ltp() or sig.trigger_price
     log.info("Live LTP for %s: %.2f (signal: %.2f)", instrument_token, entry_price, sig.trigger_price)
 
-    # Wait for trigger: if LTP < entry_low, poll every 2s for up to 15 min
+    # Wait for trigger: if LTP < entry_low, poll every 1s for up to 3 min (short — don't block long)
     if sig.entry_low > 0 and entry_price < sig.entry_low:
-        log.info("[CH4] WAITING for trigger: LTP %.2f < ABOVE %d — polling every 1s (max 15 min)", entry_price, sig.entry_low)
+        log.info("[CH4] WAITING for trigger: LTP %.2f < ABOVE %d — polling every 1s (max 3 min)", entry_price, sig.entry_low)
         _notify(f"⏳ *[CH4] Waiting for trigger*\nLTP ₹{entry_price:.2f} < ABOVE {sig.entry_low}\n{trade_symbol}")
-        deadline = _time.time() + 900
+        deadline = _time.time() + 180  # 3 minutes (was 15 — reduced to avoid blocking new signals)
         while _time.time() < deadline:
             _time.sleep(1)
             entry_price = _fetch_ltp()
@@ -449,9 +449,9 @@ def execute_signal(sig: ParsedSignal, *, filter_score: int | None = None) -> dic
                 log.info("[CH4] TRIGGER HIT: LTP %.2f >= %d — entering now", entry_price, sig.entry_low)
                 break
         else:
-            log.warning("[CH4] Trigger wait expired (15 min): LTP %.2f < %d", entry_price, sig.entry_low)
-            _notify(f"⚠️ *[CH4] Signal expired* — trigger {sig.entry_low} not hit in 15 min\n{trade_symbol}")
-            return {"placed": False, "reason": f"Trigger {sig.entry_low} not hit in 15 min (LTP {entry_price})"}
+            log.warning("[CH4] Trigger wait expired (3 min): LTP %.2f < %d", entry_price, sig.entry_low)
+            _notify(f"⚠️ *[CH4] Signal expired* — trigger {sig.entry_low} not hit in 3 min\n{trade_symbol}")
+            return {"placed": False, "reason": f"Trigger {sig.entry_low} not hit in 3 min (LTP {entry_price})"}
 
     entry_price = round(entry_price * (1 + SLIPPAGE_PCT), 2)
 
@@ -946,28 +946,34 @@ async def start_listener() -> None:
             elif filt and filt.action == "REDUCE":
                 filter_tag = " (filter: REDUCE)"
 
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(None, lambda: execute_signal(sig, filter_score=filter_score))
+            # Fire-and-forget: execute in background so handler returns immediately
+            async def _execute_in_background(_sig=sig, _fs=filter_score, _fl=filter_line, _rl=reason_lines, _ft=filter_tag):
+                try:
+                    loop = asyncio.get_event_loop()
+                    result = await loop.run_in_executor(None, lambda: execute_signal(_sig, filter_score=_fs))
+                    _notify(
+                        f"*[CH4] Signal received — {'executed' if result['placed'] else 'skipped'}{_ft}*\n"
+                        f"{_sig.action} {_sig.symbol} {int(_sig.strike)} {_sig.option_type}\n"
+                        f"Entry ABOVE {_sig.trigger_price} | SL: {_sig.stop_loss} | "
+                        f"Targets: {', '.join(str(t) for t in _sig.targets)}\n"
+                        f"{_fl}\n{_rl}"
+                    )
+                    if result["placed"]:
+                        _notify(
+                            f"*[CH4] Order placed*\n"
+                            f"{result['symbol']} x{result['qty']} (lot={result.get('lot_size', '?')})\n"
+                            f"Entry: {result['entry']} | SL: {result['sl']} | "
+                            f"Target: {result['target']}\n"
+                            f"{_fl}"
+                        )
+                        log.info("[CH4] Order placed: %s", result)
+                    else:
+                        _notify(f"[CH4] Signal not executed: {result['reason']}")
+                        log.warning("[CH4] Signal not executed: %s", result["reason"])
+                except Exception as exc:
+                    log.error("[CH4] Background execute error: %s", exc)
 
-            _notify(
-                f"*[CH4] Signal received — {'executed' if result['placed'] else 'skipped'}{filter_tag}*\n"
-                f"{sig.action} {sig.symbol} {int(sig.strike)} {sig.option_type}\n"
-                f"Entry ABOVE {sig.trigger_price} | SL: {sig.stop_loss} | "
-                f"Targets: {', '.join(str(t) for t in sig.targets)}\n"
-                f"{filter_line}\n{reason_lines}"
-            )
-            if result["placed"]:
-                _notify(
-                    f"*[CH4] Order placed*\n"
-                    f"{result['symbol']} x{result['qty']} (lot={result.get('lot_size', '?')})\n"
-                    f"Entry: {result['entry']} | SL: {result['sl']} | "
-                    f"Target: {result['target']}\n"
-                    f"{filter_line}"
-                )
-                log.info("[CH4] Order placed: %s", result)
-            else:
-                _notify(f"[CH4] Signal not executed: {result['reason']}")
-                log.warning("[CH4] Signal not executed: %s", result["reason"])
+            asyncio.get_event_loop().create_task(_execute_in_background())
             return
 
         action, exit_price = _classify_followup(text)
@@ -1027,13 +1033,19 @@ async def start_listener() -> None:
                                     log.info("[CH4] POLL signal: %s %s %s trigger=%.2f",
                                              sig.symbol, sig.strike, sig.option_type, sig.trigger_price)
                                     _notify(f"📡 [CH4] Poll caught signal: {sig.symbol} {sig.strike} {sig.option_type}")
-                                    loop = asyncio.get_event_loop()
-                                    res = await loop.run_in_executor(None, lambda s=sig: execute_signal(s))
-                                    if res["placed"]:
-                                        _notify(f"✅ [CH4] POLL order placed\n{res['symbol']} x{res['qty']}\nEntry: {res['entry']}")
-                                        log.info("[CH4] Poll order placed: %s", res)
-                                    else:
-                                        log.info("[CH4] Poll signal not executed: %s", res.get("reason"))
+
+                                    async def _poll_exec(_s=sig):
+                                        try:
+                                            _loop = asyncio.get_event_loop()
+                                            res = await _loop.run_in_executor(None, lambda: execute_signal(_s))
+                                            if res["placed"]:
+                                                _notify(f"✅ [CH4] POLL order placed\n{res['symbol']} x{res['qty']}\nEntry: {res['entry']}")
+                                                log.info("[CH4] Poll order placed: %s", res)
+                                            else:
+                                                log.info("[CH4] Poll signal not executed: %s", res.get("reason"))
+                                        except Exception as _e:
+                                            log.error("[CH4] Poll execute error: %s", _e)
+                                    asyncio.get_event_loop().create_task(_poll_exec())
                                 else:
                                     log.info("[CH4] Poll msg %d: not a signal, skipping", m.id)
                         except Exception as fetch_exc:
