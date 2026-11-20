@@ -367,8 +367,14 @@ def execute_signal(sig: ParsedSignal, *, filter_score: int | None = None) -> dic
 
     entry_price = round(entry_price * (1 + SLIPPAGE_PCT), 2)
 
-    # Reject if price already past first target (still a valid trade up to T1)
+    # Reject if price too far past trigger (must have ≥50% of trigger→T1 range left)
     max_entry = sig.targets[0] if sig.targets else (sig.entry_high + 30 if sig.entry_high > 0 else 0)
+    if max_entry > 0 and sig.entry_low > 0:
+        midpoint = sig.entry_low + (max_entry - sig.entry_low) * 0.5
+        if entry_price > midpoint:
+            log.warning("ENTRY REJECTED: LTP %.2f > midpoint %.2f (trigger=%.0f T1=%.0f)", entry_price, midpoint, sig.entry_low, max_entry)
+            _notify(f"⚠️ *ENTRY REJECTED — too far past trigger*\nLTP ₹{entry_price:.2f} > mid {midpoint:.0f} (trigger {sig.entry_low:.0f}→T1 {max_entry:.0f})\n{trade_symbol}")
+            return {"placed": False, "reason": f"LTP {entry_price} past midpoint {midpoint:.1f}"}
     if max_entry > 0 and entry_price > max_entry:
         log.warning("ENTRY REJECTED: LTP %.2f > T1 %.2f (too far past entry)", entry_price, max_entry)
         _notify(f"⚠️ *ENTRY REJECTED — price past T1*\nLTP ₹{entry_price:.2f} > T1 {max_entry}\n{trade_symbol}")
