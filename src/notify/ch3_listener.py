@@ -1021,12 +1021,16 @@ async def start_listener() -> None:
                                 if sig:
                                     log.info("[CH3] POLL signal: %s %s %s trigger=%.2f",
                                              sig.symbol, sig.strike, sig.option_type, sig.trigger_price)
-                                    _notify(f"📡 [CH3] Poll caught signal: {sig.symbol} {sig.strike} {sig.option_type}")
 
                                     async def _poll_exec(_s=sig):
                                         try:
+                                            _notify(f"📡 [CH3] Poll caught signal: {_s.symbol} {_s.strike} {_s.option_type}")
+                                            import time as _pt
+                                            _pt0 = _pt.monotonic()
+                                            log.info("[CH3] TIMING: poll_exec dispatching to executor")
                                             _loop = asyncio.get_event_loop()
                                             res = await _loop.run_in_executor(None, lambda: execute_signal(_s))
+                                            log.info("[CH3] TIMING: poll_exec total (incl execute_signal) %.1fs", _pt.monotonic() - _pt0)
                                             if res["placed"]:
                                                 _notify(f"✅ [CH3] POLL order placed\n{res['symbol']} x{res['qty']}\nEntry: {res['entry']}")
                                                 log.info("[CH3] Poll order placed: %s", res)
