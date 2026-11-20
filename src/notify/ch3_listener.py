@@ -286,9 +286,11 @@ def _todays_realised_pnl() -> float:
 # Trade execution
 # ---------------------------------------------------------------------------
 def execute_signal(sig: ParsedSignal, *, filter_score: int | None = None) -> dict[str, Any]:
+    import time as _time
     from src.broker.upstox_client import UpstoxClient
     from src.storage import db
 
+    t0 = _time.monotonic()
     db.init_db()
 
     ch_pnl = _todays_realised_pnl()
@@ -312,9 +314,16 @@ def execute_signal(sig: ParsedSignal, *, filter_score: int | None = None) -> dic
     if risk_per_unit <= 0:
         return {"placed": False, "reason": "SL >= trigger price"}
 
+    t1 = _time.monotonic()
+    log.info("[CH3] TIMING: pre-checks %.1fs", t1 - t0)
+
     try:
         uc = UpstoxClient()
+        t2 = _time.monotonic()
+        log.info("[CH3] TIMING: UpstoxClient init %.1fs", t2 - t1)
         opt, master_lot_size = _resolve_channel_option(uc, sig.symbol, sig.strike, sig.option_type)
+        t3 = _time.monotonic()
+        log.info("[CH3] TIMING: resolve_option %.1fs", t3 - t2)
     except Exception as exc:
         return {"placed": False, "reason": f"Option resolution failed: {exc}"}
 
@@ -328,7 +337,6 @@ def execute_signal(sig: ParsedSignal, *, filter_score: int | None = None) -> dic
     instrument_token = opt.get("instrument_key") or opt.get("instrument_token", "")
 
     # Fetch live LTP and wait for trigger if needed
-    import time as _time
     from src.broker.upstox_data import UpstoxData
 
     def _fetch_ltp() -> float:
@@ -344,8 +352,9 @@ def execute_signal(sig: ParsedSignal, *, filter_score: int | None = None) -> dic
             log.warning("LTP fetch failed: %s", exc)
         return 0.0
 
+    t4 = _time.monotonic()
     entry_price = _fetch_ltp() or sig.trigger_price
-    log.info("Live LTP for %s: %.2f (signal: %.2f)", instrument_token, entry_price, sig.trigger_price)
+    log.info("Live LTP for %s: %.2f (signal: %.2f) [fetch %.1fs, total %.1fs]", instrument_token, entry_price, sig.trigger_price, _time.monotonic() - t4, _time.monotonic() - t0)
 
     # Wait for trigger: if LTP < entry_low, poll every 1s for up to 3 min (short — don't block long)
     if sig.entry_low > 0 and entry_price < sig.entry_low:
