@@ -12,6 +12,7 @@ import asyncio
 import os
 import re
 import time as _time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
@@ -24,6 +25,7 @@ from src.utils.logging import get_logger
 
 log = get_logger("ch3_listener")
 
+_signal_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ch3-exec")
 
 # ---------------------------------------------------------------------------
 # Shared types & helpers
@@ -862,7 +864,7 @@ async def start_listener() -> None:
                 log.info("[CH3] CATCH-UP signal found (%s ago): %s %s %s",
                          datetime.now(_IST) - _msg.date.astimezone(_IST), _sig.symbol, _sig.strike, _sig.option_type)
                 loop = asyncio.get_event_loop()
-                _res = await loop.run_in_executor(None, lambda: execute_signal(_sig))
+                _res = await loop.run_in_executor(_signal_executor, lambda: execute_signal(_sig))
                 if _res["placed"]:
                     _notify(f"*[CH3] CATCH-UP order placed*\n{_res['symbol']} x{_res['qty']}\nEntry: {_res['entry']}")
                     log.info("[CH3] Catch-up order placed: %s", _res)
@@ -937,7 +939,7 @@ async def start_listener() -> None:
             async def _execute_in_background(_sig=sig, _fs=filter_score, _fl=filter_line, _rl=reason_lines, _ft=filter_tag):
                 try:
                     loop = asyncio.get_event_loop()
-                    result = await loop.run_in_executor(None, lambda: execute_signal(_sig, filter_score=_fs))
+                    result = await loop.run_in_executor(_signal_executor, lambda: execute_signal(_sig, filter_score=_fs))
                     _notify(
                         f"*[CH3] Signal received — {'executed' if result['placed'] else 'skipped'}{_ft}*\n"
                         f"{_sig.action} {_sig.symbol} {int(_sig.strike)} {_sig.option_type}\n"
@@ -1029,7 +1031,7 @@ async def start_listener() -> None:
                                             _pt0 = _pt.monotonic()
                                             log.info("[CH3] TIMING: poll_exec dispatching to executor")
                                             _loop = asyncio.get_event_loop()
-                                            res = await _loop.run_in_executor(None, lambda: execute_signal(_s))
+                                            res = await _loop.run_in_executor(_signal_executor, lambda: execute_signal(_s))
                                             log.info("[CH3] TIMING: poll_exec total (incl execute_signal) %.1fs", _pt.monotonic() - _pt0)
                                             if res["placed"]:
                                                 _notify(f"✅ [CH3] POLL order placed\n{res['symbol']} x{res['qty']}\nEntry: {res['entry']}")
