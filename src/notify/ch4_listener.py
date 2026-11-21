@@ -32,6 +32,22 @@ log = get_logger("ch4_listener")
 _signal_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ch4-exec")
 
 
+def _watchdog_ping():
+    """Ping the systemd watchdog (no-op if not running under systemd)."""
+    import socket
+    addr = os.environ.get("NOTIFY_SOCKET")
+    if not addr:
+        return
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        if addr[0] == "@":
+            addr = "\0" + addr[1:]
+        s.sendto(b"WATCHDOG=1", addr)
+        s.close()
+    except Exception:
+        pass
+
+
 @dataclass
 class ParsedSignal:
     action: str          # BUY / SELL
@@ -694,8 +710,13 @@ def _handle_followup(exit_price: float | None, original_sig: ParsedSignal | None
 async def _monitor_positions():
     from src.storage import db
     fail_count = 0
+    _wd_counter = 0
     while True:
         await asyncio.sleep(1)
+        _wd_counter += 1
+        if _wd_counter >= 60:
+            _watchdog_ping()
+            _wd_counter = 0
         try:
             db.init_db()
             with db.get_conn() as conn:
