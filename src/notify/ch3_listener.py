@@ -461,7 +461,7 @@ def execute_signal(sig: ParsedSignal, *, filter_score: int | None = None) -> dic
             gtt_id = uc.place_gtt_sl(
                 instrument_token=instrument_token,
                 quantity=qty,
-                trigger_price=sig.stop_loss,
+                trigger_price=actual_sl,
                 product=config.UPSTOX_PRODUCT,
             )
         finally:
@@ -469,7 +469,7 @@ def execute_signal(sig: ParsedSignal, *, filter_score: int | None = None) -> dic
         if gtt_id:
             with db.get_conn() as conn:
                 conn.execute("UPDATE trades SET gtt_order_id=? WHERE id=?", (gtt_id, trade_id))
-            log.info("[CH3] GTT SL placed: id=%s trade=%d trigger=%.2f", gtt_id, trade_id, sig.stop_loss)
+            log.info("[CH3] GTT SL placed: id=%s trade=%d trigger=%.2f", gtt_id, trade_id, actual_sl)
         else:
             log.warning("[CH3] GTT SL placement failed for trade %d — monitor SL only", trade_id)
     except Exception as gtt_exc:

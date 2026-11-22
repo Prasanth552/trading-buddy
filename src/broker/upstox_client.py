@@ -241,10 +241,14 @@ class UpstoxClient:
                 log.error("GTT SL place failed: %s", data)
                 return None
             resp_data = data.get("data", {})
-            gtt_id = (resp_data.get("gtt_order_id")
-                      or resp_data.get("order_id")
-                      or resp_data.get("id")
-                      or resp_data.get("gttOrderId"))
+            gtt_ids = resp_data.get("gtt_order_ids")
+            if isinstance(gtt_ids, list) and gtt_ids:
+                gtt_id = gtt_ids[0]
+            else:
+                gtt_id = (resp_data.get("gtt_order_id")
+                          or resp_data.get("order_id")
+                          or resp_data.get("id")
+                          or resp_data.get("gttOrderId"))
             log.info("GTT SL placed: id=%s token=%s trigger=%.2f full_response=%s",
                      gtt_id, instrument_token, trigger_price, data)
             return gtt_id
