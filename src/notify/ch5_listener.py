@@ -27,6 +27,26 @@ log = get_logger("ch5_listener")
 
 _signal_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ch5-exec")
 
+# Pre-initialized clients (avoid re-creating per trade for speed)
+_uc_client = None
+_ud_client = None
+
+
+def _get_uc():
+    global _uc_client
+    if _uc_client is None:
+        from src.broker.upstox_client import UpstoxClient
+        _uc_client = UpstoxClient()
+    return _uc_client
+
+
+def _get_ud():
+    global _ud_client
+    if _ud_client is None:
+        from src.broker.upstox_data import UpstoxData
+        _ud_client = UpstoxData()
+    return _ud_client
+
 # ---------------------------------------------------------------------------
 # Shared types & helpers
 # ---------------------------------------------------------------------------
@@ -298,7 +318,6 @@ def _todays_realised_pnl() -> float:
 def execute_signal(sig: ParsedSignal, filter_score: int | None = None) -> dict[str, Any]:
     t0 = _time.monotonic()
     from src.storage import db
-    from src.broker.upstox_client import UpstoxClient
     db.init_db()
 
     ch_pnl = _todays_realised_pnl()
@@ -328,7 +347,7 @@ def execute_signal(sig: ParsedSignal, filter_score: int | None = None) -> dict[s
     log.info("[CH5] TIMING: pre-checks %.1fs", t1 - t0)
 
     try:
-        uc = UpstoxClient()
+        uc = _get_uc()
         t2 = _time.monotonic()
         log.info("[CH5] TIMING: UpstoxClient init %.1fs", t2 - t1)
         opt, master_lot_size = _resolve_channel_option(uc, sig.symbol, sig.strike, sig.option_type)
@@ -347,11 +366,9 @@ def execute_signal(sig: ParsedSignal, filter_score: int | None = None) -> dict[s
     instrument_token = opt.get("instrument_key") or opt.get("instrument_token", "")
 
     # Fetch live LTP
-    from src.broker.upstox_data import UpstoxData
-
     def _fetch_ltp() -> float:
         try:
-            ud = UpstoxData()
+            ud = _get_ud()
             ltp_data = ud._get("/v2/market-quote/ltp",
                                params={"instrument_key": instrument_token}).get("data", {})
             for item in ltp_data.values():
@@ -644,8 +661,7 @@ async def _monitor_positions():
                 continue
 
             keys = {r["broker_key"]: r for r in rows}
-            from src.broker.upstox_data import UpstoxData
-            ud = UpstoxData()
+            ud = _get_ud()
             ltp_data = ud._get("/v2/market-quote/ltp",
                                params={"instrument_key": ",".join(keys)}).get("data", {})
 
@@ -777,8 +793,8 @@ async def start_listener() -> None:
         log.error("Invalid SIGNAL_CHANNEL5_ID: %s", ch5_id)
         return
 
-    # Use VIP session (second Telegram account)
-    session_path = os.path.join(os.path.dirname(__file__), "..", "..", "data", "telegram_vip")
+    # Dedicated CH5 session (same VIP account, separate SQLite to avoid locks)
+    session_path = os.path.join(os.path.dirname(__file__), "..", "..", "data", "telegram_ch5")
     client = TelegramClient(session_path, api_id, api_hash, catch_up=True)
 
     _telegram_connected = False
@@ -799,8 +815,7 @@ async def start_listener() -> None:
 
     # Pre-load instrument master
     try:
-        from src.broker.upstox_client import UpstoxClient
-        uc = UpstoxClient()
+        uc = _get_uc()
         instruments = uc.load_instruments()
         _build_instrument_index(instruments)
         log.info("[CH5] Instrument master pre-loaded + indexed")
