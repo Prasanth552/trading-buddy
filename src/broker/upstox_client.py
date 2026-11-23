@@ -271,7 +271,7 @@ class UpstoxClient:
             }],
         }
         try:
-            resp = requests.put(self.GTT_BASE, json=body, headers=self._headers(), timeout=15)
+            resp = requests.put(f"{self.GTT_BASE}/modify", json=body, headers=self._headers(), timeout=15)
             data = resp.json()
             if data.get("status") != "success":
                 log.error("GTT SL modify failed: %s", data)
@@ -289,7 +289,8 @@ class UpstoxClient:
             return True
         try:
             resp = requests.delete(
-                self.GTT_BASE, params={"gtt_order_id": gtt_order_id},
+                f"{self.GTT_BASE}/cancel",
+                json={"gtt_order_id": gtt_order_id},
                 headers=self._headers(), timeout=15,
             )
             data = resp.json()
