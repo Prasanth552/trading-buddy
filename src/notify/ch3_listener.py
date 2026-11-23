@@ -152,6 +152,14 @@ def parse_signal_ch3(text: str) -> ParsedSignal | None:
     strike = float(sym_m.group(2))
     option_type = sym_m.group(3)
 
+    # Fix truncated strikes (e.g. channel types "8270" instead of "82700" for SENSEX)
+    if symbol_raw == "SENSEX" and strike < 10000:
+        strike = strike * 10
+        log.info("[CH3] SENSEX strike corrected: %s → %s (was < 10000)", sym_m.group(2), int(strike))
+    elif symbol_raw in ("NIFTY", "BANKNIFTY") and strike < 10000:
+        strike = strike * 10
+        log.info("[CH3] %s strike corrected: %s → %s (was < 10000)", symbol_raw, sym_m.group(2), int(strike))
+
     entry_m = re.search(r'(?:BUY\s*)?ABOVE\s*[:\s]*(\d+)\s*[-–]\s*(\d+)', upper)
     if not entry_m:
         return None
