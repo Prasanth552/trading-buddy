@@ -276,8 +276,12 @@ def _resolve_channel_option(uc, symbol: str, strike: float, option_type: str):
         log.info("Option cache hit: %s", cache_key)
         return _option_cache[cache_key]
 
-    instruments = uc.load_instruments()
-    _build_instrument_index(instruments)
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    today_str = datetime.now(ZoneInfo(config.TIMEZONE)).date().isoformat()
+    if _instrument_index_date != today_str or not _instrument_index:
+        instruments = uc.load_instruments()
+        _build_instrument_index(instruments)
 
     sym = symbol.replace(" ", "").upper()
     idx_key = f"{sym}|{strike}|{option_type}"
