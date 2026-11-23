@@ -1570,7 +1570,7 @@ def execute_signal(sig: ParsedSignal, *, channel: str = "ch1", max_lots: int | N
             if is_live:
                 config.UPSTOX_SIMULATE_ORDERS = False
             try:
-                order_type = "MARKET" if channel == "ch3" else "SL"
+                order_type = "MARKET" if channel in ("ch2", "ch3") else "SL"
                 result = uc.place_order(
                     instrument_token=instrument_token,
                     quantity=qty,
@@ -6197,49 +6197,74 @@ async def start_listener() -> None:
                 if not is_above_in_text and not is_near_in_text:
                     is_above = _ch2_last_is_above
                 if is_above:
-                    _ch2_trigger_held = sig
-                    _ch2_trigger_held_msg_id = completed_buffer_start or event.message.id
-                    _ch2_trigger_held_is_fallback = False
-                    _ch2_trigger_held_is_reentry = False
                     _ch2_queued_signal = None
                     if _ch2_queued_task:
                         _ch2_queued_task.cancel()
                         _ch2_queued_task = None
-                    log.info("[CH2] ABOVE signal — auto-held until Active: %s %s %s trigger=%.0f",
-                             sig.symbol, int(sig.strike), sig.option_type, sig.trigger_price)
-                    _notify(f"[CH2] Signal held (ABOVE trigger):\n"
-                            f"{sig.symbol} {int(sig.strike)} {sig.option_type} ABOVE {sig.trigger_price}\n"
-                            f"SL: {sig.stop_loss} | TGT: {sig.targets[0] if sig.targets else 0}\n"
-                            f"Waiting for Active...")
+                    _above_msg_id = completed_buffer_start or event.message.id
+
+                    # Fast entry: check LTP immediately — if already above trigger, enter now
+                    _ch2_above_entered = False
+                    if sig.trigger_price > 0:
+                        try:
+                            from src.broker.upstox_client import UpstoxClient
+                            uc = UpstoxClient()
+                            use_monthly = False
+                            opt, _ = _resolve_channel_option(
+                                uc, sig.symbol, sig.strike, sig.option_type, monthly=use_monthly)
+                            if opt:
+                                _inst_key = opt.get("instrument_key") or opt.get("instrument_token", "")
+                                if _inst_key:
+                                    from src.broker.upstox_data import UpstoxData, load_cached_token
+                                    _tok = load_cached_token()
+                                    if _tok:
+                                        _ud = UpstoxData(access_token=_tok)
+                                        _ltp_data = _ud._get(
+                                            "/v2/market-quote/ltp",
+                                            params={"instrument_key": _inst_key}
+                                        ).get("data", {})
+                                        for _item in _ltp_data.values():
+                                            _ltp = _item.get("last_price")
+                                            if _ltp and _ltp > 0 and _ltp >= sig.trigger_price:
+                                                log.info("[CH2] ABOVE immediate entry: LTP %.2f >= trigger %.2f",
+                                                         _ltp, sig.trigger_price)
+                                                _notify(f"[CH2] ABOVE immediate entry:\n"
+                                                        f"LTP {_ltp:.1f} >= trigger {sig.trigger_price:.0f}\n"
+                                                        f"{sig.symbol} {int(sig.strike)} {sig.option_type}")
+                                                if _ch2_can_execute(sig, _above_msg_id, origin_msg_id=_above_msg_id):
+                                                    await asyncio.to_thread(_execute_and_notify, sig, channel, ch_label)
+                                                _ch2_above_entered = True
+                                            break
+                        except Exception as exc:
+                            log.warning("[CH2] ABOVE LTP check failed: %s", exc)
+
+                    if not _ch2_above_entered:
+                        _ch2_trigger_held = sig
+                        _ch2_trigger_held_msg_id = _above_msg_id
+                        _ch2_trigger_held_is_fallback = False
+                        _ch2_trigger_held_is_reentry = False
+                        log.info("[CH2] ABOVE signal — held (LTP below trigger): %s %s %s trigger=%.0f",
+                                 sig.symbol, int(sig.strike), sig.option_type, sig.trigger_price)
+                        _notify(f"[CH2] Signal held (ABOVE trigger):\n"
+                                f"{sig.symbol} {int(sig.strike)} {sig.option_type} ABOVE {sig.trigger_price}\n"
+                                f"SL: {sig.stop_loss} | TGT: {sig.targets[0] if sig.targets else 0}\n"
+                                f"Waiting for price or Active...")
                     return
 
-                # NEAR / immediate signal — queue with short delay for cancel protection
+                # NEAR / immediate signal — execute immediately (fast entry like CH3)
+                _ch2_last_near_flush_ts = _time.time()
+                _ch2_queued_signal = None
                 if _ch2_queued_task:
                     _ch2_queued_task.cancel()
-                _ch2_queued_signal = sig
-                _frozen_ch = channel
-                _frozen_lbl = ch_label
+                    _ch2_queued_task = None
                 _frozen_msg_id = event.message.id
-
-                async def _ch2_delayed_exec():
-                    global _ch2_queued_signal, _ch2_queued_task, _ch2_last_near_flush_ts
-                    await asyncio.sleep(5)
-                    if _ch2_queued_signal is sig:
-                        _ch2_queued_signal = None
-                        _ch2_queued_task = None
-                        _ch2_last_near_flush_ts = _time.time()
-                        if _ch2_can_execute(sig, _frozen_msg_id, origin_msg_id=_frozen_msg_id):
-                            await asyncio.to_thread(_execute_and_notify, sig, _frozen_ch, _frozen_lbl)
-                        else:
-                            log.info("[CH2] NEAR exec blocked by dedup: %s %s %s",
-                                     sig.symbol, int(sig.strike), sig.option_type)
-
-                _ch2_queued_task = asyncio.create_task(_ch2_delayed_exec())
-                log.info("[CH2] NEAR signal queued (5s): %s %s %s trigger=%.0f",
+                log.info("[CH2] NEAR signal — immediate entry: %s %s %s trigger=%.0f",
                          sig.symbol, int(sig.strike), sig.option_type, sig.trigger_price)
-                _notify(f"[CH2] Signal detected:\n"
-                        f"{sig.symbol} {int(sig.strike)} {sig.option_type} @ {sig.trigger_price}\n"
-                        f"SL: {sig.stop_loss} | TGT: {sig.targets[0] if sig.targets else 0}")
+                if _ch2_can_execute(sig, _frozen_msg_id, origin_msg_id=_frozen_msg_id):
+                    await asyncio.to_thread(_execute_and_notify, sig, channel, ch_label)
+                else:
+                    log.info("[CH2] NEAR exec blocked by dedup: %s %s %s",
+                             sig.symbol, int(sig.strike), sig.option_type)
                 return
 
             # --- Non-CH2: check ABOVE hold before executing ---
