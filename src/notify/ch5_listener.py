@@ -27,41 +27,21 @@ log = get_logger("ch5_listener")
 
 _signal_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ch5-exec")
 
-# Pre-initialized clients (avoid re-creating per trade for speed)
-_uc_client = None
-_ud_client = None
 
-
-def _get_uc():
-    global _uc_client
-    if _uc_client is None:
-        from src.broker.upstox_client import UpstoxClient
-        _uc_client = UpstoxClient()
-    return _uc_client
-
-
-def _refresh_uc():
-    """Force re-read token from disk (called on UDAPI100050)."""
-    global _uc_client
-    _uc_client = None
-    log.info("[CH5] Refreshed UpstoxClient — re-reading token from disk")
-    return _get_uc()
-
-
-def _get_ud():
-    global _ud_client
-    if _ud_client is None:
-        from src.broker.upstox_data import UpstoxData
-        _ud_client = UpstoxData()
-    return _ud_client
-
-
-def _refresh_ud():
-    """Force re-read token from disk for UpstoxData (called on UDAPI100050)."""
-    global _ud_client
-    _ud_client = None
-    log.info("[CH5] Refreshed UpstoxData — re-reading token from disk")
-    return _get_ud()
+def _watchdog_ping():
+    """Ping the systemd watchdog (no-op if not running under systemd)."""
+    import socket
+    addr = os.environ.get("NOTIFY_SOCKET")
+    if not addr:
+        return
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+        if addr[0] == "@":
+            addr = "\0" + addr[1:]
+        s.sendto(b"WATCHDOG=1", addr)
+        s.close()
+    except Exception:
+        pass
 
 # ---------------------------------------------------------------------------
 # Shared types & helpers
@@ -410,7 +390,8 @@ def execute_signal(sig: ParsedSignal, filter_score: int | None = None) -> dict[s
     log.info("[CH5] TIMING: pre-checks %.1fs", t1 - t0)
 
     try:
-        uc = _get_uc()
+        from src.broker.upstox_client import UpstoxClient
+        uc = UpstoxClient()
         t2 = _time.monotonic()
         log.info("[CH5] TIMING: UpstoxClient init %.1fs", t2 - t1)
         opt, master_lot_size = _resolve_channel_option(uc, sig.symbol, sig.strike, sig.option_type,
@@ -430,9 +411,11 @@ def execute_signal(sig: ParsedSignal, filter_score: int | None = None) -> dict[s
     instrument_token = opt.get("instrument_key") or opt.get("instrument_token", "")
 
     # Fetch live LTP
+    from src.broker.upstox_data import UpstoxData
+
     def _fetch_ltp() -> float:
         try:
-            ud = _get_ud()
+            ud = UpstoxData()
             ltp_data = ud._get("/v2/market-quote/ltp",
                                params={"instrument_key": instrument_token}).get("data", {})
             for item in ltp_data.values():
@@ -440,18 +423,6 @@ def execute_signal(sig: ParsedSignal, filter_score: int | None = None) -> dict[s
                 if lp and lp > 0:
                     return float(lp)
         except Exception as exc:
-            if "UDAPI100050" in str(exc):
-                log.warning("LTP fetch token expired — refreshing")
-                try:
-                    ud = _refresh_ud()
-                    ltp_data = ud._get("/v2/market-quote/ltp",
-                                       params={"instrument_key": instrument_token}).get("data", {})
-                    for item in ltp_data.values():
-                        lp = item.get("last_price")
-                        if lp and lp > 0:
-                            return float(lp)
-                except Exception:
-                    pass
             log.warning("LTP fetch failed: %s", exc)
         return 0.0
 
@@ -539,28 +510,7 @@ def execute_signal(sig: ParsedSignal, filter_score: int | None = None) -> dict[s
         finally:
             config.UPSTOX_SIMULATE_ORDERS = old_sim
     except Exception as exc:
-        if "UDAPI100050" in str(exc):
-            log.warning("[CH5] Token expired on order — refreshing and retrying once")
-            try:
-                uc = _refresh_uc()
-                old_sim2r = getattr(config, "UPSTOX_SIMULATE_ORDERS", False)
-                config.UPSTOX_SIMULATE_ORDERS = False
-                try:
-                    result = uc.place_order(
-                        instrument_token=instrument_token,
-                        quantity=qty,
-                        transaction_type="BUY",
-                        price=0,
-                        trigger_price=0,
-                        order_type="MARKET",
-                    )
-                    order_id = (result.get("order_ids") or ["?"])[0]
-                finally:
-                    config.UPSTOX_SIMULATE_ORDERS = old_sim2r
-            except Exception as exc2:
-                return {"placed": False, "reason": "Order failed after token refresh: " + str(exc2)}
-        else:
-            return {"placed": False, "reason": "Order failed: " + str(exc)}
+        return {"placed": False, "reason": "Order failed: " + str(exc)}
 
     trade_id = db.insert_trade(trade_row)
 
@@ -744,8 +694,13 @@ def _handle_followup(exit_price: float | None, original_sig: ParsedSignal | None
 async def _monitor_positions():
     from src.storage import db
     fail_count = 0
+    _wd_counter = 0
     while True:
         await asyncio.sleep(1)
+        _wd_counter += 1
+        if _wd_counter >= 60:
+            _watchdog_ping()
+            _wd_counter = 0
         try:
             db.init_db()
             with db.get_conn() as conn:
@@ -758,7 +713,8 @@ async def _monitor_positions():
                 continue
 
             keys = {r["broker_key"]: r for r in rows}
-            ud = _get_ud()
+            from src.broker.upstox_data import UpstoxData
+            ud = UpstoxData()
             ltp_data = ud._get("/v2/market-quote/ltp",
                                params={"instrument_key": ",".join(keys)}).get("data", {})
 
@@ -848,10 +804,6 @@ async def _monitor_positions():
                     _peak_net.pop(tid, None)
 
         except Exception as exc:
-            if "UDAPI100050" in str(exc):
-                log.warning("[CH5] Monitor token expired — refreshing clients")
-                _refresh_uc()
-                _refresh_ud()
             fail_count += 1
             if fail_count % 60 == 0:
                 log.error("[CH5] Monitor error (repeated %dx): %s", fail_count, exc)
@@ -916,7 +868,8 @@ async def start_listener() -> None:
 
     # Pre-load instrument master
     try:
-        uc = _get_uc()
+        from src.broker.upstox_client import UpstoxClient
+        uc = UpstoxClient()
         instruments = uc.load_instruments()
         _build_instrument_index(instruments)
         log.info("[CH5] Instrument master pre-loaded + indexed")
