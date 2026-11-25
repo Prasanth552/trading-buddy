@@ -61,6 +61,7 @@ class ParsedSignal:
     targets: list[float]
     is_hero_zero: bool = False
     is_btst: bool = False
+    expiry_date: str | None = None  # "YYYY-MM-DD" if channel specifies expiry
 
 
 def calc_charges(entry_price: float, exit_price: float, qty: int) -> dict[str, float]:
@@ -185,6 +186,35 @@ def parse_signal_ch5(text: str) -> ParsedSignal | None:
     if not targets:
         targets = [round(trigger + 40), round(trigger + 80)]
 
+    # Parse expiry: "26 NOVEMBER EXPIRY" or "3 DEC EXPIRY" or "26 NOV"
+    expiry_date = None
+    _MONTHS = {
+        "JAN": 1, "JANUARY": 1, "FEB": 2, "FEBRUARY": 2, "MAR": 3, "MARCH": 3,
+        "APR": 4, "APRIL": 4, "MAY": 5, "JUN": 6, "JUNE": 6,
+        "JUL": 7, "JULY": 7, "AUG": 8, "AUGUST": 8, "SEP": 9, "SEPTEMBER": 9,
+        "OCT": 10, "OCTOBER": 10, "NOV": 11, "NOVEMBER": 11, "DEC": 12, "DECEMBER": 12,
+    }
+    exp_m = re.search(
+        r'(\d{1,2})\s+(JAN(?:UARY)?|FEB(?:RUARY)?|MAR(?:CH)?|APR(?:IL)?|MAY|JUNE?'
+        r'|JULY?|AUG(?:UST)?|SEP(?:TEMBER)?|OCT(?:OBER)?|NOV(?:EMBER)?|DEC(?:EMBER)?)',
+        upper,
+    )
+    if exp_m:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        day = int(exp_m.group(1))
+        month = _MONTHS.get(exp_m.group(2))
+        if month:
+            year = datetime.now(ZoneInfo(config.TIMEZONE)).year
+            try:
+                from datetime import date as _date
+                exp_d = _date(year, month, day)
+                if exp_d < datetime.now(ZoneInfo(config.TIMEZONE)).date():
+                    exp_d = _date(year + 1, month, day)
+                expiry_date = exp_d.isoformat()
+            except ValueError:
+                pass
+
     # Skip hero-zero signals (SL=0, tiny premium — too risky for auto-trading)
     if is_hero_zero:
         log.info("[CH5] Hero-zero signal skipped: %s %s %s", symbol_raw, strike, option_type)
@@ -200,6 +230,7 @@ def parse_signal_ch5(text: str) -> ParsedSignal | None:
         targets=targets,
         is_hero_zero=is_hero_zero,
         is_btst=is_btst,
+        expiry_date=expiry_date,
     )
 
 
@@ -273,8 +304,9 @@ def _build_instrument_index(instruments: list) -> None:
     log.info("Instrument index built: %d keys", len(idx))
 
 
-def _resolve_channel_option(uc, symbol: str, strike: float, option_type: str):
-    cache_key = f"{symbol}|{strike}|{option_type}"
+def _resolve_channel_option(uc, symbol: str, strike: float, option_type: str,
+                            expiry_date: str | None = None):
+    cache_key = f"{symbol}|{strike}|{option_type}|{expiry_date or ''}"
     if cache_key in _option_cache:
         log.info("Option cache hit: %s", cache_key)
         return _option_cache[cache_key]
@@ -289,7 +321,22 @@ def _resolve_channel_option(uc, symbol: str, strike: float, option_type: str):
     if not candidates:
         return None, 1
 
-    chosen = candidates[0][1]
+    chosen = None
+    if expiry_date:
+        from datetime import date as _date
+        target_exp = _date.fromisoformat(expiry_date)
+        for exp, inst in candidates:
+            if exp == target_exp:
+                chosen = inst
+                break
+        if chosen:
+            log.info("Matched exact expiry %s for %s", expiry_date, idx_key)
+        else:
+            log.warning("Expiry %s not found for %s, falling back to nearest", expiry_date, idx_key)
+
+    if chosen is None:
+        chosen = candidates[0][1]
+
     lot_size = int(chosen.get("lot_size", 1)) or 1
     _option_cache[cache_key] = (chosen, lot_size)
     return chosen, lot_size
@@ -350,7 +397,8 @@ def execute_signal(sig: ParsedSignal, filter_score: int | None = None) -> dict[s
         uc = _get_uc()
         t2 = _time.monotonic()
         log.info("[CH5] TIMING: UpstoxClient init %.1fs", t2 - t1)
-        opt, master_lot_size = _resolve_channel_option(uc, sig.symbol, sig.strike, sig.option_type)
+        opt, master_lot_size = _resolve_channel_option(uc, sig.symbol, sig.strike, sig.option_type,
+                                                        sig.expiry_date)
         t3 = _time.monotonic()
         log.info("[CH5] TIMING: resolve_option %.1fs", t3 - t2)
     except Exception as exc:
@@ -880,9 +928,9 @@ async def start_listener() -> None:
         sig = parse_signal_ch5(text)
 
         if sig is not None:
-            log.info("[CH5] Parsed signal: %s %s %s trigger=%.2f SL=%.2f targets=%s",
+            log.info("[CH5] Parsed signal: %s %s %s trigger=%.2f SL=%.2f targets=%s expiry=%s",
                      sig.symbol, sig.strike, sig.option_type,
-                     sig.trigger_price, sig.stop_loss, sig.targets)
+                     sig.trigger_price, sig.stop_loss, sig.targets, sig.expiry_date)
 
             async def _execute_in_background(_sig=sig):
                 try:
