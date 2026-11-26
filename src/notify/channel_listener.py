@@ -6206,12 +6206,12 @@ async def start_listener() -> None:
                     # Fast entry: check LTP immediately — if already above trigger, enter now
                     _ch2_above_entered = False
                     if sig.trigger_price > 0:
+                        _ch2_ltp_above = False
                         try:
                             from src.broker.upstox_client import UpstoxClient
                             uc = UpstoxClient()
-                            use_monthly = False
                             opt, _ = _resolve_channel_option(
-                                uc, sig.symbol, sig.strike, sig.option_type, monthly=use_monthly)
+                                uc, sig.symbol, sig.strike, sig.option_type, monthly=False)
                             if opt:
                                 _inst_key = opt.get("instrument_key") or opt.get("instrument_token", "")
                                 if _inst_key:
@@ -6226,17 +6226,29 @@ async def start_listener() -> None:
                                         for _item in _ltp_data.values():
                                             _ltp = _item.get("last_price")
                                             if _ltp and _ltp > 0 and _ltp >= sig.trigger_price:
-                                                log.info("[CH2] ABOVE immediate entry: LTP %.2f >= trigger %.2f",
+                                                _ch2_ltp_above = True
+                                                log.info("[CH2] ABOVE LTP check: %.2f >= trigger %.2f — will enter",
                                                          _ltp, sig.trigger_price)
-                                                _notify(f"[CH2] ABOVE immediate entry:\n"
-                                                        f"LTP {_ltp:.1f} >= trigger {sig.trigger_price:.0f}\n"
-                                                        f"{sig.symbol} {int(sig.strike)} {sig.option_type}")
-                                                if _ch2_can_execute(sig, _above_msg_id, origin_msg_id=_above_msg_id):
-                                                    await asyncio.to_thread(_execute_and_notify, sig, channel, ch_label)
-                                                _ch2_above_entered = True
+                                            else:
+                                                log.info("[CH2] ABOVE LTP check: %.2f < trigger %.2f — holding",
+                                                         _ltp if _ltp else 0, sig.trigger_price)
                                             break
                         except Exception as exc:
                             log.warning("[CH2] ABOVE LTP check failed: %s", exc)
+
+                        if _ch2_ltp_above:
+                            _notify(f"[CH2] ABOVE immediate entry:\n"
+                                    f"{sig.symbol} {int(sig.strike)} {sig.option_type}")
+                            if _ch2_can_execute(sig, _above_msg_id, origin_msg_id=_above_msg_id):
+                                log.info("[CH2] ABOVE dedup passed — executing via thread")
+                                try:
+                                    await asyncio.to_thread(_execute_and_notify, sig, channel, ch_label)
+                                    log.info("[CH2] ABOVE execution thread completed")
+                                except Exception as exc:
+                                    log.error("[CH2] ABOVE execution FAILED: %s", exc, exc_info=True)
+                            else:
+                                log.info("[CH2] ABOVE exec blocked by dedup")
+                            _ch2_above_entered = True
 
                     if not _ch2_above_entered:
                         _ch2_trigger_held = sig
@@ -6261,7 +6273,12 @@ async def start_listener() -> None:
                 log.info("[CH2] NEAR signal — immediate entry: %s %s %s trigger=%.0f",
                          sig.symbol, int(sig.strike), sig.option_type, sig.trigger_price)
                 if _ch2_can_execute(sig, _frozen_msg_id, origin_msg_id=_frozen_msg_id):
-                    await asyncio.to_thread(_execute_and_notify, sig, channel, ch_label)
+                    log.info("[CH2] NEAR dedup passed — executing via thread")
+                    try:
+                        await asyncio.to_thread(_execute_and_notify, sig, channel, ch_label)
+                        log.info("[CH2] NEAR execution thread completed")
+                    except Exception as exc:
+                        log.error("[CH2] NEAR execution FAILED: %s", exc, exc_info=True)
                 else:
                     log.info("[CH2] NEAR exec blocked by dedup: %s %s %s",
                              sig.symbol, int(sig.strike), sig.option_type)
