@@ -785,7 +785,7 @@ async def _monitor_positions():
                                 conn.execute(
                                     "UPDATE trades SET stop_price=?, target_price=?, targets_remaining=? WHERE id=?",
                                     (new_sl, new_tgt, new_remaining, tid))
-                            _gtt_id = trade.get("gtt_order_id")
+                            _gtt_id = trade["gtt_order_id"] if "gtt_order_id" in trade.keys() else None
                             if _gtt_id:
                                 try:
                                     from src.broker.upstox_client import UpstoxClient as _Uc2
