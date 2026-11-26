@@ -25,7 +25,7 @@ from src.utils.logging import get_logger
 
 log = get_logger("ch5_listener")
 
-_signal_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ch5-exec")
+_signal_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ch5-exec")
 
 
 def _watchdog_ping():
@@ -307,8 +307,10 @@ def _resolve_channel_option(uc, symbol: str, strike: float, option_type: str,
         log.info("Option cache hit: %s", cache_key)
         return _option_cache[cache_key]
 
-    instruments = uc.load_instruments()
+    from src.broker.upstox_client import load_fo_instruments
+    instruments = load_fo_instruments()
     _build_instrument_index(instruments)
+    del instruments
 
     sym = symbol.replace(" ", "").upper()
     idx_key = f"{sym}|{strike}|{option_type}"
@@ -868,10 +870,10 @@ async def start_listener() -> None:
 
     # Pre-load instrument master
     try:
-        from src.broker.upstox_client import UpstoxClient
-        uc = UpstoxClient()
-        instruments = uc.load_instruments()
+        from src.broker.upstox_client import load_fo_instruments
+        instruments = load_fo_instruments()
         _build_instrument_index(instruments)
+        del instruments
         log.info("[CH5] Instrument master pre-loaded + indexed")
     except Exception as exc:
         log.warning("[CH5] Instrument pre-load failed (will retry on first trade): %s", exc)

@@ -25,7 +25,7 @@ from src.utils.logging import get_logger
 
 log = get_logger("ch3_listener")
 
-_signal_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ch3-exec")
+_signal_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ch3-exec")
 
 
 def _watchdog_ping():
@@ -280,8 +280,10 @@ def _resolve_channel_option(uc, symbol: str, strike: float, option_type: str):
     from zoneinfo import ZoneInfo
     today_str = datetime.now(ZoneInfo(config.TIMEZONE)).date().isoformat()
     if _instrument_index_date != today_str or not _instrument_index:
-        instruments = uc.load_instruments()
+        from src.broker.upstox_client import load_fo_instruments
+        instruments = load_fo_instruments()
         _build_instrument_index(instruments)
+        del instruments
 
     sym = symbol.replace(" ", "").upper()
     idx_key = f"{sym}|{strike}|{option_type}"
@@ -870,10 +872,10 @@ async def start_listener() -> None:
 
     # Pre-load instrument master so first trade doesn't wait 14s
     try:
-        from src.broker.upstox_client import UpstoxClient
-        uc = UpstoxClient()
-        instruments = uc.load_instruments()
+        from src.broker.upstox_client import load_fo_instruments
+        instruments = load_fo_instruments()
         _build_instrument_index(instruments)
+        del instruments
         log.info("[CH3] Instrument master pre-loaded + indexed")
     except Exception as exc:
         log.warning("[CH3] Instrument pre-load failed (will retry on first trade): %s", exc)

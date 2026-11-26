@@ -84,6 +84,48 @@ def pick_upstox_option(
     return None
 
 
+_FO_SEGMENTS = {"NSE_FO", "BSE_FO"}
+_fo_cache_path: str | None = None
+
+
+def load_fo_instruments(url: str | None = None) -> list[dict[str, Any]]:
+    """Load only F&O instruments, caching to disk so multiple processes share one download.
+
+    First process of the day downloads the full master, filters to NSE_FO/BSE_FO,
+    writes the filtered list to data/instruments_fo_<date>.json (~5-8K instruments
+    instead of 136K). Subsequent processes read from that file — no download, no
+    160MB in-memory parse.
+    """
+    import config as _cfg
+    today = datetime.now(IST).strftime("%Y-%m-%d")
+    cache = os.path.join(_cfg.DATA_DIR, f"instruments_fo_{today}.json")
+
+    if os.path.exists(cache):
+        with open(cache) as f:
+            instruments = json.load(f)
+        log.info("Loaded %d F&O instruments from cache %s", len(instruments), cache)
+        return instruments
+
+    url = url or _cfg.UPSTOX_INSTRUMENTS_URL
+    log.info("Downloading Upstox instrument master (F&O filter)...")
+    raw = requests.get(url, timeout=120).content
+    all_instruments = json.loads(gzip.decompress(raw))
+    fo = [i for i in all_instruments if i.get("segment") in _FO_SEGMENTS]
+    log.info("Filtered %d -> %d F&O instruments", len(all_instruments), len(fo))
+    del all_instruments
+
+    with open(cache, "w") as f:
+        json.dump(fo, f, separators=(",", ":"))
+    # clean up old cache files
+    for name in os.listdir(_cfg.DATA_DIR):
+        if name.startswith("instruments_fo_") and name.endswith(".json") and name != os.path.basename(cache):
+            try:
+                os.remove(os.path.join(_cfg.DATA_DIR, name))
+            except OSError:
+                pass
+    return fo
+
+
 class UpstoxClient:
     """Thin Upstox order client (sandbox token-based)."""
 
