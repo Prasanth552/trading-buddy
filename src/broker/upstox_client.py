@@ -304,6 +304,7 @@ class UpstoxClient:
             log.info("GTT SL modify simulated: %s → %.2f", gtt_order_id, trigger_price)
             return True
         body = {
+            "type": "SINGLE",
             "gtt_order_id": gtt_order_id,
             "quantity": quantity,
             "rules": [{

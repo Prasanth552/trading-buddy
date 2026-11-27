@@ -782,10 +782,13 @@ async def _monitor_positions():
                                     _old_s = getattr(config, "UPSTOX_SIMULATE_ORDERS", False)
                                     config.UPSTOX_SIMULATE_ORDERS = False
                                     try:
-                                        _guc.modify_gtt_sl(_gtt_id, new_sl, qty)
+                                        _gtt_ok = _guc.modify_gtt_sl(_gtt_id, new_sl, qty)
                                     finally:
                                         config.UPSTOX_SIMULATE_ORDERS = _old_s
-                                    log.info("[CH3] GTT SL modified: %s → %.0f", _gtt_id, new_sl)
+                                    if _gtt_ok:
+                                        log.info("[CH3] GTT SL modified: %s → %.0f", _gtt_id, new_sl)
+                                    else:
+                                        log.error("[CH3] GTT SL modify FAILED: %s → %.0f (API rejected)", _gtt_id, new_sl)
                                 except Exception as _ge:
                                     log.warning("[CH3] GTT SL modify failed: %s", _ge)
                             log.info("[CH3] TGT TRAIL %s: SL→%.0f TGT→%.0f remaining=%s",
