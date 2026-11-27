@@ -460,7 +460,7 @@ def execute_signal(sig: ParsedSignal, filter_score: int | None = None) -> dict[s
     # Reject if price too far past trigger (must have >=50% of trigger->T1 range left)
     max_entry = sig.targets[0] if sig.targets else 0
     if max_entry > 0 and sig.trigger_price > 0:
-        midpoint = sig.trigger_price + (max_entry - sig.trigger_price) * 0.5
+        midpoint = sig.trigger_price + (max_entry - sig.trigger_price) * 0.75
         if entry_price > midpoint:
             log.warning("ENTRY REJECTED: LTP %.2f > midpoint %.2f (trigger=%.0f T1=%.0f)",
                         entry_price, midpoint, sig.trigger_price, max_entry)
