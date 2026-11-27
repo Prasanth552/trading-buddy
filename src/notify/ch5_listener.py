@@ -307,10 +307,13 @@ def _resolve_channel_option(uc, symbol: str, strike: float, option_type: str,
         log.info("Option cache hit: %s", cache_key)
         return _option_cache[cache_key]
 
-    from src.broker.upstox_client import load_fo_instruments
-    instruments = load_fo_instruments()
-    _build_instrument_index(instruments)
-    del instruments
+    from datetime import datetime as _dt
+    today_str = _dt.now().strftime("%Y-%m-%d")
+    if _instrument_index_date != today_str or not _instrument_index:
+        from src.broker.upstox_client import load_fo_instruments
+        instruments = load_fo_instruments()
+        _build_instrument_index(instruments)
+        del instruments
 
     sym = symbol.replace(" ", "").upper()
     idx_key = f"{sym}|{strike}|{option_type}"
@@ -996,6 +999,18 @@ async def start_listener() -> None:
             is_market = ist_now.weekday() < 5 and 9 <= ist_now.hour < 16
             await asyncio.sleep(5 if is_market else 60)
             try:
+                # Daily instrument index refresh (before market opens)
+                today_str = ist_now.strftime("%Y-%m-%d")
+                if _instrument_index_date != today_str:
+                    try:
+                        from src.broker.upstox_client import load_fo_instruments
+                        instruments = load_fo_instruments()
+                        _build_instrument_index(instruments)
+                        del instruments
+                        log.info("[CH5] Daily instrument index refreshed")
+                    except Exception as _ie:
+                        log.warning("[CH5] Daily instrument refresh failed: %s", _ie)
+
                 if not client.is_connected():
                     log.warning("[CH5] Health: connection lost — reconnecting...")
                     await client.connect()
