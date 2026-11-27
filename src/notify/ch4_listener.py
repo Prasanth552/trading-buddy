@@ -200,26 +200,30 @@ def parse_signal_ch4(text: str) -> ParsedSignal | None:
     if _KNOWN_STOCK_SYMBOLS and symbol_raw not in _KNOWN_STOCK_SYMBOLS:
         log.warning("[CH4] Symbol %s not in pre-loaded set — will attempt resolution anyway", symbol_raw)
 
-    entry_m = re.search(r'(?:BUY\s*)?ABOVE\s*[:\s]*(\d+)\s*[-–]\s*(\d+)', upper)
+    entry_m = re.search(r'(?:BUY\s*)?ABOVE\s*[:\s]*(\d+(?:\.\d+)?)\s*[-–]\s*(\d+(?:\.\d+)?)', upper)
     if not entry_m:
-        return None
-
-    entry_low = int(entry_m.group(1))
-    eh_raw = int(entry_m.group(2))
-    if eh_raw < entry_low:
-        entry_high = int(str(entry_low)[:-len(str(eh_raw))] + str(eh_raw))
+        entry_m_single = re.search(r'(?:BUY\s*)?ABOVE\s*[:\s]*(\d+(?:\.\d+)?)', upper)
+        if not entry_m_single:
+            return None
+        trigger = float(entry_m_single.group(1))
+        entry_low = trigger
+        entry_high = trigger
     else:
-        entry_high = eh_raw
+        entry_low = float(entry_m.group(1))
+        eh_raw = float(entry_m.group(2))
+        if eh_raw < entry_low:
+            entry_high = float(str(int(entry_low))[:-len(str(int(eh_raw)))] + str(int(eh_raw)))
+        else:
+            entry_high = eh_raw
+        trigger = (entry_low + entry_high) / 2.0
 
-    trigger = (entry_low + entry_high) / 2.0
+    sl_m = re.search(r'(?:STOP\s*LOSS|SL)\s*[:\s]*(\d+(?:\.\d+)?)', upper)
+    sl = float(sl_m.group(1)) if sl_m else round(trigger * 0.70, 2)
 
-    sl_m = re.search(r'(?:STOP\s*LOSS|SL)\s*[:\s]*(\d+)', upper)
-    sl = int(sl_m.group(1)) if sl_m else round(trigger * 0.70, 2)
-
-    tgt_m = re.search(r'(?:TARGET|TARGETS?)\s*[:\s]*([\d\s/\-+]+)', upper)
+    tgt_m = re.search(r'(?:TARGET|TARGETS?)\s*[:\s]*([\d\.\s/\-+]+)', upper)
     targets = []
     if tgt_m:
-        targets = [int(t) for t in re.findall(r'\d+', tgt_m.group(1))]
+        targets = [float(t) for t in re.findall(r'\d+(?:\.\d+)?', tgt_m.group(1))]
 
     if not targets:
         targets = [round(trigger + 20), round(trigger + 40), round(trigger + 60)]
