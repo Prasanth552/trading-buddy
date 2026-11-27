@@ -758,12 +758,12 @@ async def _monitor_positions():
                     _peak_net.pop(tid, None)
                     _notify(f"🛑 *MAX LOSS CAP* — {trade['symbol']}\nLoss: ₹{abs(net_pnl):,.0f} (cap: ₹{MAX_LOSS_PER_TRADE:,})")
 
-                # Target trailing — SL = target - 15 (breathing room)
+                # Target trailing — SL = target price (no buffer)
                 elif trade["target_price"] and ltp >= trade["target_price"]:
                     remaining = trade["targets_remaining"] or ""
                     if remaining:
                         next_tgts = [float(t) for t in remaining.split(",") if t.strip()]
-                        new_sl = trade["target_price"] - 15
+                        new_sl = trade["target_price"]
                         if next_tgts:
                             new_tgt = next_tgts.pop(0)
                             new_remaining = ",".join(str(int(t)) for t in next_tgts) if next_tgts else None
